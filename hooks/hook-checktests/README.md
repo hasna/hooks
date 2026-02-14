@@ -1,4 +1,4 @@
-# @hasnaxyz/hook-checktests
+# @hasna/hook-checktests
 
 Claude Code hook that checks for missing tests via a headless Claude agent. Runs async (non-blocking) on PostToolUse after file edits.
 
@@ -16,7 +16,7 @@ Claude Code hook that checks for missing tests via a headless Claude agent. Runs
 ### Global CLI
 
 ```bash
-bun add -g @hasnaxyz/hook-checktests
+bun add -g @hasna/hook-checktests
 hook-checktests install --global
 ```
 
@@ -24,7 +24,7 @@ hook-checktests install --global
 
 ```bash
 cd /path/to/your/project
-bunx @hasnaxyz/hook-checktests install
+bunx @hasna/hook-checktests install
 ```
 
 ## Requirements
@@ -62,7 +62,7 @@ Configuration is stored in `.claude/settings.json`:
       "matcher": { "tool_name": "^(Edit|Write|NotebookEdit)$" },
       "hooks": [{
         "type": "command",
-        "command": "bunx @hasnaxyz/hook-checktests@latest run",
+        "command": "bunx @hasna/hook-checktests@latest run",
         "timeout": 120,
         "async": true
       }]
@@ -134,4 +134,4 @@ State is persisted in `~/.claude/hook-state/checktests-{session_id}.json`:
 
 ## License
 
-MIT
+Apache-2.0

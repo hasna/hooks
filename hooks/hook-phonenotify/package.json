@@ -1,5 +1,5 @@
 {
-  "name": "@hasnaxyz/hook-phonenotify",
+  "name": "@hasna/hook-phonenotify",
   "version": "0.1.0",
   "description": "Claude Code hook that sends push notifications to phone via ntfy.sh",
   "type": "module",
@@ -24,13 +24,13 @@
   },
   "keywords": ["claude-code", "claude", "hook", "notifications", "phone", "ntfy", "push", "cli"],
   "author": "Hasna",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hasnaxyz/hook-phonenotify.git"
+    "url": "https://github.com/hasna/hooks.git"
   },
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "engines": { "node": ">=18", "bun": ">=1.0" },

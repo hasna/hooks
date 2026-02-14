@@ -9,7 +9,7 @@ Prevents Claude from running irreversible git commands like `git reset --hard`, 
 ## Installation
 
 ```bash
-bun install -g @hasnaxyz/hook-gitguard
+bun install -g @hasna/hook-gitguard
 hook-gitguard install
 ```
 
@@ -27,4 +27,4 @@ hook-gitguard install
 
 ## License
 
-MIT
+Apache-2.0

@@ -45,4 +45,4 @@ Dangerous patterns that are always blocked:
 
 ## License
 
-MIT
+Apache-2.0

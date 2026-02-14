@@ -9,7 +9,7 @@ Get notified on your phone when Claude finishes a task or needs your attention. 
 ## Installation
 
 ```bash
-bun install -g @hasnaxyz/hook-phonenotify
+bun install -g @hasna/hook-phonenotify
 hook-phonenotify install my-secret-topic
 ```
 
@@ -41,4 +41,4 @@ In `~/.claude/settings.json`:
 
 ## License
 
-MIT
+Apache-2.0

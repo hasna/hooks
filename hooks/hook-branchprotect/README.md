@@ -9,7 +9,7 @@ Forces a feature branch workflow by blocking all Write/Edit/NotebookEdit operati
 ## Installation
 
 ```bash
-bun install -g @hasnaxyz/hook-branchprotect
+bun install -g @hasna/hook-branchprotect
 hook-branchprotect install
 ```
 
@@ -22,4 +22,4 @@ hook-branchprotect install
 
 ## License
 
-MIT
+Apache-2.0

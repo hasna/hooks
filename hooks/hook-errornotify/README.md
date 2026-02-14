@@ -63,4 +63,4 @@ Errors are written to `.claude/errors.log`:
 
 ## License
 
-MIT
+Apache-2.0

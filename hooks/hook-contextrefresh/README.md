@@ -9,7 +9,7 @@ In long Claude Code sessions, important instructions can drift out of the active
 ## Installation
 
 ```bash
-bun install -g @hasnaxyz/hook-contextrefresh
+bun install -g @hasna/hook-contextrefresh
 hook-contextrefresh install 10  # inject every 10 prompts
 ```
 
@@ -39,4 +39,4 @@ In `~/.claude/settings.json`:
 
 ## License
 
-MIT
+Apache-2.0

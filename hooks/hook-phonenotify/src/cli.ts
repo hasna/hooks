@@ -46,7 +46,7 @@ function install(topic?: string): void {
   if (!settings.hooks.Stop) settings.hooks.Stop = [];
   if (!settings.hooks.Notification) settings.hooks.Notification = [];
 
-  const hookCommand = `bunx @hasnaxyz/${HOOK_NAME}`;
+  const hookCommand = `bunx @hasna/${HOOK_NAME}`;
 
   const existing = settings.hooks.Stop.find((h) =>
     h.hooks.some((hook) => hook.command.includes(HOOK_NAME))

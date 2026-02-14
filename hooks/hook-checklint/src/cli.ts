@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * @hasnaxyz/hook-checklint CLI
+ * @hasna/hook-checklint CLI
  *
  * Usage:
  *   hook-checklint install           Auto-detect location, configure options
@@ -18,7 +18,7 @@ import { join, dirname, resolve } from "path";
 import { homedir } from "os";
 import * as readline from "readline";
 
-const PACKAGE_NAME = "@hasnaxyz/hook-checklint";
+const PACKAGE_NAME = "@hasna/hook-checklint";
 const CONFIG_KEY = "checkLintConfig";
 
 // Colors

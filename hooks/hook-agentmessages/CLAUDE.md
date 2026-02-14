@@ -6,7 +6,7 @@ Instructions for working with hook-agentmessages codebase.
 
 **hook-agentmessages** is a Claude Code hook package that integrates with service-message for automatic agent registration and message notifications.
 
-- **Package:** `@hasnaxyz/hook-agentmessages`
+- **Package:** `@hasna/hook-agentmessages`
 - **CLI command:** `hook-agentmessages`
 - **Hooks location:** `~/.claude/settings.json`
 

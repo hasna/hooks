@@ -1,4 +1,4 @@
-# @hasnaxyz/hook-checklint
+# @hasna/hook-checklint
 
 Claude Code hook that runs linting after file edits and creates tasks for errors.
 
@@ -15,7 +15,7 @@ Claude Code hook that runs linting after file edits and creates tasks for errors
 ### Global CLI
 
 ```bash
-bun add -g @hasnaxyz/hook-checklint
+bun add -g @hasna/hook-checklint
 hook-checklint install --global
 ```
 
@@ -23,7 +23,7 @@ hook-checklint install --global
 
 ```bash
 cd /path/to/your/project
-bunx @hasnaxyz/hook-checklint install
+bunx @hasna/hook-checklint install
 ```
 
 ## Usage
@@ -58,7 +58,7 @@ Configuration is stored in `.claude/settings.json`:
       },
       "hooks": [{
         "type": "command",
-        "command": "bunx @hasnaxyz/hook-checklint@latest run",
+        "command": "bunx @hasna/hook-checklint@latest run",
         "timeout": 120
       }]
     }]
@@ -144,4 +144,4 @@ The hook maintains session state in `~/.claude/hook-state/checklint-{session_id}
 
 ## License
 
-MIT
+Apache-2.0

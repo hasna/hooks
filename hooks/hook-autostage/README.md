@@ -67,4 +67,4 @@ Activity is logged to stderr:
 
 ## License
 
-MIT
+Apache-2.0

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * @hasnaxyz/hook-checkdocs CLI
+ * @hasna/hook-checkdocs CLI
  *
  * Usage:
  *   hook-checkdocs install           Auto-detect location, configure options
@@ -18,7 +18,7 @@ import { join, dirname, resolve } from "path";
 import { homedir } from "os";
 import * as readline from "readline";
 
-const PACKAGE_NAME = "@hasnaxyz/hook-checkdocs";
+const PACKAGE_NAME = "@hasna/hook-checkdocs";
 const CONFIG_KEY = "checkDocsConfig";
 
 // Colors

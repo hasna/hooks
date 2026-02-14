@@ -9,7 +9,7 @@ Before `npm install`, `bun add`, `yarn add`, or `pnpm add`, this hook checks eac
 ## Installation
 
 ```bash
-bun install -g @hasnaxyz/hook-packageage
+bun install -g @hasna/hook-packageage
 hook-packageage install
 ```
 
@@ -30,4 +30,4 @@ hook-packageage check <pkg>   # Manually check a package
 
 ## License
 
-MIT
+Apache-2.0

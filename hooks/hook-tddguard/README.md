@@ -47,4 +47,4 @@ Before allowing edits to implementation files, this hook checks whether a corres
 
 ## License
 
-MIT
+Apache-2.0

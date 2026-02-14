@@ -8,7 +8,7 @@ Automatically registers projects and sessions when Claude Code starts, and check
 
 ```bash
 # Install globally
-bun install -g @hasnaxyz/hook-agentmessages
+bun install -g @hasna/hook-agentmessages
 
 # Install hooks into Claude Code
 hook-agentmessages install
@@ -99,9 +99,9 @@ The hook is designed to be lightweight:
 ## Requirements
 
 - Bun runtime
-- service-message (`@hasnaxyz/service-message`) installed and initialized
+- service-message (`@hasna/service-message`) installed and initialized
 - Claude Code with hooks support
 
 ## License
 
-MIT
+Apache-2.0

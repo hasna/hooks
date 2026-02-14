@@ -36,4 +36,4 @@ If both Biome and Prettier configs exist, Biome takes priority (it's faster).
 
 ## License
 
-MIT
+Apache-2.0

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * @hasnaxyz/hook-checktasks CLI
+ * @hasna/hook-checktasks CLI
  *
  * Usage:
  *   hook-checktasks install           Auto-detect location, configure task list
@@ -18,7 +18,7 @@ import { join, dirname, resolve } from "path";
 import { homedir } from "os";
 import * as readline from "readline";
 
-const PACKAGE_NAME = "@hasnaxyz/hook-checktasks";
+const PACKAGE_NAME = "@hasna/hook-checktasks";
 const CONFIG_KEY = "checkTasksConfig";
 
 // Colors

@@ -52,7 +52,7 @@ function install(): void {
 
   settings.hooks.PreToolUse.push({
     matcher: "Bash",
-    hooks: [{ type: "command", command: `bunx @hasnaxyz/${HOOK_NAME}` }],
+    hooks: [{ type: "command", command: `bunx @hasna/${HOOK_NAME}` }],
   });
 
   writeSettings(settings);

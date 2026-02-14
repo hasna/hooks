@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * @hasnaxyz/hook-checktests CLI
+ * @hasna/hook-checktests CLI
  *
  * Usage:
  *   hook-checktests install           Auto-detect location, configure options
@@ -18,7 +18,7 @@ import { join, dirname, resolve } from "path";
 import { homedir } from "os";
 import * as readline from "readline";
 
-const PACKAGE_NAME = "@hasnaxyz/hook-checktests";
+const PACKAGE_NAME = "@hasna/hook-checktests";
 const CONFIG_KEY = "checkTestsConfig";
 
 // Colors

@@ -1,4 +1,4 @@
-# @hasnaxyz/hook-checkbugs
+# @hasna/hook-checkbugs
 
 Claude Code hook that checks for bugs via a headless Codex agent. Runs async (non-blocking) on PostToolUse after file edits.
 
@@ -16,7 +16,7 @@ Claude Code hook that checks for bugs via a headless Codex agent. Runs async (no
 ### Global CLI
 
 ```bash
-bun add -g @hasnaxyz/hook-checkbugs
+bun add -g @hasna/hook-checkbugs
 hook-checkbugs install --global
 ```
 
@@ -24,7 +24,7 @@ hook-checkbugs install --global
 
 ```bash
 cd /path/to/your/project
-bunx @hasnaxyz/hook-checkbugs install
+bunx @hasna/hook-checkbugs install
 ```
 
 ## Requirements
@@ -62,7 +62,7 @@ Configuration is stored in `.claude/settings.json`:
       "matcher": { "tool_name": "^(Edit|Write|NotebookEdit)$" },
       "hooks": [{
         "type": "command",
-        "command": "bunx @hasnaxyz/hook-checkbugs@latest run",
+        "command": "bunx @hasna/hook-checkbugs@latest run",
         "timeout": 120,
         "async": true
       }]
@@ -137,4 +137,4 @@ State is persisted in `~/.claude/hook-state/checkbugs-{session_id}.json`:
 
 ## License
 
-MIT
+Apache-2.0

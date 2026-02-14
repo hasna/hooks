@@ -60,4 +60,4 @@ Always `{ "continue": true }` — sound plays asynchronously (fire-and-forget) a
 
 ## License
 
-MIT
+Apache-2.0

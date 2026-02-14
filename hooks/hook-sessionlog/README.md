@@ -45,4 +45,4 @@ Each line in the `.jsonl` file is a JSON object:
 
 ## License
 
-MIT
+Apache-2.0

@@ -1,5 +1,5 @@
 {
-  "name": "@hasnaxyz/hook-contextrefresh",
+  "name": "@hasna/hook-contextrefresh",
   "version": "0.1.0",
   "description": "Claude Code hook that re-injects important context every N prompts to prevent context decay",
   "type": "module",
@@ -24,13 +24,13 @@
   },
   "keywords": ["claude-code", "claude", "hook", "context", "refresh", "memory", "cli"],
   "author": "Hasna",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hasnaxyz/hook-contextrefresh.git"
+    "url": "https://github.com/hasna/hooks.git"
   },
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "engines": { "node": ">=18", "bun": ">=1.0" },

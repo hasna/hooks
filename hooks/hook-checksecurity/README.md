@@ -1,4 +1,4 @@
-# @hasnaxyz/hook-checksecurity
+# @hasna/hook-checksecurity
 
 Claude Code hook that runs security checks via Claude and Codex headless agents. This is a **blocker** hook on the Stop event.
 
@@ -16,7 +16,7 @@ Claude Code hook that runs security checks via Claude and Codex headless agents.
 ### Global CLI
 
 ```bash
-bun add -g @hasnaxyz/hook-checksecurity
+bun add -g @hasna/hook-checksecurity
 hook-checksecurity install --global
 ```
 
@@ -24,7 +24,7 @@ hook-checksecurity install --global
 
 ```bash
 cd /path/to/your/project
-bunx @hasnaxyz/hook-checksecurity install
+bunx @hasna/hook-checksecurity install
 ```
 
 ## Requirements
@@ -63,12 +63,12 @@ Configuration is stored in `.claude/settings.json`:
       "hooks": [
         {
           "type": "command",
-          "command": "bunx @hasnaxyz/hook-checksecurity@latest run",
+          "command": "bunx @hasna/hook-checksecurity@latest run",
           "timeout": 300
         },
         {
           "type": "command",
-          "command": "bunx @hasnaxyz/hook-checktasks@latest run"
+          "command": "bunx @hasna/hook-checktasks@latest run"
         }
       ]
     }]
@@ -145,8 +145,8 @@ For proper operation, checksecurity should run **before** checktasks:
   "hooks": {
     "Stop": [{
       "hooks": [
-        { "command": "bunx @hasnaxyz/hook-checksecurity@latest run" },
-        { "command": "bunx @hasnaxyz/hook-checktasks@latest run" }
+        { "command": "bunx @hasna/hook-checksecurity@latest run" },
+        { "command": "bunx @hasna/hook-checktasks@latest run" }
       ]
     }]
   }
@@ -155,4 +155,4 @@ For proper operation, checksecurity should run **before** checktasks:
 
 ## License
 
-MIT
+Apache-2.0

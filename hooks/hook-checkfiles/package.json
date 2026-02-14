@@ -1,5 +1,5 @@
 {
-  "name": "@hasnaxyz/hook-checkfiles",
+  "name": "@hasna/hook-checkfiles",
   "version": "0.1.1",
   "description": "Claude Code hook that runs headless agent to review files and create tasks",
   "type": "module",
@@ -35,13 +35,13 @@
     "cli"
   ],
   "author": "Hasna",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hasnaxyz/hook-checkfiles.git"
+    "url": "https://github.com/hasna/hooks.git"
   },
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "engines": {

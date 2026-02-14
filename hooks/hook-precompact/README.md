@@ -9,7 +9,7 @@ When Claude Code compacts the context (to free up token space), important state 
 ## Installation
 
 ```bash
-bun install -g @hasnaxyz/hook-precompact
+bun install -g @hasna/hook-precompact
 hook-precompact install
 ```
 
@@ -33,4 +33,4 @@ Each handoff file (`.claude-handoffs/`) contains:
 
 ## License
 
-MIT
+Apache-2.0

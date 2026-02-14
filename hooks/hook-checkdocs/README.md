@@ -1,4 +1,4 @@
-# @hasnaxyz/hook-checkdocs
+# @hasna/hook-checkdocs
 
 Claude Code hook that checks for missing documentation and creates tasks via service-implementation.
 
@@ -16,7 +16,7 @@ Claude Code hook that checks for missing documentation and creates tasks via ser
 ### Global CLI
 
 ```bash
-bun add -g @hasnaxyz/hook-checkdocs
+bun add -g @hasna/hook-checkdocs
 hook-checkdocs install --global
 ```
 
@@ -24,7 +24,7 @@ hook-checkdocs install --global
 
 ```bash
 cd /path/to/your/project
-bunx @hasnaxyz/hook-checkdocs install
+bunx @hasna/hook-checkdocs install
 ```
 
 ## Requirements
@@ -64,7 +64,7 @@ Configuration is stored in `.claude/settings.json`:
       },
       "hooks": [{
         "type": "command",
-        "command": "bunx @hasnaxyz/hook-checkdocs@latest run",
+        "command": "bunx @hasna/hook-checkdocs@latest run",
         "timeout": 120,
         "async": true
       }]
@@ -134,4 +134,4 @@ State is persisted in `~/.claude/hook-state/checkdocs-{session_id}.json`:
 
 ## License
 
-MIT
+Apache-2.0

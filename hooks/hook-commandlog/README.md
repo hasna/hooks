@@ -42,4 +42,4 @@ Each line in the log file:
 
 ## License
 
-MIT
+Apache-2.0

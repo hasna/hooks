@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * @hasnaxyz/hook-checksecurity CLI
+ * @hasna/hook-checksecurity CLI
  *
  * Usage:
  *   hook-checksecurity install           Auto-detect location, configure options
@@ -19,7 +19,7 @@ import { homedir } from "os";
 import { execSync } from "child_process";
 import * as readline from "readline";
 
-const PACKAGE_NAME = "@hasnaxyz/hook-checksecurity";
+const PACKAGE_NAME = "@hasna/hook-checksecurity";
 const CONFIG_KEY = "checkSecurityConfig";
 
 // Colors

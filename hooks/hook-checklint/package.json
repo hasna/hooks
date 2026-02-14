@@ -1,5 +1,5 @@
 {
-  "name": "@hasnaxyz/hook-checklint",
+  "name": "@hasna/hook-checklint",
   "version": "0.1.7",
   "description": "Claude Code hook that runs linting after file edits and creates tasks for errors",
   "type": "module",
@@ -36,13 +36,13 @@
     "cli"
   ],
   "author": "Hasna",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hasnaxyz/hook-checklint.git"
+    "url": "https://github.com/hasna/hooks.git"
   },
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "engines": {

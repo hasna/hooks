@@ -37,4 +37,4 @@ The hook skips warnings when:
 
 ## License
 
-MIT
+Apache-2.0

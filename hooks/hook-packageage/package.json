@@ -1,5 +1,5 @@
 {
-  "name": "@hasnaxyz/hook-packageage",
+  "name": "@hasna/hook-packageage",
   "version": "0.1.0",
   "description": "Claude Code hook that checks package age before install to warn on outdated or abandoned packages",
   "type": "module",
@@ -24,13 +24,13 @@
   },
   "keywords": ["claude-code", "claude", "hook", "package", "age", "outdated", "abandoned", "npm", "cli"],
   "author": "Hasna",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hasnaxyz/hook-packageage.git"
+    "url": "https://github.com/hasna/hooks.git"
   },
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "engines": { "node": ">=18", "bun": ">=1.0" },

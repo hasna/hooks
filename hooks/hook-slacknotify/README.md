@@ -59,4 +59,4 @@ The hook sends a message with:
 
 ## License
 
-MIT
+Apache-2.0

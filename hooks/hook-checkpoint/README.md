@@ -9,7 +9,7 @@ Before any `Write`, `Edit`, or `NotebookEdit` tool execution, this hook copies t
 ## Installation
 
 ```bash
-bun install -g @hasnaxyz/hook-checkpoint
+bun install -g @hasna/hook-checkpoint
 hook-checkpoint install
 ```
 
@@ -34,4 +34,4 @@ The `.claude-checkpoints/` directory is automatically added to `.gitignore`.
 
 ## License
 
-MIT
+Apache-2.0

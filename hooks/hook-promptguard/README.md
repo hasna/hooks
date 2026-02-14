@@ -61,4 +61,4 @@ Add or remove patterns in the `INJECTION_PATTERNS`, `CREDENTIAL_PATTERNS`, or `S
 
 ## License
 
-MIT
+Apache-2.0

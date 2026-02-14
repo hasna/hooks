@@ -1,5 +1,5 @@
 {
-  "name": "@hasnaxyz/hook-checkdocs",
+  "name": "@hasna/hook-checkdocs",
   "version": "0.1.6",
   "description": "Claude Code hook that checks for missing documentation and creates tasks",
   "type": "module",
@@ -36,13 +36,13 @@
     "cli"
   ],
   "author": "Hasna",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hasnaxyz/hook-checkdocs.git"
+    "url": "https://github.com/hasna/hooks.git"
   },
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "engines": {

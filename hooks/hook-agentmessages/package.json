@@ -1,5 +1,5 @@
 {
-  "name": "@hasnaxyz/hook-agentmessages",
+  "name": "@hasna/hook-agentmessages",
   "version": "0.2.1",
   "type": "module",
   "description": "Claude Code hook for service-message integration - auto-registers agents, sessions, and checks messages",
@@ -8,11 +8,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hasnaxyz/hook-agentmessages.git"
+    "url": "git+https://github.com/hasna/hooks.git"
   },
-  "homepage": "https://github.com/hasnaxyz/hook-agentmessages#readme",
+  "homepage": "https://github.com/hasna/hooks#readme",
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
@@ -27,5 +27,5 @@
     "typescript": "^5.7.2"
   },
   "author": "Hasna",
-  "license": "MIT"
+  "license": "Apache-2.0"
 }

@@ -59,4 +59,4 @@ For Bash commands, the hook:
 
 ## License
 
-MIT
+Apache-2.0

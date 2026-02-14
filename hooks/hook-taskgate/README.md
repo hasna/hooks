@@ -59,4 +59,4 @@ if (/\bdeploy\b/.test(description)) {
 
 ## License
 
-MIT
+Apache-2.0

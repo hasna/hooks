@@ -1,4 +1,4 @@
-# @hasnaxyz/hook-checkfiles
+# @hasna/hook-checkfiles
 
 Claude Code hook that runs a headless agent to review files and create tasks via service-implementation.
 
@@ -15,7 +15,7 @@ Claude Code hook that runs a headless agent to review files and create tasks via
 ### Global CLI
 
 ```bash
-bun add -g @hasnaxyz/hook-checkfiles
+bun add -g @hasna/hook-checkfiles
 hook-checkfiles install --global
 ```
 
@@ -23,7 +23,7 @@ hook-checkfiles install --global
 
 ```bash
 cd /path/to/your/project
-bunx @hasnaxyz/hook-checkfiles install
+bunx @hasna/hook-checkfiles install
 ```
 
 ## Requirements
@@ -63,7 +63,7 @@ Configuration is stored in `.claude/settings.json`:
       },
       "hooks": [{
         "type": "command",
-        "command": "bunx @hasnaxyz/hook-checkfiles@latest run",
+        "command": "bunx @hasna/hook-checkfiles@latest run",
         "timeout": 120,
         "async": true
       }]
@@ -138,4 +138,4 @@ State is persisted in `~/.claude/hook-state/checkfiles-{session_id}.json`:
 
 ## License
 
-MIT
+Apache-2.0

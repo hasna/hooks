@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 /**
- * @hasnaxyz/hook-checkbugs CLI
+ * @hasna/hook-checkbugs CLI
  *
  * Usage:
  *   hook-checkbugs install           Auto-detect location, configure options
@@ -18,7 +18,7 @@ import { join, dirname, resolve } from "path";
 import { homedir } from "os";
 import * as readline from "readline";
 
-const PACKAGE_NAME = "@hasnaxyz/hook-checkbugs";
+const PACKAGE_NAME = "@hasna/hook-checkbugs";
 const CONFIG_KEY = "checkBugsConfig";
 
 // Colors

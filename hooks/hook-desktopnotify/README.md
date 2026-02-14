@@ -47,4 +47,4 @@ sudo pacman -S libnotify
 
 ## License
 
-MIT
+Apache-2.0

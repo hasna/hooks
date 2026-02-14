@@ -1,5 +1,5 @@
 {
-  "name": "@hasnaxyz/hook-checkpoint",
+  "name": "@hasna/hook-checkpoint",
   "version": "0.1.0",
   "description": "Claude Code hook that creates shadow git snapshots before file modifications for easy rollback",
   "type": "module",
@@ -37,13 +37,13 @@
     "cli"
   ],
   "author": "Hasna",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hasnaxyz/hook-checkpoint.git"
+    "url": "https://github.com/hasna/hooks.git"
   },
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "engines": {

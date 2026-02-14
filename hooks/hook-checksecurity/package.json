@@ -1,5 +1,5 @@
 {
-  "name": "@hasnaxyz/hook-checksecurity",
+  "name": "@hasna/hook-checksecurity",
   "version": "0.1.4",
   "description": "Claude Code hook that runs security checks via Claude and Codex headless agents",
   "type": "module",
@@ -36,13 +36,13 @@
     "cli"
   ],
   "author": "Hasna",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hasnaxyz/hook-checksecurity.git"
+    "url": "https://github.com/hasna/hooks.git"
   },
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "engines": {

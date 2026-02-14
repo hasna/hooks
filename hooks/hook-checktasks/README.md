@@ -1,4 +1,4 @@
-# @hasnaxyz/hook-checktasks
+# @hasna/hook-checktasks
 
 A Claude Code hook that prevents Claude from stopping when there are pending tasks.
 
@@ -15,9 +15,9 @@ This hook intercepts Claude's "Stop" event and:
 ### 1. Install the CLI globally
 
 ```bash
-bun add -g @hasnaxyz/hook-checktasks
+bun add -g @hasna/hook-checktasks
 # or
-npm install -g @hasnaxyz/hook-checktasks
+npm install -g @hasna/hook-checktasks
 ```
 
 ### 2. Install the hook
@@ -72,7 +72,7 @@ Configuration is stored in `.claude/settings.json`:
 ```json
 {
   "hooks": {
-    "Stop": [{ "hooks": [{ "type": "command", "command": "bunx @hasnaxyz/hook-checktasks run" }] }]
+    "Stop": [{ "hooks": [{ "type": "command", "command": "bunx @hasna/hook-checktasks run" }] }]
   },
   "checkTasksConfig": {
     "taskListId": "myproject-dev",
@@ -141,4 +141,4 @@ Claude tries to stop
 
 ## License
 
-MIT
+Apache-2.0

@@ -1,5 +1,5 @@
 {
-  "name": "@hasnaxyz/hook-checktasks",
+  "name": "@hasna/hook-checktasks",
   "version": "1.0.8",
   "description": "Claude Code hook that prevents stopping when there are pending tasks",
   "type": "module",
@@ -34,13 +34,13 @@
     "cli"
   ],
   "author": "Hasna",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hasnaxyz/hook-checktasks.git"
+    "url": "https://github.com/hasna/hooks.git"
   },
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "engines": {

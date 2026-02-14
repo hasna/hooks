@@ -56,7 +56,7 @@ function install(interval?: string): void {
   }
 
   settings.hooks.UserPromptSubmit.push({
-    hooks: [{ type: "command", command: `bunx @hasnaxyz/${HOOK_NAME}` }],
+    hooks: [{ type: "command", command: `bunx @hasna/${HOOK_NAME}` }],
   });
 
   if (!settings.contextRefreshConfig) {

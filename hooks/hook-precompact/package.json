@@ -1,5 +1,5 @@
 {
-  "name": "@hasnaxyz/hook-precompact",
+  "name": "@hasna/hook-precompact",
   "version": "0.1.0",
   "description": "Claude Code hook that saves session state before context compaction",
   "type": "module",
@@ -24,13 +24,13 @@
   },
   "keywords": ["claude-code", "claude", "hook", "precompact", "context", "session", "state", "cli"],
   "author": "Hasna",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hasnaxyz/hook-precompact.git"
+    "url": "https://github.com/hasna/hooks.git"
   },
   "publishConfig": {
-    "access": "restricted",
+    "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "engines": { "node": ">=18", "bun": ">=1.0" },
