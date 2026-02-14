@@ -4,8 +4,12 @@ import { render } from "ink";
 import { Command } from "commander";
 import chalk from "chalk";
 import { existsSync, readFileSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import { homedir } from "os";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8"));
 import { App } from "./components/App.js";
 import {
   HOOKS,
@@ -35,7 +39,7 @@ function resolveScope(options: { global?: boolean; project?: boolean }): Scope {
 program
   .name("hooks")
   .description("Install hooks for AI coding agents")
-  .version("0.1.1");
+  .version(pkg.version);
 
 // Interactive mode (default)
 program
