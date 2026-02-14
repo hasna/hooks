@@ -1,0 +1,10 @@
+node_modules/
+bun.lock
+.env
+.env.*
+*.log
+dist/
+.DS_Store
+*.tgz
+.secrets/
+.connect/

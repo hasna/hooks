@@ -1,0 +1,31 @@
+{
+  "name": "@hasnaxyz/hook-agentmessages",
+  "version": "0.2.1",
+  "type": "module",
+  "description": "Claude Code hook for service-message integration - auto-registers agents, sessions, and checks messages",
+  "bin": {
+    "hook-agentmessages": "./bin/cli.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hasnaxyz/hook-agentmessages.git"
+  },
+  "homepage": "https://github.com/hasnaxyz/hook-agentmessages#readme",
+  "publishConfig": {
+    "access": "restricted",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "session-start": "bun run src/session-start.ts",
+    "check-messages": "bun run src/check-messages.ts",
+    "install-hook": "bun run src/install.ts",
+    "uninstall-hook": "bun run src/uninstall.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "^1.3.8",
+    "typescript": "^5.7.2"
+  },
+  "author": "Hasna",
+  "license": "MIT"
+}
