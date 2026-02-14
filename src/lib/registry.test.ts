@@ -11,7 +11,7 @@ import {
 
 describe("registry", () => {
   describe("HOOKS", () => {
-    test("contains 15 hooks", () => {
+    test("contains 30 hooks", () => {
       expect(HOOKS).toHaveLength(30);
     });
 

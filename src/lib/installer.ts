@@ -23,6 +23,20 @@ const HOOKS_DIR = existsSync(join(__dirname, "..", "..", "hooks", "hook-gitguard
 export type Scope = "global" | "project";
 export type Target = "claude" | "gemini" | "all";
 
+function normalizeHookName(name: string): string {
+  return name.startsWith("hook-") ? name : `hook-${name}`;
+}
+
+function shortHookName(name: string): string {
+  return normalizeHookName(name).replace("hook-", "");
+}
+
+function removeHookEntries(entries: any[], hookCommand: string): any[] {
+  return entries.filter(
+    (entry: any) => !entry.hooks?.some((h: any) => h.command === hookCommand)
+  );
+}
+
 /** Map our internal event names to each target's event names */
 const EVENT_MAP: Record<string, Record<string, string>> = {
   claude: {
@@ -68,8 +82,7 @@ export function getSettingsPath(scope: Scope = "global", target: "claude" | "gem
 }
 
 export function getHookPath(name: string): string {
-  const hookName = name.startsWith("hook-") ? name : `hook-${name}`;
-  return join(HOOKS_DIR, hookName);
+  return join(HOOKS_DIR, normalizeHookName(name));
 }
 
 export function hookExists(name: string): boolean {
@@ -82,7 +95,9 @@ function readSettings(scope: Scope = "global", target: "claude" | "gemini" = "cl
     if (existsSync(path)) {
       return JSON.parse(readFileSync(path, "utf-8"));
     }
-  } catch {}
+  } catch (error) {
+    console.warn(`[hooks] Failed to read settings at ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
   return {};
 }
 
@@ -100,8 +115,7 @@ function getTargetEventName(internalEvent: string, target: "claude" | "gemini"):
 }
 
 function installForTarget(name: string, scope: Scope, overwrite: boolean, target: "claude" | "gemini"): InstallResult {
-  const hookName = name.startsWith("hook-") ? name : `hook-${name}`;
-  const shortName = hookName.replace("hook-", "");
+  const shortName = shortHookName(name);
 
   if (!hookExists(shortName)) {
     return { hook: shortName, success: false, error: `Hook '${shortName}' not found`, target };
@@ -150,9 +164,7 @@ function registerHook(name: string, scope: Scope = "global", target: "claude" | 
 
   const hookCommand = `hooks run ${name}`;
 
-  settings.hooks[eventKey] = settings.hooks[eventKey].filter(
-    (entry: any) => !entry.hooks?.some((h: any) => h.command === hookCommand)
-  );
+  settings.hooks[eventKey] = removeHookEntries(settings.hooks[eventKey], hookCommand);
 
   const entry: Record<string, any> = {
     hooks: [{ type: "command", command: hookCommand }],
@@ -176,9 +188,7 @@ function unregisterHook(name: string, scope: Scope = "global", target: "claude" 
   if (!settings.hooks[eventKey]) return;
 
   const hookCommand = `hooks run ${name}`;
-  settings.hooks[eventKey] = settings.hooks[eventKey].filter(
-    (entry: any) => !entry.hooks?.some((h: any) => h.command === hookCommand)
-  );
+  settings.hooks[eventKey] = removeHookEntries(settings.hooks[eventKey], hookCommand);
 
   if (settings.hooks[eventKey].length === 0) {
     delete settings.hooks[eventKey];
@@ -218,13 +228,11 @@ export function getRegisteredHooks(scope: Scope = "global"): string[] {
   return getRegisteredHooksForTarget(scope, "claude");
 }
 
-export function getInstalledHooks(scope: Scope = "global"): string[] {
-  return getRegisteredHooks(scope);
-}
+/** @deprecated Use getRegisteredHooks instead */
+export const getInstalledHooks = getRegisteredHooks;
 
 export function removeHook(name: string, scope: Scope = "global", target: Target = "claude"): boolean {
-  const hookName = name.startsWith("hook-") ? name : `hook-${name}`;
-  const shortName = hookName.replace("hook-", "");
+  const shortName = shortHookName(name);
 
   if (target === "all") {
     const claudeRemoved = removeHookForTarget(shortName, scope, "claude");

@@ -11,7 +11,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { createServer } from "http";
 import { existsSync, readFileSync } from "fs";
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(readFileSync(join(__dirname, "..", "..", "package.json"), "utf-8"));
 
 import {
   HOOKS,
@@ -31,14 +35,26 @@ import {
   getHookPath,
   getSettingsPath,
   type Scope,
+  type InstallResult,
 } from "../lib/installer.js";
 
 export const MCP_PORT = 39427;
 
+function formatInstallResults(results: InstallResult[], extra?: Record<string, any>) {
+  const installed = results.filter((r) => r.success).map((r) => r.hook);
+  const failed = results.filter((r) => !r.success).map((r) => ({ hook: r.hook, error: r.error }));
+  return {
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({ installed, failed, total: results.length, success: installed.length, ...extra }),
+    }],
+  };
+}
+
 export function createHooksServer(): McpServer {
   const server = new McpServer({
     name: "@hasna/hooks",
-    version: "0.0.7",
+    version: pkg.version,
   });
 
   // --- Tools ---
@@ -98,18 +114,7 @@ export function createHooksServer(): McpServer {
     },
     async ({ hooks, scope, overwrite }) => {
       const results = hooks.map((name) => installHook(name, { scope, overwrite }));
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            installed: results.filter((r) => r.success).map((r) => r.hook),
-            failed: results.filter((r) => !r.success).map((r) => ({ hook: r.hook, error: r.error })),
-            total: results.length,
-            success: results.filter((r) => r.success).length,
-            scope,
-          }),
-        }],
-      };
+      return formatInstallResults(results, { scope });
     }
   );
 
@@ -128,17 +133,7 @@ export function createHooksServer(): McpServer {
       }
       const hooks = getHooksByCategory(cat).map((h) => h.name);
       const results = hooks.map((name) => installHook(name, { scope, overwrite }));
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            installed: results.filter((r) => r.success).map((r) => r.hook),
-            failed: results.filter((r) => !r.success).map((r) => ({ hook: r.hook, error: r.error })),
-            category: cat,
-            scope,
-          }),
-        }],
-      };
+      return formatInstallResults(results, { category: cat, scope });
     }
   );
 
@@ -151,18 +146,7 @@ export function createHooksServer(): McpServer {
     },
     async ({ scope, overwrite }) => {
       const results = HOOKS.map((h) => installHook(h.name, { scope, overwrite }));
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            installed: results.filter((r) => r.success).map((r) => r.hook),
-            failed: results.filter((r) => !r.success).map((r) => ({ hook: r.hook, error: r.error })),
-            total: results.length,
-            success: results.filter((r) => r.success).length,
-            scope,
-          }),
-        }],
-      };
+      return formatInstallResults(results, { scope });
     }
   );
 
@@ -337,7 +321,7 @@ export async function startSSEServer(port: number = MCP_PORT): Promise<void> {
       await transport.handlePostMessage(req, res, body);
     } else {
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ name: "@hasna/hooks", version: "0.0.7", transport: "sse", port }));
+      res.end(JSON.stringify({ name: "@hasna/hooks", version: pkg.version, transport: "sse", port }));
     }
   });
 

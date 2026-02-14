@@ -86,7 +86,7 @@ export function App({ initialHooks, overwrite = false }: AppProps) {
 
       {view === "main" && (
         <Box flexDirection="column">
-          <Text marginBottom={1}>What would you like to do?</Text>
+          <Box marginBottom={1}><Text>What would you like to do?</Text></Box>
           <SelectInput items={mainMenuItems} onSelect={handleMainSelect} />
           <Box marginTop={1}>
             <Text dimColor>Press q to quit</Text>
@@ -136,9 +136,9 @@ export function App({ initialHooks, overwrite = false }: AppProps) {
 
       {view === "done" && (
         <Box flexDirection="column">
-          <Text bold color="green" marginBottom={1}>
+          <Box marginBottom={1}><Text bold color="green">
             Installation complete!
-          </Text>
+          </Text></Box>
 
           {results.filter((r) => r.success).length > 0 && (
             <Box flexDirection="column" marginBottom={1}>

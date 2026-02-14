@@ -95,7 +95,7 @@ export const HOOKS: HookMeta[] = [
   {
     name: "checkbugs",
     displayName: "Check Bugs",
-    description: "Checks for bugs via Codex headless agent",
+    description: "Checks for bugs via headless agent",
     version: "0.1.6",
     category: "Code Quality",
     event: "PostToolUse",
@@ -127,7 +127,7 @@ export const HOOKS: HookMeta[] = [
   {
     name: "checksecurity",
     displayName: "Check Security",
-    description: "Runs security checks via Claude and Codex headless agents",
+    description: "Runs security checks via headless agents",
     version: "0.1.6",
     category: "Security",
     event: "PostToolUse",
