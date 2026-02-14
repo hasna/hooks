@@ -52,7 +52,7 @@ describe("CLI", () => {
   describe("hooks --help", () => {
     test("shows help text", async () => {
       const { stdout } = await run("--help");
-      expect(stdout).toContain("Install Claude Code hooks");
+      expect(stdout).toContain("Install hooks for AI coding agents");
     });
 
     test("shows all commands", async () => {

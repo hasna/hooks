@@ -1,8 +1,12 @@
 /**
- * Hook installer - registers hooks in Claude settings
+ * Hook installer - registers hooks in AI coding agent settings
+ *
+ * Supports:
+ * - Claude Code: ~/.claude/settings.json (PreToolUse, PostToolUse, Stop, Notification)
+ * - Gemini CLI: ~/.gemini/settings.json (BeforeTool, AfterTool, AfterAgent, Notification)
  *
  * Hooks run directly from the globally installed @hasna/hooks package.
- * No files are copied. The settings.json entry points to `hooks run <name>`.
+ * No files are copied. The settings entry points to `hooks run <name>`.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
@@ -12,55 +16,68 @@ import { fileURLToPath } from "url";
 import { getHook } from "./registry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// Resolve hooks dir: works both in dev (src/lib/) and bundled (bin/)
 const HOOKS_DIR = existsSync(join(__dirname, "..", "..", "hooks", "hook-gitguard"))
   ? join(__dirname, "..", "..", "hooks")
   : join(__dirname, "..", "hooks");
 
 export type Scope = "global" | "project";
+export type Target = "claude" | "gemini" | "all";
+
+/** Map our internal event names to each target's event names */
+const EVENT_MAP: Record<string, Record<string, string>> = {
+  claude: {
+    PreToolUse: "PreToolUse",
+    PostToolUse: "PostToolUse",
+    Stop: "Stop",
+    Notification: "Notification",
+  },
+  gemini: {
+    PreToolUse: "BeforeTool",
+    PostToolUse: "AfterTool",
+    Stop: "AfterAgent",
+    Notification: "Notification",
+  },
+};
+
+/** Settings file paths per target */
+function getTargetSettingsDir(target: "claude" | "gemini"): string {
+  if (target === "gemini") return ".gemini";
+  return ".claude";
+}
 
 export interface InstallResult {
   hook: string;
   success: boolean;
   error?: string;
   scope?: Scope;
+  target?: Target;
 }
 
 export interface InstallOptions {
   scope?: Scope;
   overwrite?: boolean;
+  target?: Target;
 }
 
-/**
- * Get the settings.json path for a scope
- */
-export function getSettingsPath(scope: Scope = "global"): string {
+export function getSettingsPath(scope: Scope = "global", target: "claude" | "gemini" = "claude"): string {
+  const dir = getTargetSettingsDir(target);
   if (scope === "project") {
-    return join(process.cwd(), ".claude", "settings.json");
+    return join(process.cwd(), dir, "settings.json");
   }
-  return join(homedir(), ".claude", "settings.json");
+  return join(homedir(), dir, "settings.json");
 }
 
-/**
- * Get the path to a hook's source in the package
- */
 export function getHookPath(name: string): string {
   const hookName = name.startsWith("hook-") ? name : `hook-${name}`;
   return join(HOOKS_DIR, hookName);
 }
 
-/**
- * Check if a hook exists in the package
- */
 export function hookExists(name: string): boolean {
   return existsSync(getHookPath(name));
 }
 
-/**
- * Read Claude settings.json for a given scope
- */
-function readSettings(scope: Scope = "global"): Record<string, any> {
-  const path = getSettingsPath(scope);
+function readSettings(scope: Scope = "global", target: "claude" | "gemini" = "claude"): Record<string, any> {
+  const path = getSettingsPath(scope, target);
   try {
     if (existsSync(path)) {
       return JSON.parse(readFileSync(path, "utf-8"));
@@ -69,11 +86,8 @@ function readSettings(scope: Scope = "global"): Record<string, any> {
   return {};
 }
 
-/**
- * Write Claude settings.json for a given scope
- */
-function writeSettings(settings: Record<string, any>, scope: Scope = "global"): void {
-  const path = getSettingsPath(scope);
+function writeSettings(settings: Record<string, any>, scope: Scope = "global", target: "claude" | "gemini" = "claude"): void {
+  const path = getSettingsPath(scope, target);
   const dir = dirname(path);
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
@@ -81,57 +95,61 @@ function writeSettings(settings: Record<string, any>, scope: Scope = "global"): 
   writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
 }
 
-/**
- * Install a hook by registering it in settings.json
- * No files are copied — hooks run from the global @hasna/hooks package.
- */
-export function installHook(
-  name: string,
-  options: InstallOptions = {}
-): InstallResult {
-  const { scope = "global", overwrite = false } = options;
+function getTargetEventName(internalEvent: string, target: "claude" | "gemini"): string {
+  return EVENT_MAP[target]?.[internalEvent] || internalEvent;
+}
+
+function installForTarget(name: string, scope: Scope, overwrite: boolean, target: "claude" | "gemini"): InstallResult {
   const hookName = name.startsWith("hook-") ? name : `hook-${name}`;
   const shortName = hookName.replace("hook-", "");
 
-  // Check hook exists in package
   if (!hookExists(shortName)) {
-    return { hook: shortName, success: false, error: `Hook '${shortName}' not found` };
+    return { hook: shortName, success: false, error: `Hook '${shortName}' not found`, target };
   }
 
-  // Check if already registered
-  const registered = getRegisteredHooks(scope);
+  const registered = getRegisteredHooksForTarget(scope, target);
   if (registered.includes(shortName) && !overwrite) {
-    return { hook: shortName, success: false, error: "Already installed. Use --overwrite to replace.", scope };
+    return { hook: shortName, success: false, error: "Already installed. Use --overwrite to replace.", scope, target };
   }
 
   try {
-    registerHook(shortName, scope);
-    return { hook: shortName, success: true, scope };
+    registerHook(shortName, scope, target);
+    return { hook: shortName, success: true, scope, target };
   } catch (error) {
     return {
       hook: shortName,
       success: false,
       error: error instanceof Error ? error.message : "Unknown error",
+      target,
     };
   }
 }
 
-/**
- * Register a hook in settings.json
- */
-function registerHook(name: string, scope: Scope = "global"): void {
+export function installHook(name: string, options: InstallOptions = {}): InstallResult {
+  const { scope = "global", overwrite = false, target = "claude" } = options;
+
+  if (target === "all") {
+    // Install to both targets, return the first result (they should match)
+    const claudeResult = installForTarget(name, scope, overwrite, "claude");
+    installForTarget(name, scope, overwrite, "gemini");
+    return { ...claudeResult, target: "all" };
+  }
+
+  return installForTarget(name, scope, overwrite, target as "claude" | "gemini");
+}
+
+function registerHook(name: string, scope: Scope = "global", target: "claude" | "gemini" = "claude"): void {
   const meta = getHook(name);
   if (!meta) return;
 
-  const settings = readSettings(scope);
+  const settings = readSettings(scope, target);
   if (!settings.hooks) settings.hooks = {};
 
-  const eventKey = meta.event;
+  const eventKey = getTargetEventName(meta.event, target);
   if (!settings.hooks[eventKey]) settings.hooks[eventKey] = [];
 
   const hookCommand = `hooks run ${name}`;
 
-  // Remove existing entry if present (for overwrite/update)
   settings.hooks[eventKey] = settings.hooks[eventKey].filter(
     (entry: any) => !entry.hooks?.some((h: any) => h.command === hookCommand)
   );
@@ -144,20 +162,17 @@ function registerHook(name: string, scope: Scope = "global"): void {
   }
 
   settings.hooks[eventKey].push(entry);
-  writeSettings(settings, scope);
+  writeSettings(settings, scope, target);
 }
 
-/**
- * Unregister a hook from settings.json
- */
-function unregisterHook(name: string, scope: Scope = "global"): void {
+function unregisterHook(name: string, scope: Scope = "global", target: "claude" | "gemini" = "claude"): void {
   const meta = getHook(name);
   if (!meta) return;
 
-  const settings = readSettings(scope);
+  const settings = readSettings(scope, target);
   if (!settings.hooks) return;
 
-  const eventKey = meta.event;
+  const eventKey = getTargetEventName(meta.event, target);
   if (!settings.hooks[eventKey]) return;
 
   const hookCommand = `hooks run ${name}`;
@@ -172,31 +187,21 @@ function unregisterHook(name: string, scope: Scope = "global"): void {
     delete settings.hooks;
   }
 
-  writeSettings(settings, scope);
+  writeSettings(settings, scope, target);
 }
 
-/**
- * Install multiple hooks
- */
-export function installHooks(
-  names: string[],
-  options: InstallOptions = {}
-): InstallResult[] {
+export function installHooks(names: string[], options: InstallOptions = {}): InstallResult[] {
   return names.map((name) => installHook(name, options));
 }
 
-/**
- * Get hooks registered in settings.json for a given scope
- */
-export function getRegisteredHooks(scope: Scope = "global"): string[] {
-  const settings = readSettings(scope);
+function getRegisteredHooksForTarget(scope: Scope = "global", target: "claude" | "gemini" = "claude"): string[] {
+  const settings = readSettings(scope, target);
   if (!settings.hooks) return [];
 
   const registered: string[] = [];
   for (const eventKey of Object.keys(settings.hooks)) {
     for (const entry of settings.hooks[eventKey]) {
       for (const hook of entry.hooks || []) {
-        // Match both old format (hook-<name>) and new format (hooks run <name>)
         const newMatch = hook.command?.match(/^hooks run (\w+)$/);
         const oldMatch = hook.command?.match(/^hook-(\w+)$/);
         const match = newMatch || oldMatch;
@@ -209,25 +214,32 @@ export function getRegisteredHooks(scope: Scope = "global"): string[] {
   return [...new Set(registered)];
 }
 
-/**
- * Alias: get installed hooks = get registered hooks
- */
+export function getRegisteredHooks(scope: Scope = "global"): string[] {
+  return getRegisteredHooksForTarget(scope, "claude");
+}
+
 export function getInstalledHooks(scope: Scope = "global"): string[] {
   return getRegisteredHooks(scope);
 }
 
-/**
- * Remove (unregister) a hook
- */
-export function removeHook(name: string, scope: Scope = "global"): boolean {
+export function removeHook(name: string, scope: Scope = "global", target: Target = "claude"): boolean {
   const hookName = name.startsWith("hook-") ? name : `hook-${name}`;
   const shortName = hookName.replace("hook-", "");
 
-  const registered = getRegisteredHooks(scope);
-  if (!registered.includes(shortName)) {
-    return false;
+  if (target === "all") {
+    const claudeRemoved = removeHookForTarget(shortName, scope, "claude");
+    const geminiRemoved = removeHookForTarget(shortName, scope, "gemini");
+    return claudeRemoved || geminiRemoved;
   }
 
-  unregisterHook(shortName, scope);
+  return removeHookForTarget(shortName, scope, target as "claude" | "gemini");
+}
+
+function removeHookForTarget(name: string, scope: Scope, target: "claude" | "gemini"): boolean {
+  const registered = getRegisteredHooksForTarget(scope, target);
+  if (!registered.includes(name)) {
+    return false;
+  }
+  unregisterHook(name, scope, target);
   return true;
 }

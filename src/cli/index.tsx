@@ -34,8 +34,8 @@ function resolveScope(options: { global?: boolean; project?: boolean }): Scope {
 
 program
   .name("hooks")
-  .description("Install Claude Code hooks for your project")
-  .version("0.1.0");
+  .description("Install hooks for AI coding agents")
+  .version("0.1.1");
 
 // Interactive mode (default)
 program
@@ -46,11 +46,11 @@ program
     render(<App />);
   });
 
-// Run command — executes a hook, called by Claude Code via settings.json
+// Run command — executes a hook, called by AI coding agents via settings.json
 program
   .command("run")
   .argument("<hook>", "Hook to run")
-  .description("Execute a hook (called by Claude Code)")
+  .description("Execute a hook (called by AI coding agents)")
   .action(async (hook: string) => {
     const meta = getHook(hook);
     if (!meta) {
@@ -66,7 +66,7 @@ program
       process.exit(1);
     }
 
-    // Read stdin (Claude Code passes hook context as JSON)
+    // Read stdin (agent passes hook context as JSON)
     const stdin = await new Response(Bun.stdin.stream()).text();
 
     // Execute the hook script with bun, passing stdin through
@@ -167,7 +167,7 @@ program
   .option("-c, --category <category>", "Filter by category")
   .option("-a, --all", "Show all available hooks", false)
   .option("-i, --installed", "Show only installed hooks", false)
-  .option("-r, --registered", "Show hooks registered in Claude settings", false)
+  .option("-r, --registered", "Show registered hooks", false)
   .option("-g, --global", "Check global settings", false)
   .option("-p, --project", "Check project settings", false)
   .option("-j, --json", "Output as JSON", false)
@@ -563,11 +563,11 @@ program
 
     // General docs
     const generalDocs = {
-      overview: "Claude Code hooks are scripts that run at specific points in a Claude Code session. Install @hasna/hooks globally, then register hooks — no files are copied to your project.",
+      overview: "Hooks are scripts that run at specific points in an AI coding agent session. Install @hasna/hooks globally, then register hooks — no files are copied to your project.",
       events: {
         PreToolUse: "Fires before a tool executes. Can block the operation by returning { \"decision\": \"block\" }.",
         PostToolUse: "Fires after a tool executes. Runs asynchronously, cannot block.",
-        Stop: "Fires when a Claude Code session ends. Useful for notifications and cleanup.",
+        Stop: "Fires when a session ends. Useful for notifications and cleanup.",
         Notification: "Fires on notification events like context compaction.",
       },
       installation: {
@@ -589,7 +589,7 @@ program
       howItWorks: {
         install: "bun install -g @hasna/hooks",
         register: "hooks install gitguard → writes to ~/.claude/settings.json",
-        execution: "Claude Code runs 'hooks run gitguard' → executes hook from global package",
+        execution: "Agent runs 'hooks run gitguard' → executes hook from global package",
         noFileCopy: "No files are copied to your project. Hooks run from the global @hasna/hooks package.",
       },
     };
@@ -634,7 +634,7 @@ program
 // MCP server command
 program
   .command("mcp")
-  .option("-s, --stdio", "Use stdio transport (for Claude Code integration)", false)
+  .option("-s, --stdio", "Use stdio transport (for agent MCP integration)", false)
   .option("-p, --port <port>", "Port for SSE transport", "39427")
   .description("Start MCP server for AI agent integration")
   .action(async (options: { stdio: boolean; port: string }) => {

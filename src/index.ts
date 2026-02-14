@@ -30,4 +30,5 @@ export {
   type InstallResult,
   type InstallOptions,
   type Scope,
+  type Target,
 } from "./lib/installer.js";

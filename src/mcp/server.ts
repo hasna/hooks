@@ -45,7 +45,7 @@ export function createHooksServer(): McpServer {
 
   server.tool(
     "hooks_list",
-    "List all available Claude Code hooks, optionally filtered by category",
+    "List all available hooks, optionally filtered by category",
     { category: z.string().optional().describe("Filter by category name (e.g. 'Git Safety', 'Code Quality', 'Security', 'Notifications', 'Context Management')") },
     async ({ category }) => {
       if (category) {
@@ -90,7 +90,7 @@ export function createHooksServer(): McpServer {
 
   server.tool(
     "hooks_install",
-    "Install one or more hooks by registering them in Claude settings. Use scope 'global' for ~/.claude/settings.json or 'project' for .claude/settings.json",
+    "Install one or more hooks by registering them in agent settings",
     {
       hooks: z.array(z.string()).describe("Hook names to install"),
       scope: z.enum(["global", "project"]).default("global").describe("Install scope"),
@@ -168,7 +168,7 @@ export function createHooksServer(): McpServer {
 
   server.tool(
     "hooks_remove",
-    "Remove (unregister) a hook from Claude settings",
+    "Remove (unregister) a hook from agent settings",
     {
       name: z.string().describe("Hook name to remove"),
       scope: z.enum(["global", "project"]).default("global").describe("Scope to remove from"),
@@ -268,7 +268,7 @@ export function createHooksServer(): McpServer {
         content: [{
           type: "text",
           text: JSON.stringify({
-            overview: "Claude Code hooks are scripts that run at specific points in a Claude Code session. Install @hasna/hooks globally, then register hooks — no files are copied to your project.",
+            overview: "Hooks are scripts that run at specific points in an AI coding agent session. Install @hasna/hooks globally, then register hooks — no files are copied to your project.",
             events: {
               PreToolUse: "Fires before a tool executes. Can block the operation.",
               PostToolUse: "Fires after a tool executes. Runs asynchronously.",
