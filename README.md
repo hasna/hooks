@@ -1,6 +1,6 @@
 # Hooks
 
-Open source library of 15 Claude Code hooks. Install any hook with a single command.
+Open source library of 30 Claude Code hooks. Install any hook with a single command.
 
 ## Quick Start
 
@@ -87,7 +87,7 @@ hooks list --registered
 hooks remove gitguard
 ```
 
-## Available Hooks (15)
+## Available Hooks (30)
 
 ### Git Safety (3)
 | Hook | Event | Description |
@@ -102,27 +102,62 @@ hooks remove gitguard
 | checktests | PostToolUse | Checks for missing tests after file edits |
 | checklint | PostToolUse | Runs linting after file edits and creates tasks for errors |
 | checkfiles | PostToolUse | Runs headless agent to review files and create tasks |
-| checkbugs | PostToolUse | Checks for bugs via Codex headless agent |
+| checkbugs | PostToolUse | Checks for bugs via headless agent |
 | checkdocs | PostToolUse | Checks for missing documentation and creates tasks |
 | checktasks | PostToolUse | Validates task completion and tracks progress |
 
 ### Security (2)
 | Hook | Event | Description |
 |------|-------|-------------|
-| checksecurity | PostToolUse | Runs security checks via Claude and Codex headless agents |
+| checksecurity | PostToolUse | Runs security checks via headless agents |
 | packageage | PreToolUse | Checks package age before install to prevent typosquatting |
 
-### Notifications (2)
+### Notifications (5)
 | Hook | Event | Description |
 |------|-------|-------------|
 | phonenotify | Stop | Sends push notifications to phone via ntfy.sh |
 | agentmessages | Stop | Inter-agent messaging integration for service-message |
+| desktopnotify | Stop | Sends native desktop notifications via osascript (macOS) or notify-send (Linux) |
+| slacknotify | Stop | Sends Slack webhook notifications when Claude finishes |
+| soundnotify | Stop | Plays a system sound when Claude finishes (macOS/Linux) |
 
 ### Context Management (2)
 | Hook | Event | Description |
 |------|-------|-------------|
 | contextrefresh | Notification | Re-injects important context every N prompts to prevent drift |
 | precompact | Notification | Saves session state before context compaction |
+
+### Workflow Automation (3)
+| Hook | Event | Description |
+|------|-------|-------------|
+| autoformat | PostToolUse | Runs project formatter (Prettier, Biome, Ruff, Black, gofmt) after file edits |
+| autostage | PostToolUse | Automatically git-stages files after Claude edits them |
+| tddguard | PreToolUse | Blocks implementation edits unless corresponding test files exist |
+
+### Environment (1)
+| Hook | Event | Description |
+|------|-------|-------------|
+| envsetup | PreToolUse | Warns when nvm, virtualenv, asdf, or rbenv may need activation before commands |
+
+### Permissions (3)
+| Hook | Event | Description |
+|------|-------|-------------|
+| permissionguard | PreToolUse | Auto-approves safe read-only commands and blocks dangerous operations |
+| protectfiles | PreToolUse | Blocks access to .env, secrets, SSH keys, and lock files |
+| promptguard | PreToolUse | Blocks prompt injection attempts and credential access requests |
+
+### Observability (4)
+| Hook | Event | Description |
+|------|-------|-------------|
+| sessionlog | PostToolUse | Logs every tool call to .claude/session-log-\<date\>.jsonl |
+| commandlog | PostToolUse | Logs every bash command Claude runs to .claude/commands.log |
+| costwatch | Stop | Estimates session token usage and warns when budget threshold is exceeded |
+| errornotify | PostToolUse | Detects tool failures and logs errors to .claude/errors.log |
+
+### Agent Teams (1)
+| Hook | Event | Description |
+|------|-------|-------------|
+| taskgate | PostToolUse | Validates task completion criteria before allowing tasks to be marked done |
 
 ## How Hooks Work
 
@@ -229,4 +264,4 @@ bun run typecheck
 
 ## License
 
-MIT
+Apache-2.0

@@ -19,7 +19,7 @@ bun run typecheck    # Type check
 
 1. Copy to `hooks/hook-{name}/`
 2. Ensure it follows the standard hook pattern (stdin JSON → stdout JSON)
-3. Remove any internal references (hasnaxyz, etc.)
+3. Remove any internal references (hasna, etc.)
 4. Verify no secrets or API keys are committed
 5. Update `src/lib/registry.ts` to include the hook
 
@@ -49,6 +49,6 @@ hooks/hook-{name}/
 
 Before committing any hook:
 - [ ] No hardcoded API keys/tokens
-- [ ] No internal references (hasnaxyz)
+- [ ] No internal references (hasna)
 - [ ] Uses `@hasna` namespace for public packages
 - [ ] .env.example has placeholders only
