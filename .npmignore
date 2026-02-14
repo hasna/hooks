@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Bun
+bun.lock
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Environment
+.env
+.env.local
+
+# Test coverage
+coverage/
+
+# Temp reference repos
+temp/
+
+# CLI source (keep bin/ and dist/ for published package)
+# Note: hooks/hook-*/src/ must NOT be excluded — hooks need their source
+/src/
+tsconfig.json
+
+# Test files
+*.test.ts
+*.test.tsx

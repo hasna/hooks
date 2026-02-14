@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+bin/
+
+# Bun
+bun.lock
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Environment
+.env
+.env.local
+
+# Test coverage
+coverage/
+
+# Temp reference repos
+temp/
+
+# Claude settings (local)
+.claude/
