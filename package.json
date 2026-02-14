@@ -1,6 +1,6 @@
 {
   "name": "@hasna/hooks",
-  "version": "0.0.6",
+  "version": "0.1.0",
   "description": "Open source Claude Code hooks library - Install hooks with a single command",
   "type": "module",
   "bin": {
@@ -58,6 +58,6 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hasna/open-hooks.git"
+    "url": "git+https://github.com/hasna/hooks.git"
   }
 }

@@ -74,7 +74,7 @@ describe("CLI", () => {
   describe("hooks list", () => {
     test("lists all hooks", async () => {
       const { stdout } = await run("list");
-      expect(stdout).toContain("Available hooks (15)");
+      expect(stdout).toContain("Available hooks (30)");
       expect(stdout).toContain("Git Safety");
       expect(stdout).toContain("Code Quality");
       expect(stdout).toContain("Security");
@@ -87,7 +87,7 @@ describe("CLI", () => {
       expect(data["Git Safety"]).toHaveLength(3);
       expect(data["Code Quality"]).toHaveLength(6);
       expect(data["Security"]).toHaveLength(2);
-      expect(data["Notifications"]).toHaveLength(2);
+      expect(data["Notifications"]).toHaveLength(5);
       expect(data["Context Management"]).toHaveLength(2);
     });
 
@@ -165,7 +165,7 @@ describe("CLI", () => {
     test("--json returns category objects", async () => {
       const data = await runJson("categories");
       expect(Array.isArray(data)).toBe(true);
-      expect(data).toHaveLength(5);
+      expect(data).toHaveLength(10);
       expect(data[0]).toHaveProperty("name");
       expect(data[0]).toHaveProperty("count");
     });
@@ -370,9 +370,9 @@ describe("CLI", () => {
       backupSettings();
       try {
         const data = await runJson("install", "--all");
-        expect(data.total).toBe(15);
-        expect(data.success).toBe(15);
-        expect(data.installed).toHaveLength(15);
+        expect(data.total).toBe(30);
+        expect(data.success).toBe(30);
+        expect(data.installed).toHaveLength(30);
         expect(data.scope).toBe("global");
       } finally {
         restoreSettings();
@@ -495,7 +495,7 @@ describe("CLI", () => {
 
     test("all-hooks list has all 5 categories as keys", async () => {
       const data = await runJson("list");
-      expect(Object.keys(data)).toHaveLength(5);
+      expect(Object.keys(data)).toHaveLength(10);
       expect(data).toHaveProperty("Git Safety");
       expect(data).toHaveProperty("Code Quality");
       expect(data).toHaveProperty("Security");
@@ -649,7 +649,7 @@ describe("CLI", () => {
     const expectedCounts: Record<string, number> = {
       "Code Quality": 6,
       "Security": 2,
-      "Notifications": 2,
+      "Notifications": 5,
       "Context Management": 2,
     };
 
@@ -671,7 +671,7 @@ describe("CLI", () => {
       backupSettings();
       try {
         const install = await runJson("install", "--all");
-        expect(install.success).toBe(15);
+        expect(install.success).toBe(30);
 
         const listed = await runJson("list", "--installed");
         expect(listed.length).toBeGreaterThanOrEqual(15);

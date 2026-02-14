@@ -35,7 +35,7 @@ function resolveScope(options: { global?: boolean; project?: boolean }): Scope {
 program
   .name("hooks")
   .description("Install Claude Code hooks for your project")
-  .version("0.0.6");
+  .version("0.1.0");
 
 // Interactive mode (default)
 program

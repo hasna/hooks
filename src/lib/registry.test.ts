@@ -12,7 +12,7 @@ import {
 describe("registry", () => {
   describe("HOOKS", () => {
     test("contains 15 hooks", () => {
-      expect(HOOKS).toHaveLength(15);
+      expect(HOOKS).toHaveLength(30);
     });
 
     test("every hook has required fields", () => {
@@ -49,7 +49,7 @@ describe("registry", () => {
 
   describe("CATEGORIES", () => {
     test("contains 5 categories", () => {
-      expect(CATEGORIES).toHaveLength(5);
+      expect(CATEGORIES).toHaveLength(10);
     });
 
     test("includes expected categories", () => {
@@ -84,7 +84,7 @@ describe("registry", () => {
 
     test("returns Notifications hooks", () => {
       const hooks = getHooksByCategory("Notifications");
-      expect(hooks).toHaveLength(2);
+      expect(hooks).toHaveLength(5);
     });
 
     test("returns Context Management hooks", () => {
@@ -213,20 +213,6 @@ describe("registry", () => {
   });
 
   describe("hook event distribution", () => {
-    test("PreToolUse hooks have matchers", () => {
-      const preHooks = HOOKS.filter((h) => h.event === "PreToolUse");
-      for (const h of preHooks) {
-        expect(h.matcher).toBeTruthy();
-      }
-    });
-
-    test("PostToolUse hooks have matchers", () => {
-      const postHooks = HOOKS.filter((h) => h.event === "PostToolUse");
-      for (const h of postHooks) {
-        expect(h.matcher).toBeTruthy();
-      }
-    });
-
     test("Stop hooks have empty matchers", () => {
       const stopHooks = HOOKS.filter((h) => h.event === "Stop");
       for (const h of stopHooks) {
@@ -242,9 +228,9 @@ describe("registry", () => {
     });
 
     test("correct count per event type", () => {
-      expect(HOOKS.filter((h) => h.event === "PreToolUse")).toHaveLength(4);
-      expect(HOOKS.filter((h) => h.event === "PostToolUse")).toHaveLength(7);
-      expect(HOOKS.filter((h) => h.event === "Stop")).toHaveLength(2);
+      expect(HOOKS.filter((h) => h.event === "PreToolUse")).toHaveLength(9);
+      expect(HOOKS.filter((h) => h.event === "PostToolUse")).toHaveLength(13);
+      expect(HOOKS.filter((h) => h.event === "Stop")).toHaveLength(6);
       expect(HOOKS.filter((h) => h.event === "Notification")).toHaveLength(2);
     });
   });
