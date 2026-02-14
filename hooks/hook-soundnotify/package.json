@@ -1,0 +1,12 @@
+{
+  "name": "hook-soundnotify",
+  "version": "0.1.0",
+  "description": "Claude Code hook that plays a sound when Claude finishes",
+  "type": "module",
+  "main": "./src/hook.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "author": "Hasna",
+  "license": "MIT"
+}

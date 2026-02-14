@@ -1,0 +1,12 @@
+{
+  "name": "hook-sessionlog",
+  "version": "0.1.0",
+  "description": "Claude Code hook that logs every tool call to a session log file",
+  "type": "module",
+  "main": "./src/hook.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "author": "Hasna",
+  "license": "MIT"
+}

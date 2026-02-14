@@ -1,0 +1,12 @@
+{
+  "name": "hook-tddguard",
+  "version": "0.1.0",
+  "description": "Claude Code hook that enforces TDD by blocking implementation edits without corresponding test files",
+  "type": "module",
+  "main": "./src/hook.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "author": "Hasna",
+  "license": "MIT"
+}

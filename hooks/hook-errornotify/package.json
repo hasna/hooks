@@ -1,0 +1,12 @@
+{
+  "name": "hook-errornotify",
+  "version": "0.1.0",
+  "description": "Claude Code hook that detects tool failures and logs errors",
+  "type": "module",
+  "main": "./src/hook.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "author": "Hasna",
+  "license": "MIT"
+}

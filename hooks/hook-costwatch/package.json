@@ -1,0 +1,12 @@
+{
+  "name": "hook-costwatch",
+  "version": "0.1.0",
+  "description": "Claude Code hook that estimates session cost and warns if budget is exceeded",
+  "type": "module",
+  "main": "./src/hook.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "author": "Hasna",
+  "license": "MIT"
+}
