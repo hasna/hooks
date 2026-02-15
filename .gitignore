@@ -27,3 +27,14 @@ temp/
 
 # Claude settings (local)
 .claude/
+
+# External project refs
+.connectors/
+.playwright-mcp/
+
+# Screenshots
+*.png
+
+# Dashboard build
+dashboard/dist/
+dashboard/node_modules/
