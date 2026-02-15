@@ -413,6 +413,157 @@ describe("hook-promptguard patterns", () => {
 });
 
 // ====================================================================
+// packageage - package age detection for typosquatting
+// ====================================================================
+
+describe("hook-packageage patterns", () => {
+  const INSTALL_PATTERNS: RegExp[] = [
+    /\bnpm\s+install\s/,
+    /\bnpm\s+i\s/,
+    /\bbun\s+add\s/,
+    /\bbun\s+install\s/,
+    /\byarn\s+add\s/,
+    /\bpnpm\s+add\s/,
+    /\bnpx\s+/,
+    /\bbunx\s+/,
+  ];
+
+  function isInstallCommand(command: string): boolean {
+    return INSTALL_PATTERNS.some((p) => p.test(command));
+  }
+
+  describe("detects install commands", () => {
+    test("npm install express", () => expect(isInstallCommand("npm install express")).toBe(true));
+    test("npm i lodash", () => expect(isInstallCommand("npm i lodash")).toBe(true));
+    test("bun add zod", () => expect(isInstallCommand("bun add zod")).toBe(true));
+    test("yarn add react", () => expect(isInstallCommand("yarn add react")).toBe(true));
+    test("pnpm add chalk", () => expect(isInstallCommand("pnpm add chalk")).toBe(true));
+    test("npx create-react-app", () => expect(isInstallCommand("npx create-react-app")).toBe(true));
+    test("bunx tsc", () => expect(isInstallCommand("bunx tsc")).toBe(true));
+  });
+
+  describe("ignores non-install commands", () => {
+    test("npm test", () => expect(isInstallCommand("npm test")).toBe(false));
+    test("npm run build", () => expect(isInstallCommand("npm run build")).toBe(false));
+    test("git commit", () => expect(isInstallCommand("git commit -m 'test'")).toBe(false));
+    test("ls -la", () => expect(isInstallCommand("ls -la")).toBe(false));
+    test("bun test", () => expect(isInstallCommand("bun test")).toBe(false));
+  });
+});
+
+// ====================================================================
+// envsetup - environment manager detection
+// ====================================================================
+
+describe("hook-envsetup patterns", () => {
+  const ENV_MANAGERS = [
+    { name: "nvm", indicators: [".nvmrc", ".node-version"], pattern: /\bnode\b|\bnpm\b|\bnpx\b/ },
+    { name: "virtualenv", indicators: [".python-version", "Pipfile", "pyproject.toml"], pattern: /\bpython\b|\bpip\b|\bpytest\b/ },
+    { name: "asdf", indicators: [".tool-versions"], pattern: /\basdf\b/ },
+    { name: "rbenv", indicators: [".ruby-version", "Gemfile"], pattern: /\bruby\b|\bbundle\b|\bgem\b/ },
+  ];
+
+  function getRelevantManager(command: string): string | null {
+    for (const { name, pattern } of ENV_MANAGERS) {
+      if (pattern.test(command)) return name;
+    }
+    return null;
+  }
+
+  test("node command triggers nvm", () => expect(getRelevantManager("node --version")).toBe("nvm"));
+  test("npm command triggers nvm", () => expect(getRelevantManager("npm test")).toBe("nvm"));
+  test("python command triggers virtualenv", () => expect(getRelevantManager("python main.py")).toBe("virtualenv"));
+  test("pip command triggers virtualenv", () => expect(getRelevantManager("pip install flask")).toBe("virtualenv"));
+  test("ruby command triggers rbenv", () => expect(getRelevantManager("ruby script.rb")).toBe("rbenv"));
+  test("bundle command triggers rbenv", () => expect(getRelevantManager("bundle install")).toBe("rbenv"));
+  test("asdf command triggers asdf", () => expect(getRelevantManager("asdf list")).toBe("asdf"));
+  test("git command triggers nothing", () => expect(getRelevantManager("git status")).toBeNull());
+  test("ls command triggers nothing", () => expect(getRelevantManager("ls -la")).toBeNull());
+});
+
+// ====================================================================
+// tddguard - test file detection
+// ====================================================================
+
+describe("hook-tddguard patterns", () => {
+  const TEST_FILE_PATTERNS: RegExp[] = [
+    /\.test\.[jt]sx?$/,
+    /\.spec\.[jt]sx?$/,
+    /_test\.go$/,
+    /test_.*\.py$/,
+    /.*_test\.py$/,
+    /\.test\.rs$/,
+  ];
+
+  const IMPLEMENTATION_FILE_PATTERNS: RegExp[] = [
+    /\.(ts|tsx|js|jsx)$/,
+    /\.py$/,
+    /\.go$/,
+    /\.rs$/,
+  ];
+
+  function isTestFile(path: string): boolean {
+    return TEST_FILE_PATTERNS.some((p) => p.test(path));
+  }
+
+  function isImplementationFile(path: string): boolean {
+    if (isTestFile(path)) return false;
+    return IMPLEMENTATION_FILE_PATTERNS.some((p) => p.test(path));
+  }
+
+  describe("identifies test files", () => {
+    test("foo.test.ts", () => expect(isTestFile("foo.test.ts")).toBe(true));
+    test("foo.spec.ts", () => expect(isTestFile("foo.spec.ts")).toBe(true));
+    test("foo.test.tsx", () => expect(isTestFile("foo.test.tsx")).toBe(true));
+    test("foo.test.js", () => expect(isTestFile("foo.test.js")).toBe(true));
+    test("foo_test.go", () => expect(isTestFile("foo_test.go")).toBe(true));
+    test("test_foo.py", () => expect(isTestFile("test_foo.py")).toBe(true));
+    test("foo_test.py", () => expect(isTestFile("foo_test.py")).toBe(true));
+  });
+
+  describe("identifies implementation files", () => {
+    test("foo.ts", () => expect(isImplementationFile("foo.ts")).toBe(true));
+    test("foo.py", () => expect(isImplementationFile("foo.py")).toBe(true));
+    test("foo.go", () => expect(isImplementationFile("foo.go")).toBe(true));
+    test("foo.rs", () => expect(isImplementationFile("foo.rs")).toBe(true));
+    test("foo.test.ts is not implementation", () => expect(isImplementationFile("foo.test.ts")).toBe(false));
+  });
+});
+
+// ====================================================================
+// hook package.json validation
+// ====================================================================
+
+describe("hook package.json structure", () => {
+  const hookDirsForPkg = [
+    "hook-gitguard", "hook-branchprotect", "hook-checkpoint",
+    "hook-checktests", "hook-checklint", "hook-checkfiles",
+    "hook-checkbugs", "hook-checkdocs", "hook-checktasks",
+    "hook-checksecurity", "hook-packageage",
+    "hook-phonenotify", "hook-agentmessages",
+    "hook-desktopnotify", "hook-slacknotify", "hook-soundnotify",
+    "hook-contextrefresh", "hook-precompact",
+    "hook-autoformat", "hook-autostage", "hook-tddguard",
+    "hook-envsetup",
+    "hook-permissionguard", "hook-protectfiles", "hook-promptguard",
+    "hook-sessionlog", "hook-commandlog", "hook-costwatch", "hook-errornotify",
+    "hook-taskgate",
+  ];
+
+  for (const hookDir of hookDirsForPkg) {
+    test(`${hookDir}/package.json has valid structure`, () => {
+      const pkgPath = join(HOOKS_DIR, hookDir, "package.json");
+      const content = JSON.parse(readFileSync(pkgPath, "utf-8"));
+      expect(content.name).toBeTruthy();
+      expect(content.version).toMatch(/^\d+\.\d+\.\d+$/);
+      expect(content.description).toBeTruthy();
+      expect(content.license).toBe("Apache-2.0");
+      expect(content.author).toBe("Hasna");
+    });
+  }
+});
+
+// ====================================================================
 // hook file existence validation
 // ====================================================================
 
@@ -422,7 +573,7 @@ describe("hook source files exist", () => {
     "hook-checktests", "hook-checklint", "hook-checkfiles",
     "hook-checkbugs", "hook-checkdocs", "hook-checktasks",
     "hook-checksecurity", "hook-packageage",
-    "hook-phonenotify",
+    "hook-phonenotify", "hook-agentmessages",
     "hook-desktopnotify", "hook-slacknotify", "hook-soundnotify",
     "hook-contextrefresh", "hook-precompact",
     "hook-autoformat", "hook-autostage", "hook-tddguard",
@@ -433,9 +584,11 @@ describe("hook source files exist", () => {
   ];
 
   for (const hookDir of hookDirs) {
-    test(`${hookDir}/src/hook.ts exists`, () => {
-      expect(existsSync(join(HOOKS_DIR, hookDir, "src", "hook.ts"))).toBe(true);
-    });
+    if (hookDir !== "hook-agentmessages") {
+      test(`${hookDir}/src/hook.ts exists`, () => {
+        expect(existsSync(join(HOOKS_DIR, hookDir, "src", "hook.ts"))).toBe(true);
+      });
+    }
 
     test(`${hookDir}/package.json exists`, () => {
       expect(existsSync(join(HOOKS_DIR, hookDir, "package.json"))).toBe(true);

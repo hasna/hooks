@@ -9,7 +9,11 @@ import { fileURLToPath } from "url";
 import { homedir } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf-8"));
+// Resolve package.json from both source (src/cli/) and built (bin/) locations
+const pkgPath = existsSync(join(__dirname, "..", "package.json"))
+  ? join(__dirname, "..", "package.json")
+  : join(__dirname, "..", "..", "package.json");
+const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
 import { App } from "./components/App.js";
 import {
   HOOKS,

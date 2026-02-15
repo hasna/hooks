@@ -48,16 +48,21 @@ describe("registry", () => {
   });
 
   describe("CATEGORIES", () => {
-    test("contains 5 categories", () => {
+    test("contains 10 categories", () => {
       expect(CATEGORIES).toHaveLength(10);
     });
 
-    test("includes expected categories", () => {
+    test("includes all 10 expected categories", () => {
       expect(CATEGORIES).toContain("Git Safety");
       expect(CATEGORIES).toContain("Code Quality");
       expect(CATEGORIES).toContain("Security");
       expect(CATEGORIES).toContain("Notifications");
       expect(CATEGORIES).toContain("Context Management");
+      expect(CATEGORIES).toContain("Workflow Automation");
+      expect(CATEGORIES).toContain("Environment");
+      expect(CATEGORIES).toContain("Permissions");
+      expect(CATEGORIES).toContain("Observability");
+      expect(CATEGORIES).toContain("Agent Teams");
     });
   });
 
@@ -90,6 +95,31 @@ describe("registry", () => {
     test("returns Context Management hooks", () => {
       const hooks = getHooksByCategory("Context Management");
       expect(hooks).toHaveLength(2);
+    });
+
+    test("returns Workflow Automation hooks", () => {
+      const hooks = getHooksByCategory("Workflow Automation");
+      expect(hooks).toHaveLength(3);
+    });
+
+    test("returns Environment hooks", () => {
+      const hooks = getHooksByCategory("Environment");
+      expect(hooks).toHaveLength(1);
+    });
+
+    test("returns Permissions hooks", () => {
+      const hooks = getHooksByCategory("Permissions");
+      expect(hooks).toHaveLength(3);
+    });
+
+    test("returns Observability hooks", () => {
+      const hooks = getHooksByCategory("Observability");
+      expect(hooks).toHaveLength(4);
+    });
+
+    test("returns Agent Teams hooks", () => {
+      const hooks = getHooksByCategory("Agent Teams");
+      expect(hooks).toHaveLength(1);
     });
 
     test("returns empty array for unknown category", () => {
@@ -203,6 +233,21 @@ describe("registry", () => {
       agentmessages: "0.1.0",
       contextrefresh: "0.1.0",
       precompact: "0.1.0",
+      autoformat: "0.1.0",
+      autostage: "0.1.0",
+      tddguard: "0.1.0",
+      envsetup: "0.1.0",
+      permissionguard: "0.1.0",
+      protectfiles: "0.1.0",
+      promptguard: "0.1.0",
+      desktopnotify: "0.1.0",
+      slacknotify: "0.1.0",
+      soundnotify: "0.1.0",
+      sessionlog: "0.1.0",
+      commandlog: "0.1.0",
+      costwatch: "0.1.0",
+      errornotify: "0.1.0",
+      taskgate: "0.1.0",
     };
 
     for (const [name, version] of Object.entries(expected)) {

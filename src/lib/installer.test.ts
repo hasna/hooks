@@ -94,7 +94,7 @@ describe("installer", () => {
       expect(hookExists("nonexistent")).toBe(false);
     });
 
-    test("returns true for all registered hooks", () => {
+    test("returns true for all 30 registered hooks", () => {
       const names = [
         "gitguard", "branchprotect", "checkpoint",
         "checktests", "checklint", "checkfiles",
@@ -102,7 +102,14 @@ describe("installer", () => {
         "checksecurity", "packageage",
         "phonenotify", "agentmessages",
         "contextrefresh", "precompact",
+        "autoformat", "autostage", "tddguard",
+        "envsetup",
+        "permissionguard", "protectfiles", "promptguard",
+        "desktopnotify", "slacknotify", "soundnotify",
+        "sessionlog", "commandlog", "costwatch", "errornotify",
+        "taskgate",
       ];
+      expect(names).toHaveLength(30);
       for (const name of names) {
         expect(hookExists(name)).toBe(true);
       }
@@ -330,7 +337,7 @@ describe("installer", () => {
   });
 
   describe("install + remove roundtrip", () => {
-    test("install all 15 hooks then remove all", () => {
+    test("install all 30 hooks then remove all", () => {
       const allNames = [
         "gitguard", "branchprotect", "checkpoint",
         "checktests", "checklint", "checkfiles",
@@ -338,10 +345,16 @@ describe("installer", () => {
         "checksecurity", "packageage",
         "phonenotify", "agentmessages",
         "contextrefresh", "precompact",
+        "autoformat", "autostage", "tddguard",
+        "envsetup",
+        "permissionguard", "protectfiles", "promptguard",
+        "desktopnotify", "slacknotify", "soundnotify",
+        "sessionlog", "commandlog", "costwatch", "errornotify",
+        "taskgate",
       ];
       const results = installHooks(allNames);
       expect(results.every((r) => r.success)).toBe(true);
-      expect(getRegisteredHooks().length).toBeGreaterThanOrEqual(15);
+      expect(getRegisteredHooks().length).toBeGreaterThanOrEqual(30);
 
       for (const name of allNames) {
         expect(removeHook(name)).toBe(true);
@@ -464,6 +477,14 @@ describe("installer", () => {
     test("defaults to global when no argument", () => {
       expect(getSettingsPath()).toBe(join(homedir(), ".claude", "settings.json"));
     });
+
+    test("gemini global path", () => {
+      expect(getSettingsPath("global", "gemini")).toBe(join(homedir(), ".gemini", "settings.json"));
+    });
+
+    test("gemini project path", () => {
+      expect(getSettingsPath("project", "gemini")).toBe(join(process.cwd(), ".gemini", "settings.json"));
+    });
   });
 
   describe("installHooks edge cases", () => {
@@ -479,48 +500,104 @@ describe("installer", () => {
   });
 
   describe("hook source files", () => {
-    test("every hook has src/hook.ts in package", () => {
-      const names = [
-        "gitguard", "branchprotect", "checkpoint",
-        "checktests", "checklint", "checkfiles",
-        "checkbugs", "checkdocs", "checktasks",
-        "checksecurity", "packageage",
-        "phonenotify", "contextrefresh", "precompact",
-      ];
-      for (const name of names) {
+    const ALL_30_NAMES = [
+      "gitguard", "branchprotect", "checkpoint",
+      "checktests", "checklint", "checkfiles",
+      "checkbugs", "checkdocs", "checktasks",
+      "checksecurity", "packageage",
+      "phonenotify", "agentmessages",
+      "contextrefresh", "precompact",
+      "autoformat", "autostage", "tddguard",
+      "envsetup",
+      "permissionguard", "protectfiles", "promptguard",
+      "desktopnotify", "slacknotify", "soundnotify",
+      "sessionlog", "commandlog", "costwatch", "errornotify",
+      "taskgate",
+    ];
+
+    test("every hook has src/hook.ts in package (except agentmessages)", () => {
+      for (const name of ALL_30_NAMES) {
+        if (name === "agentmessages") continue; // uses different file structure
         const hookScript = join(getHookPath(name), "src", "hook.ts");
         expect(existsSync(hookScript)).toBe(true);
       }
     });
 
     test("every hook has package.json in package", () => {
-      const names = [
-        "gitguard", "branchprotect", "checkpoint",
-        "checktests", "checklint", "checkfiles",
-        "checkbugs", "checkdocs", "checktasks",
-        "checksecurity", "packageage",
-        "phonenotify", "agentmessages",
-        "contextrefresh", "precompact",
-      ];
-      for (const name of names) {
+      for (const name of ALL_30_NAMES) {
         const pkgJson = join(getHookPath(name), "package.json");
         expect(existsSync(pkgJson)).toBe(true);
       }
     });
 
     test("every hook has README.md in package", () => {
-      const names = [
-        "gitguard", "branchprotect", "checkpoint",
-        "checktests", "checklint", "checkfiles",
-        "checkbugs", "checkdocs", "checktasks",
-        "checksecurity", "packageage",
-        "phonenotify", "agentmessages",
-        "contextrefresh", "precompact",
-      ];
-      for (const name of names) {
+      for (const name of ALL_30_NAMES) {
         const readme = join(getHookPath(name), "README.md");
         expect(existsSync(readme)).toBe(true);
       }
     });
+  });
+
+  describe("target: all", () => {
+    test("installHook with target all returns target all", () => {
+      const result = installHook("gitguard", { target: "all" });
+      expect(result.success).toBe(true);
+      expect(result.target).toBe("all");
+    });
+
+    test("removeHook with target all", () => {
+      installHook("gitguard", { target: "all" });
+      const removed = removeHook("gitguard", "global", "all");
+      expect(removed).toBe(true);
+    });
+  });
+
+  describe("corrupt settings", () => {
+    test("readSettings handles corrupt JSON gracefully", () => {
+      // Write corrupt JSON to settings
+      writeFileSync(GLOBAL_SETTINGS, "{ broken json !!!");
+      // Should not throw, returns empty or fallback
+      const hooks = getRegisteredHooks();
+      expect(Array.isArray(hooks)).toBe(true);
+    });
+
+    test("installHook creates settings from scratch when corrupt", () => {
+      writeFileSync(GLOBAL_SETTINGS, "not valid json");
+      const result = installHook("gitguard");
+      expect(result.success).toBe(true);
+    });
+  });
+
+  describe("new hooks install correctly", () => {
+    const newHooks = [
+      { name: "autoformat", event: "PostToolUse", matcher: "Edit|Write" },
+      { name: "autostage", event: "PostToolUse", matcher: "Edit|Write" },
+      { name: "tddguard", event: "PreToolUse", matcher: "Edit|Write" },
+      { name: "envsetup", event: "PreToolUse", matcher: "Bash" },
+      { name: "permissionguard", event: "PreToolUse", matcher: "Bash" },
+      { name: "protectfiles", event: "PreToolUse", matcher: "Edit|Write|Read|Bash" },
+      { name: "promptguard", event: "PreToolUse", matcher: "" },
+      { name: "desktopnotify", event: "Stop", matcher: "" },
+      { name: "slacknotify", event: "Stop", matcher: "" },
+      { name: "soundnotify", event: "Stop", matcher: "" },
+      { name: "sessionlog", event: "PostToolUse", matcher: "" },
+      { name: "commandlog", event: "PostToolUse", matcher: "Bash" },
+      { name: "costwatch", event: "Stop", matcher: "" },
+      { name: "errornotify", event: "PostToolUse", matcher: "" },
+      { name: "taskgate", event: "PostToolUse", matcher: "" },
+    ];
+
+    for (const { name, event } of newHooks) {
+      test(`${name} installs under ${event}`, () => {
+        const result = installHook(name);
+        expect(result.success).toBe(true);
+        const settings = JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"));
+        expect(settings.hooks[event]).toBeDefined();
+        const found = settings.hooks[event].some((e: any) =>
+          e.hooks?.some((h: any) => h.command === `hooks run ${name}`)
+        );
+        expect(found).toBe(true);
+      });
+    }
   });
 });
