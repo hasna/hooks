@@ -1,7 +1,40 @@
+import { useState } from "react";
+import { DownloadIcon, RefreshCwIcon, CheckIcon } from "lucide-react";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { StatsCards } from "@/components/stats-cards";
 import { HooksTable } from "@/components/hooks-table";
+import { Button } from "@/components/ui/button";
 import { HOOKS } from "@/data";
+
+function CopyButton({
+  label,
+  command,
+  icon: Icon,
+}: {
+  label: string;
+  command: string;
+  icon: React.ComponentType<{ className?: string }>;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  function handleCopy() {
+    navigator.clipboard.writeText(command).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  return (
+    <Button variant="outline" size="sm" onClick={handleCopy} className="gap-1.5 text-xs">
+      {copied ? (
+        <CheckIcon className="size-3.5 text-green-500" />
+      ) : (
+        <Icon className="size-3.5" />
+      )}
+      {copied ? "Copied!" : label}
+    </Button>
+  );
+}
 
 export function App() {
   return (
@@ -22,7 +55,19 @@ export function App() {
               </span>
             </h1>
           </div>
-          <ThemeToggle />
+          <div className="flex items-center gap-2">
+            <CopyButton
+              label="Install All"
+              command="npx @hasna/hooks install --all"
+              icon={DownloadIcon}
+            />
+            <CopyButton
+              label="Update"
+              command="bun install -g @hasna/hooks@latest"
+              icon={RefreshCwIcon}
+            />
+            <ThemeToggle />
+          </div>
         </div>
       </header>
 

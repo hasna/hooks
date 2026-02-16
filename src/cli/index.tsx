@@ -639,6 +639,86 @@ program
     console.log();
   });
 
+// Upgrade command — self-update the @hasna/hooks package
+program
+  .command("upgrade")
+  .option("-c, --check", "Check for updates without installing", false)
+  .option("-j, --json", "Output as JSON", false)
+  .description("Update the @hasna/hooks package to the latest version")
+  .action(async (options: { check: boolean; json: boolean }) => {
+    const current = pkg.version;
+
+    // Detect package manager: prefer bun, fallback to npm
+    let pm = "npm";
+    try {
+      const which = Bun.spawnSync(["which", "bun"]);
+      if (which.exitCode === 0) pm = "bun";
+    } catch {}
+
+    if (options.check) {
+      // Fetch latest version from npm registry
+      const proc = Bun.spawnSync(["npm", "view", "@hasna/hooks", "version"]);
+      const latest = new TextDecoder().decode(proc.stdout).trim();
+
+      if (!latest) {
+        if (options.json) {
+          console.log(JSON.stringify({ error: "Failed to fetch latest version" }));
+        } else {
+          console.log(chalk.red("Failed to fetch latest version from npm registry."));
+        }
+        process.exit(1);
+      }
+
+      const upToDate = current === latest;
+      if (options.json) {
+        console.log(JSON.stringify({ current, latest, upToDate }));
+      } else if (upToDate) {
+        console.log(chalk.green(`✓ Already on latest version (${current})`));
+      } else {
+        console.log(chalk.yellow(`Update available: ${current} → ${latest}`));
+        console.log(chalk.dim(`  Run: hooks upgrade`));
+      }
+      return;
+    }
+
+    // Perform the upgrade
+    const installCmd = pm === "bun"
+      ? ["bun", "install", "-g", "@hasna/hooks@latest"]
+      : ["npm", "install", "-g", "@hasna/hooks@latest"];
+
+    if (!options.json) {
+      console.log(chalk.bold(`\nUpgrading @hasna/hooks (${pm})...\n`));
+      console.log(chalk.dim(`  $ ${installCmd.join(" ")}\n`));
+    }
+
+    const proc = Bun.spawn(installCmd, {
+      stdout: options.json ? "pipe" : "inherit",
+      stderr: options.json ? "pipe" : "inherit",
+      env: process.env,
+    });
+
+    const exitCode = await proc.exited;
+
+    if (exitCode !== 0) {
+      if (options.json) {
+        console.log(JSON.stringify({ current, updated: false, error: `${pm} exited with code ${exitCode}` }));
+      } else {
+        console.log(chalk.red(`\n✗ Upgrade failed (exit code ${exitCode})`));
+      }
+      process.exit(exitCode);
+    }
+
+    // Check new version
+    const versionProc = Bun.spawnSync(["npm", "view", "@hasna/hooks", "version"]);
+    const latest = new TextDecoder().decode(versionProc.stdout).trim() || "unknown";
+
+    if (options.json) {
+      console.log(JSON.stringify({ current, latest, updated: true }));
+    } else {
+      console.log(chalk.green(`\n✓ Upgraded: ${current} → ${latest}`));
+    }
+  });
+
 // MCP server command
 program
   .command("mcp")

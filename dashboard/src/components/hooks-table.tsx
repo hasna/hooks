@@ -198,7 +198,7 @@ export function HooksTable({ data }: HooksTableProps) {
         header: () => <span className="sr-only">Actions</span>,
         cell: ({ row }) => (
           <div className="flex justify-end">
-            <CopyCommand command={`npx @anthropic/hooks install ${row.original.name}`} />
+            <CopyCommand command={`npx @hasna/hooks install ${row.original.name}`} />
           </div>
         ),
       },
