@@ -307,8 +307,9 @@ export function createHooksServer(): McpServer {
       name: z.string().describe("Hook name (e.g. 'gitguard', 'checkpoint')"),
       input: z.record(z.string(), z.unknown()).default(() => ({})).describe("Hook input as JSON object (HookInput)"),
       profile: z.string().optional().describe("Agent profile ID to inject into hook input"),
+      timeout_ms: z.number().default(10000).describe("Timeout in milliseconds (default: 10000)"),
     },
-    async ({ name, input, profile }) => {
+    async ({ name, input, profile, timeout_ms }) => {
       const meta = getHook(name);
       if (!meta) {
         return { content: [{ type: "text", text: JSON.stringify({ error: `Hook '${name}' not found` }) }] };
@@ -340,21 +341,60 @@ export function createHooksServer(): McpServer {
         env: process.env,
       });
 
-      const [stdoutText, stderrText, exitCode] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-        proc.exited,
+      const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), timeout_ms));
+
+      const result = await Promise.race([
+        Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          proc.exited,
+        ]).then(([stdout, stderr, exitCode]) => ({ stdout, stderr, exitCode, timedOut: false })),
+        timeoutPromise.then(() => { proc.kill(); return { stdout: "", stderr: "", exitCode: -1, timedOut: true }; }),
       ]);
 
       let output: unknown = {};
-      try { output = JSON.parse(stdoutText); } catch { output = { raw: stdoutText }; }
+      try { output = JSON.parse(result.stdout); } catch { output = result.stdout ? { raw: result.stdout } : {}; }
 
       return {
         content: [{
           type: "text" as const,
-          text: JSON.stringify({ hook: name, output, stderr: stderrText || undefined, exitCode }),
+          text: JSON.stringify({
+            hook: name,
+            output,
+            stderr: result.stderr || undefined,
+            exitCode: result.exitCode,
+            ...(result.timedOut ? { timedOut: true, timeout_ms } : {}),
+          }),
         }],
       };
+    }
+  );
+
+  server.tool(
+    "hooks_update",
+    "Re-register installed hooks to pick up new package version (reinstalls with overwrite)",
+    {
+      hooks: z.array(z.string()).optional().describe("Hook names to update (omit to update all installed hooks)"),
+      scope: z.enum(["global", "project"]).default("global").describe("Scope to update"),
+    },
+    async ({ hooks, scope }) => {
+      const installed = getRegisteredHooks(scope);
+      const toUpdate = hooks && hooks.length > 0 ? hooks : installed;
+
+      if (toUpdate.length === 0) {
+        return { content: [{ type: "text", text: JSON.stringify({ updated: [], error: "No hooks installed" }) }] };
+      }
+
+      const results = toUpdate.map((name) => {
+        if (!installed.includes(name)) {
+          return { hook: name, success: false, error: "Not installed" };
+        }
+        return installHook(name, { scope, overwrite: true });
+      });
+
+      const updated = results.filter((r) => r.success).map((r) => r.hook);
+      const failed = results.filter((r) => !r.success).map((r) => ({ hook: r.hook, error: r.error }));
+      return { content: [{ type: "text", text: JSON.stringify({ updated, failed, total: results.length }) }] };
     }
   );
 

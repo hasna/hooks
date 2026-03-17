@@ -38,6 +38,8 @@ import {
   getProfile,
   listProfiles,
   touchProfile,
+  exportProfiles,
+  importProfiles,
 } from "../lib/profiles.js";
 
 const program = new Command();
@@ -45,6 +47,36 @@ const program = new Command();
 function resolveScope(options: { global?: boolean; project?: boolean }): Scope {
   if (options.project) return "project";
   return "global";
+}
+
+function resolveTarget(options: { target?: string }): "claude" | "gemini" | "all" {
+  if (options.target === "gemini") return "gemini";
+  if (options.target === "all") return "all";
+  return "claude";
+}
+
+/** Levenshtein distance for did-you-mean suggestions */
+function editDistance(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+    }
+  }
+  return dp[m][n];
+}
+
+function suggestHooks(name: string, max = 3): string[] {
+  return HOOKS
+    .map((h) => ({ name: h.name, dist: editDistance(name.toLowerCase(), h.name.toLowerCase()) }))
+    .filter(({ dist }) => dist <= 4)
+    .sort((a, b) => a.dist - b.dist)
+    .slice(0, max)
+    .map(({ name: n }) => n);
 }
 
 program
@@ -172,11 +204,14 @@ program
   .option("-c, --category <category>", "Install all hooks in a category")
   .option("-g, --global", "Install globally (~/.claude/settings.json)", false)
   .option("-p, --project", "Install for current project (.claude/settings.json)", false)
+  .option("-t, --target <target>", "Agent target: claude, gemini, all (default: claude)", "claude")
   .option("--profile <id>", "Agent profile ID to scope hooks to")
+  .option("--dry-run", "Preview what would be installed without writing to settings", false)
   .option("-j, --json", "Output as JSON", false)
   .description("Install one or more hooks")
   .action((hooks: string[], options) => {
     const scope = resolveScope(options);
+    const target = resolveTarget(options);
     let toInstall: string[] = hooks;
 
     if (options.all) {
@@ -202,9 +237,39 @@ program
       return;
     }
 
+    // Dry-run: preview what would be installed
+    if (options.dryRun) {
+      const known = toInstall.filter((n) => getHook(n));
+      const unknown = toInstall.filter((n) => !getHook(n));
+      if (options.json) {
+        console.log(JSON.stringify({ dryRun: true, would_install: known, unknown, scope, target }));
+        return;
+      }
+      console.log(chalk.bold(`\nDry run — would install (${scope}, ${target}):\n`));
+      for (const name of known) {
+        const meta = getHook(name)!;
+        console.log(chalk.cyan(`  ${name}`) + chalk.dim(` [${meta.event}${meta.matcher ? ` ${meta.matcher}` : ""}]`));
+      }
+      if (unknown.length > 0) {
+        console.log();
+        for (const name of unknown) {
+          const suggestions = suggestHooks(name);
+          console.log(chalk.red(`  ✗ unknown: ${name}`) + (suggestions.length ? chalk.dim(` — did you mean: ${suggestions.join(", ")}?`) : ""));
+        }
+      }
+      return;
+    }
+
     const results = [];
     for (const name of toInstall) {
-      const result = installHook(name, { scope, overwrite: options.overwrite, profile: options.profile });
+      // Did-you-mean for unknown hooks
+      if (!getHook(name)) {
+        const suggestions = suggestHooks(name);
+        const hint = suggestions.length ? ` — did you mean: ${suggestions.join(", ")}?` : "";
+        results.push({ hook: name, success: false, error: `Hook '${name}' not found${hint}` });
+        continue;
+      }
+      const result = installHook(name, { scope, overwrite: options.overwrite, target, profile: options.profile });
       results.push(result);
     }
 
@@ -215,12 +280,13 @@ program
         total: results.length,
         success: results.filter((r) => r.success).length,
         scope,
+        target,
       }));
       return;
     }
 
     const settingsFile = scope === "project" ? ".claude/settings.json" : "~/.claude/settings.json";
-    console.log(chalk.bold(`\nInstalling hooks (${scope})...\n`));
+    console.log(chalk.bold(`\nInstalling hooks (${scope}, ${target})...\n`));
     for (const result of results) {
       if (result.success) {
         const meta = getHook(result.hook);
@@ -229,6 +295,9 @@ program
           console.log(
             chalk.dim(`  ${meta.event}${meta.matcher ? ` [${meta.matcher}]` : ""} → hooks run ${result.hook}`)
           );
+        }
+        if (result.conflict) {
+          console.log(chalk.yellow(`  ⚠ Warning: ${result.conflict}`));
         }
       } else {
         console.log(chalk.red(`✗ ${result.hook}: ${result.error}`));
@@ -359,19 +428,34 @@ program
   .argument("<hook>", "Hook to remove")
   .option("-g, --global", "Remove from global settings", false)
   .option("-p, --project", "Remove from project settings", false)
+  .option("-t, --target <target>", "Agent target: claude, gemini, all (default: claude)", "claude")
   .option("-j, --json", "Output as JSON", false)
   .description("Remove an installed hook")
-  .action((hook: string, options: { global?: boolean; project?: boolean; json: boolean }) => {
+  .action((hook: string, options: { global?: boolean; project?: boolean; target?: string; json: boolean }) => {
     const scope = resolveScope(options);
-    const removed = removeHook(hook, scope);
+    const target = resolveTarget(options);
+
+    // Did-you-mean for unknown hook names
+    if (!getHook(hook)) {
+      const suggestions = suggestHooks(hook);
+      const hint = suggestions.length ? ` — did you mean: ${suggestions.join(", ")}?` : "";
+      if (options.json) {
+        console.log(JSON.stringify({ hook, removed: false, scope, target, error: `Hook '${hook}' not found${hint}`, suggestions }));
+      } else {
+        console.log(chalk.red(`✗ Hook '${hook}' not found${hint}`));
+      }
+      return;
+    }
+
+    const removed = removeHook(hook, scope, target);
     if (options.json) {
-      console.log(JSON.stringify({ hook, removed, scope }));
+      console.log(JSON.stringify({ hook, removed, scope, target }));
       return;
     }
     if (removed) {
-      console.log(chalk.green(`✓ Removed ${hook} (${scope})`));
+      console.log(chalk.green(`✓ Removed ${hook} (${scope}, ${target})`));
     } else {
-      console.log(chalk.red(`✗ ${hook} is not installed (${scope})`));
+      console.log(chalk.red(`✗ ${hook} is not installed (${scope}, ${target})`));
     }
   });
 
@@ -405,10 +489,12 @@ program
   .action((hook: string, options: { json: boolean }) => {
     const meta = getHook(hook);
     if (!meta) {
+      const suggestions = suggestHooks(hook);
+      const hint = suggestions.length ? ` — did you mean: ${suggestions.join(", ")}?` : "";
       if (options.json) {
-        console.log(JSON.stringify({ error: `Hook '${hook}' not found` }));
+        console.log(JSON.stringify({ error: `Hook '${hook}' not found${hint}`, suggestions }));
       } else {
-        console.log(chalk.red(`Hook '${hook}' not found`));
+        console.log(chalk.red(`Hook '${hook}' not found${hint}`));
       }
       return;
     }
@@ -790,6 +876,70 @@ program
       console.log(JSON.stringify({ current, latest, updated: true }));
     } else {
       console.log(chalk.green(`\n✓ Upgraded: ${current} → ${latest}`));
+    }
+  });
+
+// Profile export command
+program
+  .command("profile-export")
+  .description("Export all agent profiles as JSON (for backup/cross-machine setup)")
+  .option("-o, --output <file>", "Write to file instead of stdout")
+  .option("-j, --json", "Output as JSON (default: true)", false)
+  .action(async (options: { output?: string; json: boolean }) => {
+    const profiles = exportProfiles();
+    const json = JSON.stringify(profiles, null, 2);
+    if (options.output) {
+      const { writeFileSync } = await import("fs");
+      writeFileSync(options.output, json + "\n");
+      console.log(chalk.green(`✓ Exported ${profiles.length} profile(s) to ${options.output}`));
+    } else {
+      console.log(json);
+    }
+  });
+
+// Profile import command
+program
+  .command("profile-import")
+  .argument("<file>", "JSON file to import profiles from (use - for stdin)")
+  .description("Import agent profiles from a JSON export file")
+  .option("-j, --json", "Output result as JSON", false)
+  .action(async (file: string, options: { json: boolean }) => {
+    let raw: string;
+    if (file === "-") {
+      raw = await new Response(Bun.stdin.stream()).text();
+    } else {
+      const { readFileSync } = await import("fs");
+      try {
+        raw = readFileSync(file, "utf-8");
+      } catch {
+        if (options.json) {
+          console.log(JSON.stringify({ error: `Cannot read file: ${file}` }));
+        } else {
+          console.log(chalk.red(`✗ Cannot read file: ${file}`));
+        }
+        return;
+      }
+    }
+
+    let profiles: any[];
+    try {
+      const parsed = JSON.parse(raw);
+      profiles = Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+      if (options.json) {
+        console.log(JSON.stringify({ error: "Invalid JSON" }));
+      } else {
+        console.log(chalk.red("✗ Invalid JSON"));
+      }
+      return;
+    }
+
+    const result = importProfiles(profiles);
+    if (options.json) {
+      console.log(JSON.stringify(result));
+    } else {
+      console.log(chalk.green(`✓ Imported ${result.imported} profile(s)`));
+      if (result.skipped > 0) console.log(chalk.dim(`  Skipped ${result.skipped} (already exist or invalid)`));
     }
   });
 

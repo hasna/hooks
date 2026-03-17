@@ -68,6 +68,7 @@ export interface InstallResult {
   error?: string;
   scope?: Scope;
   target?: Target;
+  conflict?: string;
 }
 
 export interface InstallOptions {
@@ -118,6 +119,26 @@ function getTargetEventName(internalEvent: string, target: "claude" | "gemini"):
   return EVENT_MAP[target]?.[internalEvent] || internalEvent;
 }
 
+/** Check if a hook conflicts with any already-installed hook (same event + overlapping matcher) */
+function detectConflict(name: string, scope: Scope, target: "claude" | "gemini"): string | undefined {
+  const meta = getHook(name);
+  if (!meta || !meta.matcher) return undefined; // hooks with no matcher can't conflict
+
+  const registered = getRegisteredHooksForTarget(scope, target);
+  for (const existingName of registered) {
+    if (existingName === name) continue;
+    const existing = getHook(existingName);
+    if (!existing || existing.event !== meta.event || !existing.matcher) continue;
+    // Check if matchers overlap (either is a substring/prefix of the other, or identical)
+    const a = meta.matcher.toLowerCase();
+    const b = existing.matcher.toLowerCase();
+    if (a === b || a.includes(b) || b.includes(a)) {
+      return `conflicts with '${existingName}' (same event ${meta.event}, overlapping matcher '${existing.matcher}')`;
+    }
+  }
+  return undefined;
+}
+
 function installForTarget(name: string, scope: Scope, overwrite: boolean, target: "claude" | "gemini", profile?: string): InstallResult {
   const shortName = shortHookName(name);
 
@@ -130,9 +151,12 @@ function installForTarget(name: string, scope: Scope, overwrite: boolean, target
     return { hook: shortName, success: false, error: "Already installed. Use --overwrite to replace.", scope, target };
   }
 
+  // Warn on conflicts (non-blocking — still installs)
+  const conflict = detectConflict(shortName, scope, target);
+
   try {
     registerHook(shortName, scope, target, profile);
-    return { hook: shortName, success: true, scope, target };
+    return { hook: shortName, success: true, scope, target, ...(conflict ? { conflict } : {}) };
   } catch (error) {
     return {
       hook: shortName,

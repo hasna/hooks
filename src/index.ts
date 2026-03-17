@@ -163,6 +163,8 @@ export {
   deleteProfile,
   touchProfile,
   getProfilesDir,
+  exportProfiles,
+  importProfiles,
   type AgentProfile,
   type CreateProfileInput,
 } from "./lib/profiles.js";

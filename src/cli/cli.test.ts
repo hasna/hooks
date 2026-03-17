@@ -232,7 +232,7 @@ describe("CLI", () => {
   describe("hooks remove", () => {
     test("fails for non-installed hook", async () => {
       const { stdout } = await run("remove", "nonexistent");
-      expect(stdout).toContain("not installed");
+      expect(stdout).toContain("not found");
     });
 
     test("--json returns removal result", async () => {

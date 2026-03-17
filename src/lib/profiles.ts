@@ -133,3 +133,31 @@ export function touchProfile(id: string): void {
   profile.last_seen_at = new Date().toISOString();
   writeFileSync(profilePath(id), JSON.stringify(profile, null, 2) + "\n");
 }
+
+/** Export all profiles as a JSON bundle for cross-machine backup */
+export function exportProfiles(): AgentProfile[] {
+  return listProfiles();
+}
+
+/** Import profiles from a JSON bundle, skipping duplicates by agent_id */
+export function importProfiles(profiles: AgentProfile[]): { imported: number; skipped: number } {
+  ensureProfilesDir();
+  let imported = 0;
+  let skipped = 0;
+
+  for (const profile of profiles) {
+    if (!profile.agent_id || !profile.agent_type) {
+      skipped++;
+      continue;
+    }
+    const path = profilePath(profile.agent_id);
+    if (existsSync(path)) {
+      skipped++;
+      continue;
+    }
+    writeFileSync(path, JSON.stringify(profile, null, 2) + "\n");
+    imported++;
+  }
+
+  return { imported, skipped };
+}
