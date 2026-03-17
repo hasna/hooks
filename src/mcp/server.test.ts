@@ -78,9 +78,9 @@ describe("MCP server", () => {
       restoreSettings();
     });
 
-    test("lists all 11 tools", async () => {
+    test("lists all 14 tools", async () => {
       const { tools } = await client.listTools();
-      expect(tools.length).toBe(11);
+      expect(tools.length).toBe(14);
       const names = tools.map((t) => t.name);
       expect(names).toContain("hooks_list");
       expect(names).toContain("hooks_search");
@@ -90,9 +90,12 @@ describe("MCP server", () => {
       expect(names).toContain("hooks_install_all");
       expect(names).toContain("hooks_remove");
       expect(names).toContain("hooks_doctor");
+      expect(names).toContain("hooks_run");
       expect(names).toContain("hooks_categories");
       expect(names).toContain("hooks_docs");
       expect(names).toContain("hooks_registered");
+      expect(names).toContain("hooks_init");
+      expect(names).toContain("hooks_profiles");
     });
 
     test("every tool has a description", async () => {
@@ -107,7 +110,7 @@ describe("MCP server", () => {
     test("hooks_list returns all hooks by category", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_list", arguments: {} }));
       expect(data["Git Safety"]).toHaveLength(3);
-      expect(data["Code Quality"]).toHaveLength(6);
+      expect(data["Code Quality"]).toHaveLength(7);
       expect(data["Security"]).toHaveLength(2);
       expect(data["Notifications"]).toHaveLength(5);
       expect(data["Context Management"]).toHaveLength(2);
@@ -183,6 +186,7 @@ describe("MCP server", () => {
       const allHooks = [
         "gitguard", "branchprotect", "checkpoint",
         "checktests", "checklint", "checkfiles",
+        "stylescheck",
         "checkbugs", "checkdocs", "checktasks",
         "checksecurity", "packageage",
         "phonenotify", "agentmessages",
@@ -256,9 +260,9 @@ describe("MCP server", () => {
 
     test("hooks_install_all installs all 15", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_install_all", arguments: {} }));
-      expect(data.total).toBe(30);
-      expect(data.success).toBe(30);
-      expect(data.installed).toHaveLength(30);
+      expect(data.total).toBe(31);
+      expect(data.success).toBe(31);
+      expect(data.installed).toHaveLength(31);
     });
 
     // --- hooks_remove ---
@@ -310,7 +314,7 @@ describe("MCP server", () => {
       const gitSafety = data.find((c: any) => c.name === "Git Safety");
       expect(gitSafety.count).toBe(3);
       const codeQuality = data.find((c: any) => c.name === "Code Quality");
-      expect(codeQuality.count).toBe(6);
+      expect(codeQuality.count).toBe(7);
     });
 
     // --- hooks_docs ---
@@ -382,7 +386,7 @@ describe("MCP server", () => {
 
     test("hooks_install_category installs Code Quality", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_install_category", arguments: { category: "Code Quality" } }));
-      expect(data.installed).toHaveLength(6);
+      expect(data.installed).toHaveLength(7);
       expect(data.installed).toContain("checktests");
       expect(data.installed).toContain("checktasks");
     });
@@ -416,7 +420,7 @@ describe("MCP server", () => {
     test("hooks_install_all with overwrite after install", async () => {
       await client.callTool({ name: "hooks_install_all", arguments: {} });
       const data = parseResult(await client.callTool({ name: "hooks_install_all", arguments: { overwrite: true } }));
-      expect(data.success).toBe(30);
+      expect(data.success).toBe(31);
     });
 
     // --- docs for every hook ---
@@ -425,6 +429,7 @@ describe("MCP server", () => {
       const allHooks = [
         "gitguard", "branchprotect", "checkpoint",
         "checktests", "checklint", "checkfiles",
+        "stylescheck",
         "checkbugs", "checkdocs", "checktasks",
         "checksecurity", "packageage",
         "phonenotify", "agentmessages",
@@ -475,12 +480,13 @@ describe("MCP server", () => {
 
     test("install all 15 then remove all 15", async () => {
       const install = parseResult(await client.callTool({ name: "hooks_install_all", arguments: {} }));
-      expect(install.success).toBe(30);
+      expect(install.success).toBe(31);
 
       const allHooks = [
         "gitguard", "branchprotect", "checkpoint",
         "checktests", "checklint", "checkfiles",
         "checkbugs", "checkdocs", "checktasks",
+        "stylescheck",
         "checksecurity", "packageage",
         "phonenotify", "agentmessages",
         "contextrefresh", "precompact",
@@ -531,10 +537,10 @@ describe("MCP server", () => {
 
     test("hooks_list Code Quality category", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_list", arguments: { category: "Code Quality" } }));
-      expect(data).toHaveLength(6);
-      for (const h of data) {
-        expect(h.event).toBe("PostToolUse");
-      }
+      expect(data).toHaveLength(7);
+      // stylescheck is PreToolUse, others are PostToolUse
+      expect(data.some((h: any) => h.event === "PreToolUse")).toBe(true);
+      expect(data.some((h: any) => h.event === "PostToolUse")).toBe(true);
     });
 
     // --- full lifecycle ---
@@ -570,6 +576,26 @@ describe("MCP server", () => {
       // Info now shows global=false
       const afterInfo = parseResult(await client.callTool({ name: "hooks_info", arguments: { name: "gitguard" } }));
       expect(afterInfo.global).toBe(false);
+    });
+
+    // --- hooks_run ---
+
+    test("hooks_run executes a hook with provided input", async () => {
+      const data = parseResult(await client.callTool({
+        name: "hooks_run",
+        arguments: { name: "gitguard", input: { tool_name: "Bash", tool_input: { command: "echo hello" } } },
+      }));
+      expect(data.hook).toBe("gitguard");
+      expect(data).toHaveProperty("output");
+      expect(data).toHaveProperty("exitCode");
+    });
+
+    test("hooks_run returns error for unknown hook", async () => {
+      const data = parseResult(await client.callTool({
+        name: "hooks_run",
+        arguments: { name: "nonexistent-hook-xyz", input: {} },
+      }));
+      expect(data.error).toContain("not found");
     });
   });
 

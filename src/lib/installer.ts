@@ -31,9 +31,12 @@ function shortHookName(name: string): string {
   return normalizeHookName(name).replace("hook-", "");
 }
 
-function removeHookEntries(entries: any[], hookCommand: string): any[] {
+function removeHookEntriesByName(entries: any[], hookName: string): any[] {
   return entries.filter(
-    (entry: any) => !entry.hooks?.some((h: any) => h.command === hookCommand)
+    (entry: any) => !entry.hooks?.some((h: any) => {
+      const match = h.command?.match(/^hooks run (\w+)/);
+      return match && match[1] === hookName;
+    })
   );
 }
 
@@ -71,6 +74,7 @@ export interface InstallOptions {
   scope?: Scope;
   overwrite?: boolean;
   target?: Target;
+  profile?: string;
 }
 
 export function getSettingsPath(scope: Scope = "global", target: "claude" | "gemini" = "claude"): string {
@@ -114,7 +118,7 @@ function getTargetEventName(internalEvent: string, target: "claude" | "gemini"):
   return EVENT_MAP[target]?.[internalEvent] || internalEvent;
 }
 
-function installForTarget(name: string, scope: Scope, overwrite: boolean, target: "claude" | "gemini"): InstallResult {
+function installForTarget(name: string, scope: Scope, overwrite: boolean, target: "claude" | "gemini", profile?: string): InstallResult {
   const shortName = shortHookName(name);
 
   if (!hookExists(shortName)) {
@@ -127,7 +131,7 @@ function installForTarget(name: string, scope: Scope, overwrite: boolean, target
   }
 
   try {
-    registerHook(shortName, scope, target);
+    registerHook(shortName, scope, target, profile);
     return { hook: shortName, success: true, scope, target };
   } catch (error) {
     return {
@@ -140,19 +144,18 @@ function installForTarget(name: string, scope: Scope, overwrite: boolean, target
 }
 
 export function installHook(name: string, options: InstallOptions = {}): InstallResult {
-  const { scope = "global", overwrite = false, target = "claude" } = options;
+  const { scope = "global", overwrite = false, target = "claude", profile } = options;
 
   if (target === "all") {
-    // Install to both targets, return the first result (they should match)
-    const claudeResult = installForTarget(name, scope, overwrite, "claude");
-    installForTarget(name, scope, overwrite, "gemini");
+    const claudeResult = installForTarget(name, scope, overwrite, "claude", profile);
+    installForTarget(name, scope, overwrite, "gemini", profile);
     return { ...claudeResult, target: "all" };
   }
 
-  return installForTarget(name, scope, overwrite, target as "claude" | "gemini");
+  return installForTarget(name, scope, overwrite, target as "claude" | "gemini", profile);
 }
 
-function registerHook(name: string, scope: Scope = "global", target: "claude" | "gemini" = "claude"): void {
+function registerHook(name: string, scope: Scope = "global", target: "claude" | "gemini" = "claude", profile?: string): void {
   const meta = getHook(name);
   if (!meta) return;
 
@@ -162,9 +165,12 @@ function registerHook(name: string, scope: Scope = "global", target: "claude" | 
   const eventKey = getTargetEventName(meta.event, target);
   if (!settings.hooks[eventKey]) settings.hooks[eventKey] = [];
 
-  const hookCommand = `hooks run ${name}`;
+  // Remove any existing entries for this hook (with or without profile)
+  settings.hooks[eventKey] = removeHookEntriesByName(settings.hooks[eventKey], name);
 
-  settings.hooks[eventKey] = removeHookEntries(settings.hooks[eventKey], hookCommand);
+  const hookCommand = profile
+    ? `hooks run ${name} --profile ${profile}`
+    : `hooks run ${name}`;
 
   const entry: Record<string, any> = {
     hooks: [{ type: "command", command: hookCommand }],
@@ -187,8 +193,8 @@ function unregisterHook(name: string, scope: Scope = "global", target: "claude" 
   const eventKey = getTargetEventName(meta.event, target);
   if (!settings.hooks[eventKey]) return;
 
-  const hookCommand = `hooks run ${name}`;
-  settings.hooks[eventKey] = removeHookEntries(settings.hooks[eventKey], hookCommand);
+  // Remove by hook name — works regardless of whether profile was used
+  settings.hooks[eventKey] = removeHookEntriesByName(settings.hooks[eventKey], name);
 
   if (settings.hooks[eventKey].length === 0) {
     delete settings.hooks[eventKey];
@@ -204,7 +210,7 @@ export function installHooks(names: string[], options: InstallOptions = {}): Ins
   return names.map((name) => installHook(name, options));
 }
 
-function getRegisteredHooksForTarget(scope: Scope = "global", target: "claude" | "gemini" = "claude"): string[] {
+export function getRegisteredHooksForTarget(scope: Scope = "global", target: "claude" | "gemini" = "claude"): string[] {
   const settings = readSettings(scope, target);
   if (!settings.hooks) return [];
 
@@ -212,7 +218,7 @@ function getRegisteredHooksForTarget(scope: Scope = "global", target: "claude" |
   for (const eventKey of Object.keys(settings.hooks)) {
     for (const entry of settings.hooks[eventKey]) {
       for (const hook of entry.hooks || []) {
-        const newMatch = hook.command?.match(/^hooks run (\w+)$/);
+        const newMatch = hook.command?.match(/^hooks run (\w+)(?:\s+--profile\s+\w+)?$/);
         const oldMatch = hook.command?.match(/^hook-(\w+)$/);
         const match = newMatch || oldMatch;
         if (match) {

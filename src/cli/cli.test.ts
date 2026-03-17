@@ -74,7 +74,7 @@ describe("CLI", () => {
   describe("hooks list", () => {
     test("lists all hooks", async () => {
       const { stdout } = await run("list");
-      expect(stdout).toContain("Available hooks (30)");
+      expect(stdout).toContain("Available hooks (31)");
       expect(stdout).toContain("Git Safety");
       expect(stdout).toContain("Code Quality");
       expect(stdout).toContain("Security");
@@ -85,7 +85,7 @@ describe("CLI", () => {
     test("--json returns all hooks grouped by category", async () => {
       const data = await runJson("list");
       expect(data["Git Safety"]).toHaveLength(3);
-      expect(data["Code Quality"]).toHaveLength(6);
+      expect(data["Code Quality"]).toHaveLength(7);
       expect(data["Security"]).toHaveLength(2);
       expect(data["Notifications"]).toHaveLength(5);
       expect(data["Context Management"]).toHaveLength(2);
@@ -370,9 +370,9 @@ describe("CLI", () => {
       backupSettings();
       try {
         const data = await runJson("install", "--all");
-        expect(data.total).toBe(30);
-        expect(data.success).toBe(30);
-        expect(data.installed).toHaveLength(30);
+        expect(data.total).toBe(31);
+        expect(data.success).toBe(31);
+        expect(data.installed).toHaveLength(31);
         expect(data.scope).toBe("global");
       } finally {
         restoreSettings();
@@ -510,7 +510,7 @@ describe("CLI", () => {
       const gitSafety = data.find((c: any) => c.name === "Git Safety");
       expect(gitSafety.count).toBe(3);
       const codeQuality = data.find((c: any) => c.name === "Code Quality");
-      expect(codeQuality.count).toBe(6);
+      expect(codeQuality.count).toBe(7);
       const security = data.find((c: any) => c.name === "Security");
       expect(security.count).toBe(2);
     });
@@ -647,7 +647,7 @@ describe("CLI", () => {
   describe("hooks install --category for all categories", () => {
     const categories = ["Code Quality", "Security", "Notifications", "Context Management"];
     const expectedCounts: Record<string, number> = {
-      "Code Quality": 6,
+      "Code Quality": 7,
       "Security": 2,
       "Notifications": 5,
       "Context Management": 2,
@@ -671,7 +671,7 @@ describe("CLI", () => {
       backupSettings();
       try {
         const install = await runJson("install", "--all");
-        expect(install.success).toBe(30);
+        expect(install.success).toBe(31);
 
         const listed = await runJson("list", "--installed");
         expect(listed.length).toBeGreaterThanOrEqual(15);
@@ -693,6 +693,7 @@ describe("CLI", () => {
       "gitguard", "branchprotect", "checkpoint",
       "checktests", "checklint", "checkfiles",
       "checkbugs", "checkdocs", "checktasks",
+      "stylescheck",
       "checksecurity", "packageage",
       "phonenotify", "agentmessages",
       "contextrefresh", "precompact",

@@ -11,8 +11,8 @@ import {
 
 describe("registry", () => {
   describe("HOOKS", () => {
-    test("contains 30 hooks", () => {
-      expect(HOOKS).toHaveLength(30);
+    test("contains 31 hooks", () => {
+      expect(HOOKS).toHaveLength(31);
     });
 
     test("every hook has required fields", () => {
@@ -79,7 +79,7 @@ describe("registry", () => {
 
     test("returns Code Quality hooks", () => {
       const hooks = getHooksByCategory("Code Quality");
-      expect(hooks).toHaveLength(6);
+      expect(hooks).toHaveLength(7);
     });
 
     test("returns Security hooks", () => {
@@ -273,7 +273,7 @@ describe("registry", () => {
     });
 
     test("correct count per event type", () => {
-      expect(HOOKS.filter((h) => h.event === "PreToolUse")).toHaveLength(9);
+      expect(HOOKS.filter((h) => h.event === "PreToolUse")).toHaveLength(10);
       expect(HOOKS.filter((h) => h.event === "PostToolUse")).toHaveLength(13);
       expect(HOOKS.filter((h) => h.event === "Stop")).toHaveLength(6);
       expect(HOOKS.filter((h) => h.event === "Notification")).toHaveLength(2);
@@ -324,10 +324,11 @@ describe("registry", () => {
   });
 
   describe("getHooksByCategory returns correct hooks", () => {
-    test("Code Quality hooks are all PostToolUse", () => {
+    test("Code Quality hooks have valid events", () => {
       const hooks = getHooksByCategory("Code Quality");
+      const validEvents = ["PreToolUse", "PostToolUse"];
       for (const h of hooks) {
-        expect(h.event).toBe("PostToolUse");
+        expect(validEvents).toContain(h.event);
       }
     });
 

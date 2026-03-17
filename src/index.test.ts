@@ -14,22 +14,33 @@ import {
   installHooks,
   getInstalledHooks,
   getRegisteredHooks,
+  getRegisteredHooksForTarget,
   removeHook,
   hookExists,
   getHookPath,
   getSettingsPath,
+  installHookForProject,
+  installHooksForProject,
+  listProjectHooks,
+  removeProjectHook,
+  runHook,
   type HookMeta,
   type Category,
   type InstallResult,
   type InstallOptions,
   type Scope,
   type Target,
+  type HookInput,
+  type HookOutput,
+  type HookAgentInfo,
+  type RunHookOptions,
+  type RunHookResult,
 } from "./index.js";
 
 describe("library exports", () => {
-  test("HOOKS is an array of 30 hooks", () => {
+  test("HOOKS is an array of 31 hooks", () => {
     expect(Array.isArray(HOOKS)).toBe(true);
-    expect(HOOKS).toHaveLength(30);
+    expect(HOOKS).toHaveLength(31);
   });
 
   test("CATEGORIES is an array of 10 categories", () => {
@@ -81,5 +92,30 @@ describe("library exports", () => {
 
   test("getSettingsPath is a function", () => {
     expect(typeof getSettingsPath).toBe("function");
+  });
+
+  test("getRegisteredHooksForTarget is a function", () => {
+    expect(typeof getRegisteredHooksForTarget).toBe("function");
+  });
+
+  test("installHookForProject is a function", () => {
+    expect(typeof installHookForProject).toBe("function");
+  });
+
+  test("installHooksForProject is a function", () => {
+    expect(typeof installHooksForProject).toBe("function");
+  });
+
+  test("listProjectHooks is a function", () => {
+    expect(typeof listProjectHooks).toBe("function");
+    expect(Array.isArray(listProjectHooks())).toBe(true);
+  });
+
+  test("removeProjectHook is a function", () => {
+    expect(typeof removeProjectHook).toBe("function");
+  });
+
+  test("runHook is a function", () => {
+    expect(typeof runHook).toBe("function");
   });
 });

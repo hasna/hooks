@@ -322,6 +322,18 @@ export const HOOKS: HookMeta[] = [
     tags: ["errors", "failures", "logging", "debugging"],
   },
 
+  // Code Quality
+  {
+    name: "stylescheck",
+    displayName: "Styles Check",
+    description: "Blocks frontend files with design anti-patterns: hardcoded colors, magic font sizes, inline styles",
+    version: "0.1.0",
+    category: "Code Quality",
+    event: "PreToolUse",
+    matcher: "Write|Edit",
+    tags: ["design", "styles", "frontend", "css", "tailwind", "design-system", "anti-patterns"],
+  },
+
   // Agent Teams
   {
     name: "taskgate",

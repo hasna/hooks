@@ -26,12 +26,19 @@ import {
   installHook,
   getInstalledHooks,
   getRegisteredHooks,
+  getRegisteredHooksForTarget,
   removeHook,
   hookExists,
   getHookPath,
   getSettingsPath,
   type Scope,
 } from "../lib/installer.js";
+import {
+  createProfile,
+  getProfile,
+  listProfiles,
+  touchProfile,
+} from "../lib/profiles.js";
 
 const program = new Command();
 
@@ -54,12 +61,52 @@ program
     render(<App />);
   });
 
+// Init command — register a new agent profile
+program
+  .command("init")
+  .description("Register a new agent profile with a unique ID")
+  .option("-a, --agent <type>", "Agent type: claude, gemini, custom", "claude")
+  .option("-n, --name <name>", "Optional display name for the agent")
+  .option("-j, --json", "Output as JSON", false)
+  .action((options: { agent: string; name?: string; json: boolean }) => {
+    const agentType = options.agent as "claude" | "gemini" | "custom";
+    if (!["claude", "gemini", "custom"].includes(agentType)) {
+      if (options.json) {
+        console.log(JSON.stringify({ error: `Invalid agent type: ${options.agent}`, valid: ["claude", "gemini", "custom"] }));
+      } else {
+        console.log(chalk.red(`Invalid agent type: ${options.agent}`));
+        console.log(chalk.dim("Valid types: claude, gemini, custom"));
+      }
+      return;
+    }
+
+    const profile = createProfile({ agent_type: agentType, name: options.name });
+
+    if (options.json) {
+      console.log(JSON.stringify(profile));
+      return;
+    }
+
+    console.log(chalk.green(`\n✓ Agent profile created\n`));
+    console.log(`  ${chalk.dim("Agent ID:")}   ${chalk.bold(profile.agent_id)}`);
+    console.log(`  ${chalk.dim("Type:")}       ${profile.agent_type}`);
+    if (profile.name) {
+      console.log(`  ${chalk.dim("Name:")}       ${profile.name}`);
+    }
+    console.log(`  ${chalk.dim("Profile:")}    ~/.hooks/profiles/${profile.agent_id}.json`);
+    console.log();
+    console.log(chalk.dim("  Install hooks with this profile:"));
+    console.log(`    hooks install gitguard --profile ${profile.agent_id}`);
+    console.log();
+  });
+
 // Run command — executes a hook, called by AI coding agents via settings.json
 program
   .command("run")
   .argument("<hook>", "Hook to run")
+  .option("--profile <id>", "Agent profile ID")
   .description("Execute a hook (called by AI coding agents)")
-  .action(async (hook: string) => {
+  .action(async (hook: string, options: { profile?: string }) => {
     const meta = getHook(hook);
     if (!meta) {
       console.error(JSON.stringify({ error: `Hook '${hook}' not found` }));
@@ -77,9 +124,30 @@ program
     // Read stdin (agent passes hook context as JSON)
     const stdin = await new Response(Bun.stdin.stream()).text();
 
+    // If profile specified, inject agent data into the hook input
+    let hookStdin = stdin;
+    if (options.profile) {
+      const profile = getProfile(options.profile);
+      if (profile) {
+        touchProfile(options.profile);
+        try {
+          const input = JSON.parse(stdin);
+          input.agent = {
+            agent_id: profile.agent_id,
+            agent_type: profile.agent_type,
+            name: profile.name,
+            preferences: profile.preferences,
+          };
+          hookStdin = JSON.stringify(input);
+        } catch {
+          // If stdin is not valid JSON, pass through unmodified
+        }
+      }
+    }
+
     // Execute the hook script with bun, passing stdin through
     const proc = Bun.spawn(["bun", "run", hookScript], {
-      stdin: new Response(stdin),
+      stdin: new Response(hookStdin),
       stdout: "pipe",
       stderr: "pipe",
       env: process.env,
@@ -104,6 +172,7 @@ program
   .option("-c, --category <category>", "Install all hooks in a category")
   .option("-g, --global", "Install globally (~/.claude/settings.json)", false)
   .option("-p, --project", "Install for current project (.claude/settings.json)", false)
+  .option("--profile <id>", "Agent profile ID to scope hooks to")
   .option("-j, --json", "Output as JSON", false)
   .description("Install one or more hooks")
   .action((hooks: string[], options) => {
@@ -135,7 +204,7 @@ program
 
     const results = [];
     for (const name of toInstall) {
-      const result = installHook(name, { scope, overwrite: options.overwrite });
+      const result = installHook(name, { scope, overwrite: options.overwrite, profile: options.profile });
       results.push(result);
     }
 
@@ -178,25 +247,27 @@ program
   .option("-r, --registered", "Show registered hooks", false)
   .option("-g, --global", "Check global settings", false)
   .option("-p, --project", "Check project settings", false)
+  .option("-t, --target <target>", "Agent target: claude, gemini (default: claude)", "claude")
   .option("-j, --json", "Output as JSON", false)
   .description("List available or installed hooks")
   .action((options) => {
     const scope = resolveScope(options);
 
     if (options.registered || options.installed) {
-      const registered = getRegisteredHooks(scope);
+      const target = (options.target === "gemini" ? "gemini" : "claude") as "claude" | "gemini";
+      const registered = getRegisteredHooksForTarget(scope, target);
       if (options.json) {
         console.log(JSON.stringify(registered.map((name) => {
           const meta = getHook(name);
-          return { name, event: meta?.event, version: meta?.version, description: meta?.description, scope };
+          return { name, event: meta?.event, version: meta?.version, description: meta?.description, scope, target };
         })));
         return;
       }
       if (registered.length === 0) {
-        console.log(chalk.dim(`No hooks registered (${scope})`));
+        console.log(chalk.dim(`No hooks registered (${scope}, ${target})`));
         return;
       }
-      console.log(chalk.bold(`\nRegistered hooks — ${scope} (${registered.length}):\n`));
+      console.log(chalk.bold(`\nRegistered hooks — ${scope}/${target} (${registered.length}):\n`));
       for (const name of registered) {
         const meta = getHook(name);
         console.log(
@@ -419,7 +490,10 @@ program
           const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
           const eventHooks = settings.hooks?.[meta.event] || [];
           const found = eventHooks.some((entry: any) =>
-            entry.hooks?.some((h: any) => h.command === `hooks run ${name}`)
+            entry.hooks?.some((h: any) => {
+              const match = h.command?.match(/^hooks run (\w+)/);
+              return match && match[1] === name;
+            })
           );
           if (!found) {
             issues.push({ hook: name, issue: `Not registered under correct event (${meta.event})`, severity: "error" });

@@ -37,6 +37,12 @@ import {
   type Scope,
   type InstallResult,
 } from "../lib/installer.js";
+import {
+  createProfile,
+  getProfile,
+  listProfiles,
+  type AgentProfile,
+} from "../lib/profiles.js";
 
 export const MCP_PORT = 39427;
 
@@ -111,10 +117,11 @@ export function createHooksServer(): McpServer {
       hooks: z.array(z.string()).describe("Hook names to install"),
       scope: z.enum(["global", "project"]).default("global").describe("Install scope"),
       overwrite: z.boolean().default(false).describe("Overwrite if already installed"),
+      profile: z.string().optional().describe("Agent profile ID to scope hooks to"),
     },
-    async ({ hooks, scope, overwrite }) => {
-      const results = hooks.map((name) => installHook(name, { scope, overwrite }));
-      return formatInstallResults(results, { scope });
+    async ({ hooks, scope, overwrite, profile }) => {
+      const results = hooks.map((name) => installHook(name, { scope, overwrite, profile }));
+      return formatInstallResults(results, { scope, profile });
     }
   );
 
@@ -200,7 +207,10 @@ export function createHooksServer(): McpServer {
             const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
             const eventHooks = settings.hooks?.[meta.event] || [];
             const found = eventHooks.some((entry: any) =>
-              entry.hooks?.some((h: any) => h.command === `hooks run ${name}`)
+              entry.hooks?.some((h: any) => {
+                const match = h.command?.match(/^hooks run (\w+)/);
+                return match && match[1] === name;
+              })
             );
             if (!found) {
               issues.push({ hook: name, issue: `Not registered under correct event (${meta.event})`, severity: "error" });
@@ -287,6 +297,87 @@ export function createHooksServer(): McpServer {
         return { name, event: meta?.event, version: meta?.version, description: meta?.description };
       });
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    }
+  );
+
+  server.tool(
+    "hooks_run",
+    "Execute a hook programmatically with the given input and return its output",
+    {
+      name: z.string().describe("Hook name (e.g. 'gitguard', 'checkpoint')"),
+      input: z.record(z.string(), z.unknown()).default(() => ({})).describe("Hook input as JSON object (HookInput)"),
+      profile: z.string().optional().describe("Agent profile ID to inject into hook input"),
+    },
+    async ({ name, input, profile }) => {
+      const meta = getHook(name);
+      if (!meta) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: `Hook '${name}' not found` }) }] };
+      }
+
+      const hookDir = getHookPath(name);
+      const hookScript = join(hookDir, "src", "hook.ts");
+      if (!existsSync(hookScript)) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: `Hook script not found: ${hookScript}` }) }] };
+      }
+
+      let hookInput = { ...input };
+      if (profile) {
+        const p = getProfile(profile);
+        if (p) {
+          (hookInput as any).agent = {
+            agent_id: p.agent_id,
+            agent_type: p.agent_type,
+            name: p.name,
+            preferences: p.preferences,
+          };
+        }
+      }
+
+      const proc = Bun.spawn(["bun", "run", hookScript], {
+        stdin: new Response(JSON.stringify(hookInput)),
+        stdout: "pipe",
+        stderr: "pipe",
+        env: process.env,
+      });
+
+      const [stdoutText, stderrText, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+
+      let output: unknown = {};
+      try { output = JSON.parse(stdoutText); } catch { output = { raw: stdoutText }; }
+
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({ hook: name, output, stderr: stderrText || undefined, exitCode }),
+        }],
+      };
+    }
+  );
+
+  server.tool(
+    "hooks_init",
+    "Register a new agent profile — returns a unique agent_id for use with hook installation and execution",
+    {
+      agent_type: z.enum(["claude", "gemini", "custom"]).default("claude").describe("Type of AI agent"),
+      name: z.string().optional().describe("Optional display name for the agent"),
+    },
+    async ({ agent_type, name }) => {
+      const profile = createProfile({ agent_type, name });
+      return { content: [{ type: "text", text: JSON.stringify(profile) }] };
+    }
+  );
+
+  server.tool(
+    "hooks_profiles",
+    "List all registered agent profiles",
+    {},
+    async () => {
+      const profiles = listProfiles();
+      return { content: [{ type: "text", text: JSON.stringify(profiles) }] };
     }
   );
 

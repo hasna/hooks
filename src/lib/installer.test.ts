@@ -262,7 +262,11 @@ describe("installer", () => {
       installHook("gitguard"); // PreToolUse
       const settings = JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"));
       expect(settings.hooks.PreToolUse).toBeDefined();
-      expect(settings.hooks.PostToolUse).toBeUndefined();
+      // Verify gitguard is not registered under PostToolUse (concurrent tests may leave empty arrays)
+      const postToolUseHasGitguard = (settings.hooks.PostToolUse || []).some((e: any) =>
+        e.hooks?.some((h: any) => h.command?.includes("gitguard"))
+      );
+      expect(postToolUseHasGitguard).toBe(false);
     });
 
     test("PostToolUse hook registers under PostToolUse", () => {
