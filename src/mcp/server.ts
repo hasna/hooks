@@ -67,15 +67,22 @@ export function createHooksServer(): McpServer {
 
   server.tool(
     "hooks_list",
-    "List all available hooks, optionally filtered by category",
-    { category: z.string().optional().describe("Filter by category name (e.g. 'Git Safety', 'Code Quality', 'Security', 'Notifications', 'Context Management')") },
-    async ({ category }) => {
+    "List all available hooks, optionally filtered by category. Use compact:true to get minimal output (name+event+matcher only) — saves tokens.",
+    {
+      category: z.string().optional().describe("Filter by category name (e.g. 'Git Safety', 'Code Quality', 'Security')"),
+      compact: z.boolean().default(false).describe("Return minimal fields only: name, event, matcher. Reduces token usage."),
+    },
+    async ({ category, compact }) => {
+      const slim = (hooks: typeof HOOKS) => compact ? hooks.map((h) => ({ name: h.name, event: h.event, matcher: h.matcher })) : hooks;
       if (category) {
         const cat = CATEGORIES.find((c) => c.toLowerCase() === category.toLowerCase());
         if (!cat) {
           return { content: [{ type: "text", text: JSON.stringify({ error: `Unknown category: ${category}`, available: [...CATEGORIES] }) }] };
         }
-        return { content: [{ type: "text", text: JSON.stringify(getHooksByCategory(cat)) }] };
+        return { content: [{ type: "text", text: JSON.stringify(slim(getHooksByCategory(cat))) }] };
+      }
+      if (compact) {
+        return { content: [{ type: "text", text: JSON.stringify(slim(HOOKS)) }] };
       }
       const result: Record<string, any> = {};
       for (const cat of CATEGORIES) {
@@ -87,11 +94,15 @@ export function createHooksServer(): McpServer {
 
   server.tool(
     "hooks_search",
-    "Search for hooks by name, description, or tags",
-    { query: z.string().describe("Search query") },
-    async ({ query }) => {
+    "Search for hooks by name, description, or tags. Use compact:true for minimal output to save tokens.",
+    {
+      query: z.string().describe("Search query"),
+      compact: z.boolean().default(false).describe("Return minimal fields only: name, event, matcher."),
+    },
+    async ({ query, compact }) => {
       const results = searchHooks(query);
-      return { content: [{ type: "text", text: JSON.stringify(results) }] };
+      const out = compact ? results.map((h) => ({ name: h.name, event: h.event, matcher: h.matcher })) : results;
+      return { content: [{ type: "text", text: JSON.stringify(out) }] };
     }
   );
 
@@ -222,7 +233,7 @@ export function createHooksServer(): McpServer {
         if (hookHealthy) healthy.push(name);
       }
 
-      return { content: [{ type: "text", text: JSON.stringify({ healthy, issues, registered, scope }) }] };
+      return { content: [{ type: "text", text: JSON.stringify({ healthy: issues.length === 0, healthy_hooks: healthy, issues, registered, scope }) }] };
     }
   );
 
@@ -294,7 +305,7 @@ export function createHooksServer(): McpServer {
       const registered = getRegisteredHooks(scope);
       const result = registered.map((name) => {
         const meta = getHook(name);
-        return { name, event: meta?.event, version: meta?.version, description: meta?.description };
+        return { name, event: meta?.event, matcher: meta?.matcher ?? "", version: meta?.version, description: meta?.description };
       });
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     }
@@ -395,6 +406,219 @@ export function createHooksServer(): McpServer {
       const updated = results.filter((r) => r.success).map((r) => r.hook);
       const failed = results.filter((r) => !r.success).map((r) => ({ hook: r.hook, error: r.error }));
       return { content: [{ type: "text", text: JSON.stringify({ updated, failed, total: results.length }) }] };
+    }
+  );
+
+  server.tool(
+    "hooks_context",
+    "Get full agent context in one call: installed hooks (with event+matcher), active profile, settings path, and doctor status. Call this once at session start instead of making 4 separate calls.",
+    {
+      scope: z.enum(["global", "project"]).default("global").describe("Scope to inspect"),
+      profile: z.string().optional().describe("Agent profile ID to include in context"),
+    },
+    async ({ scope, profile }) => {
+      const settingsPath = getSettingsPath(scope);
+      const registered = getRegisteredHooks(scope);
+      const hooks = registered.map((name) => {
+        const meta = getHook(name);
+        return { name, event: meta?.event, matcher: meta?.matcher ?? "", version: meta?.version };
+      });
+
+      // Doctor check
+      const issues: { hook: string; issue: string; severity: string }[] = [];
+      for (const name of registered) {
+        if (!hookExists(name)) {
+          issues.push({ hook: name, issue: "Hook not found in package", severity: "error" });
+        }
+      }
+      const healthy = issues.length === 0;
+
+      const ctx: Record<string, any> = {
+        scope,
+        settings_path: settingsPath,
+        settings_exists: existsSync(settingsPath),
+        registered_hooks: hooks,
+        hook_count: hooks.length,
+        healthy,
+        issues,
+        version: pkg.version,
+      };
+
+      if (profile) {
+        const p = getProfile(profile);
+        ctx.profile = p ?? null;
+      }
+
+      return { content: [{ type: "text", text: JSON.stringify(ctx) }] };
+    }
+  );
+
+  server.tool(
+    "hooks_preview",
+    "Simulate which installed PreToolUse hooks would fire for a given tool call and what decision each returns. Use this to understand your hook environment before taking an action.",
+    {
+      tool_name: z.string().describe("Tool name to simulate (e.g. 'Bash', 'Write', 'Edit')"),
+      tool_input: z.record(z.string(), z.unknown()).default(() => ({})).describe("Tool input to pass to matching hooks"),
+      scope: z.enum(["global", "project"]).default("global").describe("Scope to check"),
+      timeout_ms: z.number().default(5000).describe("Per-hook timeout in milliseconds"),
+    },
+    async ({ tool_name, tool_input, scope, timeout_ms }) => {
+      const registered = getRegisteredHooks(scope);
+      const matchingHooks = registered.filter((name) => {
+        const meta = getHook(name);
+        if (!meta || meta.event !== "PreToolUse") return false;
+        if (!meta.matcher) return true;
+        try { return new RegExp(meta.matcher).test(tool_name); } catch { return false; }
+      });
+
+      if (matchingHooks.length === 0) {
+        return { content: [{ type: "text", text: JSON.stringify({ tool_name, matching_hooks: [], result: "no_hooks_match", decision: "approve" }) }] };
+      }
+
+      const input = { tool_name, tool_input };
+      const results = await Promise.all(matchingHooks.map(async (name) => {
+        const hookDir = getHookPath(name);
+        const hookScript = join(hookDir, "src", "hook.ts");
+        if (!existsSync(hookScript)) return { name, decision: "approve", error: "script not found" };
+
+        const proc = Bun.spawn(["bun", "run", hookScript], {
+          stdin: new Response(JSON.stringify(input)),
+          stdout: "pipe", stderr: "pipe", env: process.env,
+        });
+        const timeout = new Promise<null>((r) => setTimeout(() => r(null), timeout_ms));
+        const res = await Promise.race([
+          Promise.all([new Response(proc.stdout).text(), proc.exited])
+            .then(([stdout]) => ({ stdout, timedOut: false })),
+          timeout.then(() => { proc.kill(); return { stdout: "", timedOut: true }; }),
+        ]);
+
+        if (res.timedOut) return { name, decision: "approve", timedOut: true };
+        let output: any = {};
+        try { output = JSON.parse(res.stdout); } catch {}
+        return { name, decision: output.decision ?? "approve", reason: output.reason, raw: output };
+      }));
+
+      const blocked = results.find((r) => r.decision === "block");
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            tool_name,
+            matching_hooks: matchingHooks,
+            results,
+            decision: blocked ? "block" : "approve",
+            blocked_by: blocked?.name ?? null,
+            blocked_reason: blocked?.reason ?? null,
+          }),
+        }],
+      };
+    }
+  );
+
+  server.tool(
+    "hooks_setup",
+    "Single-shot agent onboarding: create an agent profile + install recommended hooks in one call. Ideal for agents setting up hooks at session start.",
+    {
+      agent_type: z.enum(["claude", "gemini", "custom"]).default("claude").describe("Type of AI agent"),
+      name: z.string().optional().describe("Optional display name for the agent"),
+      hooks: z.array(z.string()).optional().describe("Hook names to install (omit for sensible defaults: gitguard, checkpoint, checktests, protectfiles)"),
+      scope: z.enum(["global", "project"]).default("global").describe("Install scope"),
+    },
+    async ({ agent_type, name, hooks, scope }) => {
+      const profile = createProfile({ agent_type, name });
+      const toInstall = hooks && hooks.length > 0
+        ? hooks
+        : ["gitguard", "checkpoint", "checktests", "protectfiles"];
+      const results = toInstall.map((h) => installHook(h, { scope, overwrite: false, profile: profile.agent_id }));
+      const installed = results.filter((r) => r.success).map((r) => r.hook);
+      const failed = results.filter((r) => !r.success).map((r) => ({ hook: r.hook, error: r.error }));
+      return {
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({ profile, installed, failed, scope, run_with: `hooks run <name> --profile ${profile.agent_id}` }),
+        }],
+      };
+    }
+  );
+
+  server.tool(
+    "hooks_batch_run",
+    "Run multiple hooks in parallel in a single call. Returns all results at once — more efficient than N separate hooks_run calls.",
+    {
+      hooks: z.array(z.object({
+        name: z.string().describe("Hook name"),
+        input: z.record(z.string(), z.unknown()).default(() => ({})).describe("Hook input JSON"),
+      })).describe("List of hooks to run with their inputs"),
+      timeout_ms: z.number().default(10000).describe("Per-hook timeout in milliseconds"),
+    },
+    async ({ hooks, timeout_ms }) => {
+      const results = await Promise.all(hooks.map(async ({ name, input }) => {
+        const meta = getHook(name);
+        if (!meta) return { name, error: `Hook '${name}' not found` };
+        const hookScript = join(getHookPath(name), "src", "hook.ts");
+        if (!existsSync(hookScript)) return { name, error: "script not found" };
+
+        const proc = Bun.spawn(["bun", "run", hookScript], {
+          stdin: new Response(JSON.stringify(input)),
+          stdout: "pipe", stderr: "pipe", env: process.env,
+        });
+        const timeout = new Promise<null>((r) => setTimeout(() => r(null), timeout_ms));
+        const res = await Promise.race([
+          Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+            .then(([stdout, stderr, exitCode]) => ({ stdout, stderr, exitCode, timedOut: false })),
+          timeout.then(() => { proc.kill(); return { stdout: "", stderr: "", exitCode: -1, timedOut: true }; }),
+        ]);
+
+        let output: any = {};
+        try { output = JSON.parse(res.stdout); } catch { output = res.stdout ? { raw: res.stdout } : {}; }
+        return { name, output, exitCode: res.exitCode, ...(res.timedOut ? { timedOut: true } : {}) };
+      }));
+
+      return { content: [{ type: "text", text: JSON.stringify({ results, count: results.length }) }] };
+    }
+  );
+
+  server.tool(
+    "hooks_disable",
+    "Temporarily disable a registered hook without removing it. Stores disabled list in settings under hooks.__disabled.",
+    {
+      name: z.string().describe("Hook name to disable"),
+      scope: z.enum(["global", "project"]).default("global").describe("Scope"),
+    },
+    async ({ name, scope }) => {
+      const settingsPath = getSettingsPath(scope);
+      let settings: Record<string, any> = {};
+      try { if (existsSync(settingsPath)) settings = JSON.parse(readFileSync(settingsPath, "utf-8")); } catch {}
+      if (!settings.hooks) settings.hooks = {};
+      const disabled: string[] = settings.hooks.__disabled ?? [];
+      if (!disabled.includes(name)) disabled.push(name);
+      settings.hooks.__disabled = disabled;
+      const { writeFileSync, mkdirSync } = await import("fs");
+      const { dirname } = await import("path");
+      mkdirSync(dirname(settingsPath), { recursive: true });
+      writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+      return { content: [{ type: "text", text: JSON.stringify({ hook: name, disabled: true, scope }) }] };
+    }
+  );
+
+  server.tool(
+    "hooks_enable",
+    "Re-enable a previously disabled hook.",
+    {
+      name: z.string().describe("Hook name to enable"),
+      scope: z.enum(["global", "project"]).default("global").describe("Scope"),
+    },
+    async ({ name, scope }) => {
+      const settingsPath = getSettingsPath(scope);
+      let settings: Record<string, any> = {};
+      try { if (existsSync(settingsPath)) settings = JSON.parse(readFileSync(settingsPath, "utf-8")); } catch {}
+      if (settings.hooks?.__disabled) {
+        settings.hooks.__disabled = settings.hooks.__disabled.filter((n: string) => n !== name);
+        if (settings.hooks.__disabled.length === 0) delete settings.hooks.__disabled;
+        const { writeFileSync } = await import("fs");
+        writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+      }
+      return { content: [{ type: "text", text: JSON.stringify({ hook: name, disabled: false, scope }) }] };
     }
   );
 

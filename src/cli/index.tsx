@@ -594,7 +594,7 @@ program
     }
 
     if (options.json) {
-      console.log(JSON.stringify({ healthy, issues, registered, scope }));
+      console.log(JSON.stringify({ healthy: issues.length === 0, healthy_hooks: healthy, issues, registered, scope }));
       return;
     }
 
