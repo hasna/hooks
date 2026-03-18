@@ -78,9 +78,9 @@ describe("MCP server", () => {
       restoreSettings();
     });
 
-    test("lists all 15 tools", async () => {
+    test("lists all 21 tools", async () => {
       const { tools } = await client.listTools();
-      expect(tools.length).toBe(15);
+      expect(tools.length).toBe(21);
       const names = tools.map((t) => t.name);
       expect(names).toContain("hooks_list");
       expect(names).toContain("hooks_search");
@@ -92,6 +92,12 @@ describe("MCP server", () => {
       expect(names).toContain("hooks_doctor");
       expect(names).toContain("hooks_run");
       expect(names).toContain("hooks_update");
+      expect(names).toContain("hooks_context");
+      expect(names).toContain("hooks_preview");
+      expect(names).toContain("hooks_setup");
+      expect(names).toContain("hooks_batch_run");
+      expect(names).toContain("hooks_disable");
+      expect(names).toContain("hooks_enable");
       expect(names).toContain("hooks_categories");
       expect(names).toContain("hooks_docs");
       expect(names).toContain("hooks_registered");
@@ -291,10 +297,13 @@ describe("MCP server", () => {
     });
 
     test("hooks_doctor shows healthy after install", async () => {
+      backupSettings();
       await client.callTool({ name: "hooks_install", arguments: { hooks: ["gitguard"] } });
       const data = parseResult(await client.callTool({ name: "hooks_doctor", arguments: {} }));
-      expect(data.healthy).toContain("gitguard");
+      expect(data.healthy).toBe(true);
+      expect(data.healthy_hooks).toContain("gitguard");
       expect(data.issues).toHaveLength(0);
+      restoreSettings();
     });
 
     // --- hooks_categories ---
@@ -380,7 +389,8 @@ describe("MCP server", () => {
       await client.callTool({ name: "hooks_install", arguments: { hooks: ["packageage"], scope: "project", overwrite: true } });
       const data = parseResult(await client.callTool({ name: "hooks_doctor", arguments: { scope: "project" } }));
       expect(data.scope).toBe("project");
-      expect(data.healthy).toContain("packageage");
+      expect(data.healthy).toBe(true);
+      expect(data.healthy_hooks).toContain("packageage");
     });
 
     // --- install category for all categories ---
@@ -553,8 +563,9 @@ describe("MCP server", () => {
 
       // Doctor — both healthy
       const doctor = parseResult(await client.callTool({ name: "hooks_doctor", arguments: {} }));
-      expect(doctor.healthy).toContain("gitguard");
-      expect(doctor.healthy).toContain("packageage");
+      expect(doctor.healthy).toBe(true);
+      expect(doctor.healthy_hooks).toContain("gitguard");
+      expect(doctor.healthy_hooks).toContain("packageage");
 
       // Registered — both present
       const reg = parseResult(await client.callTool({ name: "hooks_registered", arguments: {} }));
@@ -597,6 +608,147 @@ describe("MCP server", () => {
         arguments: { name: "nonexistent-hook-xyz", input: {} },
       }));
       expect(data.error).toContain("not found");
+    });
+
+    // --- hooks_context ---
+
+    test("hooks_context returns full session context", async () => {
+      const data = parseResult(await client.callTool({ name: "hooks_context", arguments: {} }));
+      expect(data).toHaveProperty("scope");
+      expect(data).toHaveProperty("settings_path");
+      expect(data).toHaveProperty("settings_exists");
+      expect(data).toHaveProperty("registered_hooks");
+      expect(data).toHaveProperty("hook_count");
+      expect(data).toHaveProperty("healthy");
+      expect(data).toHaveProperty("issues");
+      expect(data).toHaveProperty("version");
+      expect(Array.isArray(data.registered_hooks)).toBe(true);
+    });
+
+    test("hooks_context registered_hooks include matcher field", async () => {
+      backupSettings();
+      await client.callTool({ name: "hooks_install", arguments: { hooks: ["gitguard"] } });
+      const data = parseResult(await client.callTool({ name: "hooks_context", arguments: {} }));
+      const gitguard = data.registered_hooks.find((h: any) => h.name === "gitguard");
+      expect(gitguard).toBeDefined();
+      expect(gitguard).toHaveProperty("event");
+      expect(gitguard).toHaveProperty("matcher");
+      restoreSettings();
+    });
+
+    // --- hooks_preview ---
+
+    test("hooks_preview returns approve when no hooks match", async () => {
+      const data = parseResult(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "echo hello" } },
+      }));
+      expect(data).toHaveProperty("decision");
+      expect(data).toHaveProperty("tool_name");
+      expect(data.tool_name).toBe("Bash");
+    });
+
+    test("hooks_preview returns matching hooks after install", async () => {
+      backupSettings();
+      await client.callTool({ name: "hooks_install", arguments: { hooks: ["gitguard"] } });
+      const data = parseResult(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "echo safe" } },
+      }));
+      expect(data.matching_hooks).toContain("gitguard");
+      expect(data).toHaveProperty("results");
+      expect(data.results.length).toBeGreaterThan(0);
+      restoreSettings();
+    });
+
+    // --- hooks_setup ---
+
+    test("hooks_setup creates profile and installs defaults", async () => {
+      backupSettings();
+      const data = parseResult(await client.callTool({
+        name: "hooks_setup",
+        arguments: { agent_type: "claude", name: "test-agent" },
+      }));
+      expect(data).toHaveProperty("profile");
+      expect(data.profile.agent_type).toBe("claude");
+      expect(data.profile.name).toBe("test-agent");
+      expect(Array.isArray(data.installed)).toBe(true);
+      expect(data.installed.length).toBeGreaterThan(0);
+      expect(data).toHaveProperty("run_with");
+      restoreSettings();
+    });
+
+    // --- hooks_batch_run ---
+
+    test("hooks_batch_run runs multiple hooks", async () => {
+      const data = parseResult(await client.callTool({
+        name: "hooks_batch_run",
+        arguments: {
+          hooks: [
+            { name: "gitguard", input: { tool_name: "Bash", tool_input: { command: "echo hi" } } },
+            { name: "gitguard", input: { tool_name: "Bash", tool_input: { command: "echo hi2" } } },
+          ],
+        },
+      }));
+      expect(data.count).toBe(2);
+      expect(data.results).toHaveLength(2);
+      expect(data.results[0].name).toBe("gitguard");
+    });
+
+    test("hooks_batch_run handles unknown hook gracefully", async () => {
+      const data = parseResult(await client.callTool({
+        name: "hooks_batch_run",
+        arguments: { hooks: [{ name: "nonexistent-xyz", input: {} }] },
+      }));
+      expect(data.results[0].error).toBeTruthy();
+    });
+
+    // --- hooks_disable / hooks_enable ---
+
+    test("hooks_disable and hooks_enable round-trip", async () => {
+      const disabled = parseResult(await client.callTool({
+        name: "hooks_disable",
+        arguments: { name: "gitguard" },
+      }));
+      expect(disabled.disabled).toBe(true);
+      expect(disabled.hook).toBe("gitguard");
+
+      const enabled = parseResult(await client.callTool({
+        name: "hooks_enable",
+        arguments: { name: "gitguard" },
+      }));
+      expect(enabled.disabled).toBe(false);
+    });
+
+    // --- compact mode ---
+
+    test("hooks_list compact returns minimal fields", async () => {
+      const data = parseResult(await client.callTool({ name: "hooks_list", arguments: { compact: true } }));
+      expect(Array.isArray(data)).toBe(true);
+      expect(data.length).toBe(31);
+      expect(data[0]).toHaveProperty("name");
+      expect(data[0]).toHaveProperty("event");
+      expect(data[0]).toHaveProperty("matcher");
+      expect(data[0]).not.toHaveProperty("description");
+    });
+
+    test("hooks_search compact returns minimal fields", async () => {
+      const data = parseResult(await client.callTool({ name: "hooks_search", arguments: { query: "git", compact: true } }));
+      expect(Array.isArray(data)).toBe(true);
+      expect(data[0]).toHaveProperty("name");
+      expect(data[0]).toHaveProperty("event");
+      expect(data[0]).not.toHaveProperty("tags");
+    });
+
+    // --- matcher in hooks_registered ---
+
+    test("hooks_registered includes matcher field", async () => {
+      backupSettings();
+      await client.callTool({ name: "hooks_install", arguments: { hooks: ["gitguard"] } });
+      const data = parseResult(await client.callTool({ name: "hooks_registered", arguments: {} }));
+      const hook = data.find((h: any) => h.name === "gitguard");
+      expect(hook).toHaveProperty("matcher");
+      restoreSettings();
     });
   });
 

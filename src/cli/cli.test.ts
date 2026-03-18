@@ -254,7 +254,8 @@ describe("CLI", () => {
       expect(data).toHaveProperty("issues");
       expect(data).toHaveProperty("registered");
       expect(data).toHaveProperty("scope");
-      expect(Array.isArray(data.healthy)).toBe(true);
+      expect(typeof data.healthy).toBe("boolean");
+      expect(Array.isArray(data.healthy_hooks)).toBe(true);
       expect(Array.isArray(data.issues)).toBe(true);
     });
   });
@@ -407,8 +408,9 @@ describe("CLI", () => {
 
         // Doctor
         const doctorData = await runJson("doctor");
-        expect(doctorData.healthy).toContain("gitguard");
-        expect(doctorData.healthy).toContain("packageage");
+        expect(doctorData.healthy).toBe(true);
+        expect(doctorData.healthy_hooks).toContain("gitguard");
+        expect(doctorData.healthy_hooks).toContain("packageage");
         expect(doctorData.issues).toHaveLength(0);
 
         // List installed
