@@ -5,10 +5,11 @@
  * from each hook, NOT the stdin/stdout plumbing.
  */
 
-import { describe, test, expect } from "bun:test";
-import { existsSync, readFileSync } from "fs";
+import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { existsSync, readFileSync, mkdirSync, rmSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
+import { tmpdir } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOOKS_DIR = join(__dirname, "..", "..", "hooks");
@@ -598,4 +599,130 @@ describe("hook source files exist", () => {
       expect(existsSync(join(HOOKS_DIR, hookDir, "README.md"))).toBe(true);
     });
   }
+});
+
+// ====================================================================
+// Observability hooks — SQLite DB assertions
+// Hooks are run as subprocesses with HOOKS_DB_PATH pointing to a
+// temp file so tests never write to ~/.hooks/hooks.db.
+// ====================================================================
+
+describe("observability hooks write to SQLite", () => {
+  let tmpDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    tmpDir = join(tmpdir(), `hooks-test-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+    dbPath = join(tmpDir, "test.db");
+  });
+
+  afterEach(() => {
+    try { rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  });
+
+  async function runHook(hookName: string, input: object): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const hookScript = join(HOOKS_DIR, `hook-${hookName}`, "src", "hook.ts");
+    const proc = Bun.spawn(["bun", "run", hookScript], {
+      stdin: new Response(JSON.stringify(input)),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env, HOOKS_DB_PATH: dbPath },
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, exitCode };
+  }
+
+  function readDb(path: string): any[] {
+    const { Database } = require("bun:sqlite");
+    const db = new Database(path);
+    const rows = db.query("SELECT * FROM hook_events ORDER BY timestamp DESC").all();
+    db.close();
+    return rows as any[];
+  }
+
+  test("sessionlog writes PostToolUse event to DB", async () => {
+    const input = {
+      session_id: "test-session-001",
+      cwd: tmpDir,
+      tool_name: "Read",
+      tool_input: { file_path: "/some/file.ts" },
+    };
+    const { exitCode } = await runHook("sessionlog", input);
+    expect(exitCode).toBe(0);
+    const rows = readDb(dbPath);
+    expect(rows.length).toBe(1);
+    expect(rows[0].hook_name).toBe("sessionlog");
+    expect(rows[0].event_type).toBe("PostToolUse");
+    expect(rows[0].session_id).toBe("test-session-001");
+    expect(rows[0].tool_name).toBe("Read");
+  });
+
+  test("commandlog writes Bash event to DB", async () => {
+    const input = {
+      session_id: "test-session-002",
+      cwd: tmpDir,
+      tool_name: "Bash",
+      tool_input: { command: "echo hello", exit_code: 0 },
+    };
+    const { exitCode } = await runHook("commandlog", input);
+    expect(exitCode).toBe(0);
+    const rows = readDb(dbPath);
+    expect(rows.length).toBe(1);
+    expect(rows[0].hook_name).toBe("commandlog");
+    expect(rows[0].tool_name).toBe("Bash");
+    expect(rows[0].tool_input).toContain("echo hello");
+  });
+
+  test("commandlog ignores non-Bash events (no DB write)", async () => {
+    const input = {
+      session_id: "test-session-003",
+      cwd: tmpDir,
+      tool_name: "Read",
+      tool_input: { file_path: "/some/file.ts" },
+    };
+    const { exitCode } = await runHook("commandlog", input);
+    expect(exitCode).toBe(0);
+    if (existsSync(dbPath)) {
+      const rows = readDb(dbPath);
+      expect(rows.length).toBe(0);
+    }
+  });
+
+  test("errornotify writes error event to DB when exit code non-zero", async () => {
+    const input = {
+      session_id: "test-session-004",
+      cwd: tmpDir,
+      tool_name: "Bash",
+      tool_input: { command: "cat missing.txt" },
+      tool_output: { exit_code: 1, stderr: "cat: missing.txt: No such file or directory" },
+    };
+    const { exitCode } = await runHook("errornotify", input);
+    expect(exitCode).toBe(0);
+    const rows = readDb(dbPath);
+    expect(rows.length).toBe(1);
+    expect(rows[0].hook_name).toBe("errornotify");
+    expect(rows[0].error).toBeTruthy();
+    expect(rows[0].error).toContain("Exit code 1");
+  });
+
+  test("errornotify does not write to DB when no error", async () => {
+    const input = {
+      session_id: "test-session-005",
+      cwd: tmpDir,
+      tool_name: "Bash",
+      tool_input: { command: "echo ok" },
+      tool_output: { exit_code: 0, output: "ok" },
+    };
+    const { exitCode } = await runHook("errornotify", input);
+    expect(exitCode).toBe(0);
+    if (existsSync(dbPath)) {
+      const rows = readDb(dbPath);
+      expect(rows.length).toBe(0);
+    }
+  });
 });

@@ -645,6 +645,134 @@ export function createHooksServer(): McpServer {
     }
   );
 
+  // --- Log query tools ---
+
+  server.tool(
+    "hooks_log_list",
+    "List hook events from SQLite (~/.hooks/hooks.db). Filter by hook name, session ID, or time range.",
+    {
+      hook_name: z.string().optional().describe("Filter by hook name (e.g. 'sessionlog', 'costwatch')"),
+      session_id: z.string().optional().describe("Filter by session ID prefix"),
+      limit: z.number().default(50).describe("Max number of events to return"),
+      since: z.string().optional().describe("ISO timestamp or duration string (e.g. '1h', '30m', '7d') to filter from"),
+    },
+    async ({ hook_name, session_id, limit, since }) => {
+      const { getDb } = await import("../db/index.js");
+      const db = getDb();
+
+      function parseDuration(s: string): string | null {
+        const m = s.match(/^(\d+)(s|m|h|d)$/);
+        if (!m) return null;
+        const n = parseInt(m[1]);
+        const ms = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2] as "s"|"m"|"h"|"d"]!;
+        return new Date(Date.now() - n * ms).toISOString();
+      }
+
+      let sql = "SELECT * FROM hook_events WHERE 1=1";
+      const params: (string | number)[] = [];
+
+      if (hook_name) { sql += " AND hook_name = ?"; params.push(hook_name); }
+      if (session_id) { sql += " AND session_id LIKE ?"; params.push(`${session_id}%`); }
+      if (since) {
+        const ts = since.match(/^\d{4}/) ? since : parseDuration(since);
+        if (ts) { sql += " AND timestamp >= ?"; params.push(ts); }
+      }
+      sql += " ORDER BY timestamp DESC LIMIT ?";
+      params.push(limit);
+
+      const rows = db.query(sql).all(...params);
+      return { content: [{ type: "text", text: JSON.stringify({ events: rows, count: (rows as any[]).length }) }] };
+    }
+  );
+
+  server.tool(
+    "hooks_log_tail",
+    "Show the most recent hook events from SQLite.",
+    {
+      n: z.number().default(20).describe("Number of most recent events to return"),
+    },
+    async ({ n }) => {
+      const { getDb } = await import("../db/index.js");
+      const db = getDb();
+      const rows = db.query("SELECT * FROM hook_events ORDER BY timestamp DESC LIMIT ?").all(n);
+      return { content: [{ type: "text", text: JSON.stringify({ events: rows, count: (rows as any[]).length }) }] };
+    }
+  );
+
+  server.tool(
+    "hooks_log_errors",
+    "Show hook events that contain errors, optionally filtered by time range.",
+    {
+      since: z.string().default("24h").describe("Duration string (e.g. '1h', '30m', '7d') or ISO timestamp"),
+      limit: z.number().default(50).describe("Max number of error events to return"),
+    },
+    async ({ since, limit }) => {
+      const { getDb } = await import("../db/index.js");
+      const db = getDb();
+
+      function parseDuration(s: string): string {
+        const m = s.match(/^(\d+)(s|m|h|d)$/);
+        if (!m) return s;
+        const n = parseInt(m[1]);
+        const ms = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2] as "s"|"m"|"h"|"d"]!;
+        return new Date(Date.now() - n * ms).toISOString();
+      }
+
+      const ts = since.match(/^\d{4}/) ? since : parseDuration(since);
+      const rows = db.query(
+        "SELECT * FROM hook_events WHERE error IS NOT NULL AND timestamp >= ? ORDER BY timestamp DESC LIMIT ?"
+      ).all(ts, limit);
+      return { content: [{ type: "text", text: JSON.stringify({ events: rows, count: (rows as any[]).length }) }] };
+    }
+  );
+
+  server.tool(
+    "hooks_log_summary",
+    "Summarize hook execution: counts per hook, error rates, and recent activity.",
+    {
+      since: z.string().default("24h").describe("Duration string (e.g. '1h', '24h', '7d') or ISO timestamp"),
+    },
+    async ({ since }) => {
+      const { getDb } = await import("../db/index.js");
+      const db = getDb();
+
+      function parseDuration(s: string): string {
+        const m = s.match(/^(\d+)(s|m|h|d)$/);
+        if (!m) return s;
+        const n = parseInt(m[1]);
+        const ms = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2] as "s"|"m"|"h"|"d"]!;
+        return new Date(Date.now() - n * ms).toISOString();
+      }
+
+      const ts = since.match(/^\d{4}/) ? since : parseDuration(since);
+
+      const totals = db.query(
+        "SELECT hook_name, COUNT(*) as total, SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) as errors FROM hook_events WHERE timestamp >= ? GROUP BY hook_name ORDER BY total DESC"
+      ).all(ts) as { hook_name: string; total: number; errors: number }[];
+
+      const summary = totals.map((r) => ({
+        hook_name: r.hook_name,
+        total: r.total,
+        errors: r.errors,
+        error_rate: r.total > 0 ? ((r.errors / r.total) * 100).toFixed(1) + "%" : "0%",
+      }));
+
+      const grandTotal = totals.reduce((s, r) => s + r.total, 0);
+      const grandErrors = totals.reduce((s, r) => s + r.errors, 0);
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            since: ts,
+            hooks: summary,
+            totals: { events: grandTotal, errors: grandErrors, hooks_active: totals.length },
+          }),
+        }],
+      };
+    }
+  );
+
   return server;
 }
 

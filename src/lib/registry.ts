@@ -301,7 +301,7 @@ export const HOOKS: HookMeta[] = [
   {
     name: "sessionlog",
     displayName: "Session Log",
-    description: "Logs every tool call to .claude/session-log-<date>.jsonl",
+    description: "Logs every tool call to SQLite (~/.hooks/hooks.db)",
     version: "0.1.0",
     category: "Observability",
     event: "PostToolUse",
@@ -311,7 +311,7 @@ export const HOOKS: HookMeta[] = [
   {
     name: "commandlog",
     displayName: "Command Log",
-    description: "Logs every bash command Claude runs to .claude/commands.log",
+    description: "Logs every Bash command to SQLite (~/.hooks/hooks.db)",
     version: "0.1.0",
     category: "Observability",
     event: "PostToolUse",
@@ -321,7 +321,7 @@ export const HOOKS: HookMeta[] = [
   {
     name: "costwatch",
     displayName: "Cost Watch",
-    description: "Estimates session token usage and warns when budget threshold is exceeded",
+    description: "Estimates session token usage, persists cost history to SQLite, and warns on budget overrun",
     version: "0.1.0",
     category: "Observability",
     event: "Stop",
@@ -331,7 +331,7 @@ export const HOOKS: HookMeta[] = [
   {
     name: "errornotify",
     displayName: "Error Notify",
-    description: "Detects tool failures and logs errors to .claude/errors.log",
+    description: "Detects tool failures and logs errors to SQLite (~/.hooks/hooks.db)",
     version: "0.1.0",
     category: "Observability",
     event: "PostToolUse",
