@@ -549,6 +549,9 @@ describe("hook package.json structure", () => {
     "hook-permissionguard", "hook-protectfiles", "hook-promptguard",
     "hook-sessionlog", "hook-commandlog", "hook-costwatch", "hook-errornotify",
     "hook-taskgate",
+    "hook-typecheck-gate", "hook-filelock", "hook-failure-to-task",
+    "hook-dm-inject", "hook-announce-stop", "hook-announce-start",
+    "hook-affected-tests", "hook-conflict-detect",
   ];
 
   for (const hookDir of hookDirsForPkg) {
@@ -582,6 +585,9 @@ describe("hook source files exist", () => {
     "hook-permissionguard", "hook-protectfiles", "hook-promptguard",
     "hook-sessionlog", "hook-commandlog", "hook-costwatch", "hook-errornotify",
     "hook-taskgate",
+    "hook-typecheck-gate", "hook-filelock", "hook-failure-to-task",
+    "hook-dm-inject", "hook-announce-stop", "hook-announce-start",
+    "hook-affected-tests", "hook-conflict-detect",
   ];
 
   for (const hookDir of hookDirs) {

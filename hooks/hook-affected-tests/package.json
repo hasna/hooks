@@ -1,0 +1,50 @@
+{
+  "name": "@hasna/hook-affected-tests",
+  "version": "0.1.0",
+  "description": "Claude Code hook that maps edited files to test files and runs them after edits",
+  "type": "module",
+  "main": "./dist/hook.js",
+  "exports": {
+    ".": {
+      "import": "./dist/hook.js",
+      "types": "./dist/hook.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun build ./src/hook.ts --outdir ./dist --target node",
+    "prepublishOnly": "bun run build",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "claude-code",
+    "claude",
+    "hook",
+    "tests",
+    "affected",
+    "test-runner",
+    "quality"
+  ],
+  "author": "Hasna",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hasna/hooks.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.8",
+    "@types/node": "^20",
+    "typescript": "^5.0.0"
+  }
+}

@@ -345,4 +345,92 @@ export const HOOKS: HookMeta[] = [
     matcher: "",
     tags: ["tasks", "completion", "gate", "quality", "agent-teams"],
   },
+
+  // Code Quality (new)
+  {
+    name: "typecheck-gate",
+    displayName: "Typecheck Gate",
+    description: "Runs TypeScript type checking on Stop and blocks if type errors are found",
+    version: "0.1.0",
+    category: "Code Quality",
+    event: "Stop",
+    matcher: "",
+    tags: ["typescript", "typecheck", "types", "quality", "gate"],
+  },
+  {
+    name: "affected-tests",
+    displayName: "Affected Tests",
+    description: "Maps edited files to their test files and runs them automatically after edits",
+    version: "0.1.0",
+    category: "Code Quality",
+    event: "PostToolUse",
+    matcher: "Edit|Write|NotebookEdit",
+    tags: ["tests", "test-runner", "affected", "quality"],
+  },
+
+  // Git Safety (new)
+  {
+    name: "conflict-detect",
+    displayName: "Conflict Detect",
+    description: "Blocks edits on files with unresolved git merge conflict markers",
+    version: "0.1.0",
+    category: "Git Safety",
+    event: "PreToolUse",
+    matcher: "Edit|Write",
+    tags: ["git", "conflicts", "merge", "safety"],
+  },
+
+  // Workflow Automation (new)
+  {
+    name: "failure-to-task",
+    displayName: "Failure to Task",
+    description: "Creates a todo task automatically when test or build commands fail",
+    version: "0.1.0",
+    category: "Workflow Automation",
+    event: "PostToolUse",
+    matcher: "Bash",
+    tags: ["failures", "tasks", "tests", "build", "automation"],
+  },
+
+  // Agent Teams (new)
+  {
+    name: "filelock",
+    displayName: "File Lock",
+    description: "Auto-checks file locks before edits to prevent multi-agent conflicts",
+    version: "0.1.0",
+    category: "Agent Teams",
+    event: "PreToolUse",
+    matcher: "Edit|Write|NotebookEdit",
+    tags: ["locking", "coordination", "multi-agent", "conflict"],
+  },
+  {
+    name: "announce-start",
+    displayName: "Announce Start",
+    description: "On session start, auto-registers agent, reads messages, and announces to space",
+    version: "0.1.0",
+    category: "Agent Teams",
+    event: "Notification",
+    matcher: "",
+    tags: ["announcement", "start", "register", "messages", "agent-teams"],
+  },
+  {
+    name: "announce-stop",
+    displayName: "Announce Stop",
+    description: "On Stop, releases file locks, posts session summary, and updates task statuses",
+    version: "0.1.0",
+    category: "Agent Teams",
+    event: "Stop",
+    matcher: "",
+    tags: ["announcement", "stop", "locks", "summary", "agent-teams"],
+  },
+  {
+    name: "dm-inject",
+    displayName: "DM Inject",
+    description: "Injects unread direct messages into agent context on Notification events",
+    version: "0.1.0",
+    category: "Agent Teams",
+    event: "Notification",
+    matcher: "",
+    tags: ["messages", "dm", "context", "inject", "agent-teams"],
+  },
 ];

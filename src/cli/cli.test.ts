@@ -74,7 +74,7 @@ describe("CLI", () => {
   describe("hooks list", () => {
     test("lists all hooks", async () => {
       const { stdout } = await run("list");
-      expect(stdout).toContain("Available hooks (31)");
+      expect(stdout).toContain("Available hooks (39)");
       expect(stdout).toContain("Git Safety");
       expect(stdout).toContain("Code Quality");
       expect(stdout).toContain("Security");
@@ -84,8 +84,8 @@ describe("CLI", () => {
 
     test("--json returns all hooks grouped by category", async () => {
       const data = await runJson("list");
-      expect(data["Git Safety"]).toHaveLength(3);
-      expect(data["Code Quality"]).toHaveLength(7);
+      expect(data["Git Safety"]).toHaveLength(4);
+      expect(data["Code Quality"]).toHaveLength(9);
       expect(data["Security"]).toHaveLength(2);
       expect(data["Notifications"]).toHaveLength(5);
       expect(data["Context Management"]).toHaveLength(2);
@@ -367,13 +367,13 @@ describe("CLI", () => {
   });
 
   describe("hooks install --all (JSON)", () => {
-    test("--all --json installs all 15 hooks", async () => {
+    test("--all --json installs all 39 hooks", async () => {
       backupSettings();
       try {
         const data = await runJson("install", "--all");
-        expect(data.total).toBe(31);
-        expect(data.success).toBe(31);
-        expect(data.installed).toHaveLength(31);
+        expect(data.total).toBe(39);
+        expect(data.success).toBe(39);
+        expect(data.installed).toHaveLength(39);
         expect(data.scope).toBe("global");
       } finally {
         restoreSettings();
@@ -389,7 +389,8 @@ describe("CLI", () => {
         expect(data.installed).toContain("gitguard");
         expect(data.installed).toContain("branchprotect");
         expect(data.installed).toContain("checkpoint");
-        expect(data.success).toBe(3);
+        expect(data.installed).toContain("conflict-detect");
+        expect(data.success).toBe(4);
       } finally {
         restoreSettings();
       }
@@ -486,7 +487,7 @@ describe("CLI", () => {
   describe("hooks list --json structure", () => {
     test("category list has all hook fields", async () => {
       const data = await runJson("list", "-c", "Git Safety");
-      expect(data).toHaveLength(3);
+      expect(data).toHaveLength(4);
       for (const hook of data) {
         expect(hook).toHaveProperty("name");
         expect(hook).toHaveProperty("version");
@@ -510,9 +511,9 @@ describe("CLI", () => {
     test("counts match actual hook counts", async () => {
       const data = await runJson("categories");
       const gitSafety = data.find((c: any) => c.name === "Git Safety");
-      expect(gitSafety.count).toBe(3);
+      expect(gitSafety.count).toBe(4);
       const codeQuality = data.find((c: any) => c.name === "Code Quality");
-      expect(codeQuality.count).toBe(7);
+      expect(codeQuality.count).toBe(9);
       const security = data.find((c: any) => c.name === "Security");
       expect(security.count).toBe(2);
     });
@@ -649,7 +650,7 @@ describe("CLI", () => {
   describe("hooks install --category for all categories", () => {
     const categories = ["Code Quality", "Security", "Notifications", "Context Management"];
     const expectedCounts: Record<string, number> = {
-      "Code Quality": 7,
+      "Code Quality": 9,
       "Security": 2,
       "Notifications": 5,
       "Context Management": 2,
@@ -673,17 +674,19 @@ describe("CLI", () => {
       backupSettings();
       try {
         const install = await runJson("install", "--all");
-        expect(install.success).toBe(31);
+        expect(install.success).toBe(39);
 
         const listed = await runJson("list", "--installed");
-        expect(listed.length).toBeGreaterThanOrEqual(15);
+        expect(listed.length).toBeGreaterThanOrEqual(30);
 
         // Remove all one by one
         const allNames = install.installed as string[];
         for (const name of allNames) {
-          const rm = await runJson("remove", name);
-          expect(rm.removed).toBe(true);
+          await runJson("remove", name);
         }
+        // Verify all are removed
+        const afterRemove = await runJson("list", "--installed");
+        expect(afterRemove).toHaveLength(0);
       } finally {
         restoreSettings();
       }
