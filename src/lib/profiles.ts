@@ -1,12 +1,12 @@
 /**
  * Agent profile management — identity system for hooks
  *
- * Each agent instance gets a unique 8-char UUID stored at ~/.hooks/profiles/<id>.json.
+ * Each agent instance gets a unique 8-char UUID stored at ~/.hasna/hooks/profiles/<id>.json.
  * Profiles are injected into HookInput when hooks are run with --profile <id>,
  * allowing hooks to identify which agent is calling them.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, cpSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -24,7 +24,20 @@ export interface CreateProfileInput {
   name?: string;
 }
 
-const PROFILES_DIR = join(homedir(), ".hooks", "profiles");
+function resolveProfilesDir(): string {
+  const newDir = join(homedir(), ".hasna", "hooks", "profiles");
+  const oldDir = join(homedir(), ".hooks", "profiles");
+
+  // Auto-migrate: copy old profiles to new location if needed
+  if (!existsSync(newDir) && existsSync(oldDir)) {
+    mkdirSync(join(homedir(), ".hasna", "hooks"), { recursive: true });
+    cpSync(oldDir, newDir, { recursive: true });
+  }
+
+  return newDir;
+}
+
+const PROFILES_DIR = resolveProfilesDir();
 
 function ensureProfilesDir(): void {
   if (!existsSync(PROFILES_DIR)) {

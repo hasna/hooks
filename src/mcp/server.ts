@@ -656,7 +656,7 @@ export function createHooksServer(): McpServer {
 
   server.tool(
     "hooks_log_list",
-    "List hook events from SQLite (~/.hooks/hooks.db). Filter by hook name, session ID, or time range.",
+    "List hook events from SQLite (~/.hasna/hooks/hooks.db). Filter by hook name, session ID, or time range.",
     {
       hook_name: z.string().optional().describe("Filter by hook name (e.g. 'sessionlog', 'costwatch')"),
       session_id: z.string().optional().describe("Filter by session ID prefix"),

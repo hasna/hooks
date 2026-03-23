@@ -125,7 +125,7 @@ program
     if (profile.name) {
       console.log(`  ${chalk.dim("Name:")}       ${profile.name}`);
     }
-    console.log(`  ${chalk.dim("Profile:")}    ~/.hooks/profiles/${profile.agent_id}.json`);
+    console.log(`  ${chalk.dim("Profile:")}    ~/.hasna/hooks/profiles/${profile.agent_id}.json`);
     console.log();
     console.log(chalk.dim("  Install hooks with this profile:"));
     console.log(`    hooks install gitguard --profile ${profile.agent_id}`);
@@ -946,7 +946,7 @@ program
 // Log command group — query hook events from SQLite
 const logCmd = program
   .command("log")
-  .description("Query hook event logs from SQLite (~/.hooks/hooks.db)");
+  .description("Query hook event logs from SQLite (~/.hasna/hooks/hooks.db)");
 
 logCmd
   .command("list")

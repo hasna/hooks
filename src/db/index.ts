@@ -1,12 +1,12 @@
 /**
- * SQLite DB module for hooks — persistent storage at ~/.hooks/hooks.db
+ * SQLite DB module for hooks — persistent storage at ~/.hasna/hooks/hooks.db
  *
  * Uses bun:sqlite with WAL mode for concurrent reads.
- * Supports HOOKS_DATA_DIR and HOOKS_DB_PATH env overrides.
+ * Supports HASNA_HOOKS_DATA_DIR / HOOKS_DATA_DIR and HASNA_HOOKS_DB_PATH / HOOKS_DB_PATH env overrides.
  */
 
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync } from "fs";
+import { existsSync, mkdirSync, cpSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 import { runMigrations } from "./migrations";
@@ -15,12 +15,27 @@ import { runRetention } from "./retention";
 
 let instance: Database | null = null;
 
-export function getDbPath(): string {
-  if (process.env.HOOKS_DB_PATH) {
-    return process.env.HOOKS_DB_PATH;
+function resolveDataDir(): string {
+  const explicit = process.env.HASNA_HOOKS_DATA_DIR ?? process.env.HOOKS_DATA_DIR;
+  if (explicit) return explicit;
+
+  const newDir = join(homedir(), ".hasna", "hooks");
+  const oldDir = join(homedir(), ".hooks");
+
+  // Auto-migrate: copy old data to new location if needed
+  if (!existsSync(newDir) && existsSync(oldDir)) {
+    mkdirSync(join(homedir(), ".hasna"), { recursive: true });
+    cpSync(oldDir, newDir, { recursive: true });
   }
 
-  const dataDir = process.env.HOOKS_DATA_DIR ?? join(homedir(), ".hooks");
+  return newDir;
+}
+
+export function getDbPath(): string {
+  const explicitDb = process.env.HASNA_HOOKS_DB_PATH ?? process.env.HOOKS_DB_PATH;
+  if (explicitDb) return explicitDb;
+
+  const dataDir = resolveDataDir();
   return join(dataDir, "hooks.db");
 }
 

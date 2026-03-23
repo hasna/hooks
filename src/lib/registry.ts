@@ -301,7 +301,7 @@ export const HOOKS: HookMeta[] = [
   {
     name: "sessionlog",
     displayName: "Session Log",
-    description: "Logs every tool call to SQLite (~/.hooks/hooks.db)",
+    description: "Logs every tool call to SQLite (~/.hasna/hooks/hooks.db)",
     version: "0.1.0",
     category: "Observability",
     event: "PostToolUse",
@@ -311,7 +311,7 @@ export const HOOKS: HookMeta[] = [
   {
     name: "commandlog",
     displayName: "Command Log",
-    description: "Logs every Bash command to SQLite (~/.hooks/hooks.db)",
+    description: "Logs every Bash command to SQLite (~/.hasna/hooks/hooks.db)",
     version: "0.1.0",
     category: "Observability",
     event: "PostToolUse",
@@ -331,7 +331,7 @@ export const HOOKS: HookMeta[] = [
   {
     name: "errornotify",
     displayName: "Error Notify",
-    description: "Detects tool failures and logs errors to SQLite (~/.hooks/hooks.db)",
+    description: "Detects tool failures and logs errors to SQLite (~/.hasna/hooks/hooks.db)",
     version: "0.1.0",
     category: "Observability",
     event: "PostToolUse",
