@@ -22,7 +22,8 @@
     "prepublishOnly": "bun run build",
     "dashboard:dev": "cd dashboard && bun run dev",
     "dashboard:build": "cd dashboard && bun run build",
-    "dashboard:preview": "cd dashboard && bun run preview"
+    "dashboard:preview": "cd dashboard && bun run preview",
+    "postinstall": "mkdir -p $HOME/.hasna/hooks/profiles 2>/dev/null || true"
   },
   "keywords": [
     "claude-code",
