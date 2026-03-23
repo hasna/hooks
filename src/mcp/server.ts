@@ -15,7 +15,14 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const pkg = JSON.parse(readFileSync(join(__dirname, "..", "..", "package.json"), "utf-8"));
+let pkg = { name: "@hasna/hooks", version: "0.0.0" };
+try {
+  // Try multiple paths — bundled vs source layout differ
+  for (const rel of ["../../package.json", "../package.json", "../../../package.json"]) {
+    const p = join(__dirname, rel);
+    if (existsSync(p)) { pkg = JSON.parse(readFileSync(p, "utf-8")); break; }
+  }
+} catch { /* use defaults */ }
 
 import {
   HOOKS,
@@ -818,7 +825,12 @@ export async function startSSEServer(port: number = MCP_PORT): Promise<void> {
  * Start the MCP server with stdio transport
  */
 export async function startStdioServer(): Promise<void> {
-  const server = createHooksServer();
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
+  try {
+    const server = createHooksServer();
+    const transport = new StdioServerTransport();
+    await server.connect(transport);
+  } catch (err) {
+    process.stderr.write(`[hooks-mcp] Failed to start: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(1);
+  }
 }
