@@ -1112,10 +1112,16 @@ logCmd
 program
   .command("mcp")
   .option("-s, --stdio", "Use stdio transport (for agent MCP integration)", false)
-  .option("-p, --port <port>", "Port for SSE transport", "39427")
+  .option("--http", "Use Streamable HTTP transport (shared server for many agents)", false)
+  .option("-p, --port <port>", "Port for SSE/HTTP transport", "39427")
   .description("Start MCP server for AI agent integration")
-  .action(async (options: { stdio: boolean; port: string }) => {
-    if (options.stdio) {
+  .action(async (options: { stdio: boolean; http: boolean; port: string }) => {
+    if (options.http) {
+      const { createHooksServer } = await import("../mcp/server.js");
+      const { resolveMcpHttpPort, startMcpHttpServer } = await import("../mcp/http.js");
+      const port = options.port === "39427" ? resolveMcpHttpPort([]) : parseInt(options.port);
+      startMcpHttpServer({ name: "hooks", port, buildServer: createHooksServer });
+    } else if (options.stdio) {
       const { startStdioServer } = await import("../mcp/server.js");
       await startStdioServer();
     } else {
