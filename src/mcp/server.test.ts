@@ -761,7 +761,7 @@ describe("MCP server", () => {
 
     beforeAll(async () => {
       serverProcess = Bun.spawn(
-        ["bun", "run", join(import.meta.dir, "..", "cli", "index.tsx"), "mcp", "--port", String(TEST_PORT)],
+        ["bun", "run", join(import.meta.dir, "..", "cli", "index.tsx"), "mcp", "--sse", "--port", String(TEST_PORT)],
         { stdout: "pipe", stderr: "pipe" }
       );
       for (let i = 0; i < 50; i++) {
