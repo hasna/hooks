@@ -78,9 +78,9 @@ describe("MCP server", () => {
       restoreSettings();
     });
 
-    test("lists all 25 tools", async () => {
+    test("lists all 30 tools", async () => {
       const { tools } = await client.listTools();
-      expect(tools.length).toBe(25);
+      expect(tools.length).toBe(30);
       const names = tools.map((t) => t.name);
       expect(names).toContain("hooks_list");
       expect(names).toContain("hooks_search");
