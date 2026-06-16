@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { registerEventsCommands } from "@hasna/events/commander";
 import React from "react";
 import { render } from "ink";
 import { Command } from "commander";
@@ -1131,5 +1132,6 @@ program
       startMcpHttpServer({ name: "hooks", port: resolveMcpHttpPort(args), buildServer: createHooksServer });
     }
   });
+registerEventsCommands(program, { source: "hooks" });
 
 program.parse();
