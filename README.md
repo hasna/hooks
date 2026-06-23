@@ -26,15 +26,23 @@ hooks --help
 - `hooks doctor`
 - `hooks run`
 
-## Cloud Sync
+## Storage
 
-This package supports cloud sync via `@hasna/cloud`:
+Hooks stores data locally in SQLite under the Hasna data directory. The repo
+includes its own PostgreSQL migration definitions for remote storage deployments
+and does not require the shared cloud package.
 
 ```bash
-cloud setup
-cloud sync push --service hooks
-cloud sync pull --service hooks
+hooks storage status --json
+HASNA_HOOKS_DATABASE_URL=postgres://... hooks storage push --tables hook_events,feedback --json
+hooks storage pull --json
+hooks storage sync --json
 ```
+
+Configure database storage with `HASNA_HOOKS_DATABASE_URL` or fallback
+`HOOKS_DATABASE_URL`. Optional storage mode env vars are
+`HASNA_HOOKS_STORAGE_MODE` and `HOOKS_STORAGE_MODE`, with `local`, `hybrid`, or
+`remote` values.
 
 ## Data Directory
 

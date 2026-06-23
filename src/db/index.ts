@@ -5,7 +5,7 @@
  * Supports HASNA_HOOKS_DATA_DIR / HOOKS_DATA_DIR and HASNA_HOOKS_DB_PATH / HOOKS_DB_PATH env overrides.
  */
 
-import { SqliteAdapter as Database } from "@hasna/cloud";
+import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, cpSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
