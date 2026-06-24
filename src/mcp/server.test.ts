@@ -1,10 +1,11 @@
 import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from "bun:test";
-import { existsSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { homedir } from "os";
+import { homedir, tmpdir } from "os";
 import { Client } from "@modelcontextprotocol/sdk/client";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createHooksServer, MCP_PORT } from "./server.js";
+import { closeDb, getDb } from "../db/index.js";
 
 const SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
 const TEST_PORT = 39428;
@@ -42,6 +43,57 @@ function restoreSettings(): void {
 
 function parseResult(result: any): any {
   return JSON.parse((result.content as any)[0].text);
+}
+
+function listItems(data: any): any[] {
+  return Array.isArray(data) ? data : data.hooks ?? data.results ?? [];
+}
+
+function seedLogDb(rowCount: number, options: { withErrors?: boolean } = {}): () => void {
+  closeDb();
+  const previousHasnaPath = process.env.HASNA_HOOKS_DB_PATH;
+  const previousHooksPath = process.env.HOOKS_DB_PATH;
+  const tmpDir = join(tmpdir(), `hooks-mcp-log-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  mkdirSync(tmpDir, { recursive: true });
+  process.env.HASNA_HOOKS_DB_PATH = join(tmpDir, "hooks.db");
+  delete process.env.HOOKS_DB_PATH;
+
+  const db = getDb();
+  db.run("DELETE FROM hook_events");
+  const insert = db.query(`
+    INSERT INTO hook_events
+      (id, timestamp, session_id, hook_name, event_type, tool_name, tool_input, result, error, duration_ms, project_dir, metadata)
+    VALUES
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const now = Date.now();
+  const longText = "x".repeat(240);
+  for (let i = 0; i < rowCount; i++) {
+    insert.run(
+      `event-${i}`,
+      new Date(now - i * 1000).toISOString(),
+      `session-${Math.floor(i / 10)}`,
+      "gitguard",
+      "PostToolUse",
+      "Bash",
+      JSON.stringify({ command: `echo ${i} ${longText}` }),
+      "continue",
+      options.withErrors ? `failure ${i} ${longText}` : null,
+      10 + i,
+      "/tmp/open-hooks-test",
+      JSON.stringify({ index: i }),
+    );
+  }
+
+  return () => {
+    closeDb();
+    if (previousHasnaPath === undefined) delete process.env.HASNA_HOOKS_DB_PATH;
+    else process.env.HASNA_HOOKS_DB_PATH = previousHasnaPath;
+    if (previousHooksPath === undefined) delete process.env.HOOKS_DB_PATH;
+    else process.env.HOOKS_DB_PATH = previousHooksPath;
+    rmSync(tmpDir, { recursive: true, force: true });
+  };
 }
 
 describe("MCP server", () => {
@@ -129,6 +181,16 @@ describe("MCP server", () => {
 
     test("hooks_list returns all hooks by category", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_list", arguments: {} }));
+      expect(data.total).toBe(48);
+      expect(data.count).toBe(25);
+      expect(data.omitted).toBe(23);
+      expect(data.hooks[0]).toHaveProperty("name");
+      expect(data.hooks[0]).not.toHaveProperty("description");
+      expect(data.hint).toContain("compact:false");
+    });
+
+    test("hooks_list compact false returns full grouped hooks", async () => {
+      const data = parseResult(await client.callTool({ name: "hooks_list", arguments: { compact: false } }));
       expect(data["Git Safety"]).toHaveLength(5);
       expect(data["Code Quality"]).toHaveLength(9);
       expect(data["Security"]).toHaveLength(3);
@@ -138,10 +200,11 @@ describe("MCP server", () => {
 
     test("hooks_list with category filter", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_list", arguments: { category: "Security" } }));
-      expect(data).toHaveLength(3);
-      expect(data[0].name).toBe("checksecurity");
-      expect(data[1].name).toBe("packageage");
-      expect(data[2].name).toBe("pre-bash");
+      const hooks = listItems(data);
+      expect(hooks).toHaveLength(3);
+      expect(hooks[0].name).toBe("checksecurity");
+      expect(hooks[1].name).toBe("packageage");
+      expect(hooks[2].name).toBe("pre-bash");
     });
 
     test("hooks_list with unknown category", async () => {
@@ -152,30 +215,32 @@ describe("MCP server", () => {
 
     test("hooks_list category is case-insensitive", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_list", arguments: { category: "git safety" } }));
-      expect(data).toHaveLength(5);
+      expect(listItems(data)).toHaveLength(5);
     });
 
     // --- hooks_search ---
 
     test("hooks_search finds hooks by name", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_search", arguments: { query: "gitguard" } }));
-      expect(data).toHaveLength(1);
-      expect(data[0].name).toBe("gitguard");
+      const results = listItems(data);
+      expect(results).toHaveLength(1);
+      expect(results[0].name).toBe("gitguard");
     });
 
     test("hooks_search finds hooks by tag", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_search", arguments: { query: "typosquatting" } }));
-      expect(data).toHaveLength(1);
-      expect(data[0].name).toBe("packageage");
+      const results = listItems(data);
+      expect(results).toHaveLength(1);
+      expect(results[0].name).toBe("packageage");
     });
 
     test("hooks_search returns empty for no match", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_search", arguments: { query: "zzzzzzz" } }));
-      expect(data).toEqual([]);
+      expect(listItems(data)).toEqual([]);
     });
 
-    test("hooks_search result has all fields", async () => {
-      const data = parseResult(await client.callTool({ name: "hooks_search", arguments: { query: "git" } }));
+    test("hooks_search compact false result has all fields", async () => {
+      const data = parseResult(await client.callTool({ name: "hooks_search", arguments: { query: "git", compact: false } }));
       for (const hook of data) {
         expect(hook).toHaveProperty("name");
         expect(hook).toHaveProperty("displayName");
@@ -355,6 +420,14 @@ describe("MCP server", () => {
     test("hooks_docs specific hook", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_docs", arguments: { name: "gitguard" } }));
       expect(data.name).toBe("gitguard");
+      expect(data).toHaveProperty("readme_preview");
+      expect(data).toHaveProperty("readme_lines");
+      expect(data).not.toHaveProperty("readme");
+    });
+
+    test("hooks_docs verbose returns full readme", async () => {
+      const data = parseResult(await client.callTool({ name: "hooks_docs", arguments: { name: "gitguard", verbose: true } }));
+      expect(data.name).toBe("gitguard");
       expect(typeof data.readme).toBe("string");
       expect(data.readme.length).toBeGreaterThan(0);
     });
@@ -368,15 +441,17 @@ describe("MCP server", () => {
 
     test("hooks_registered empty when none installed", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_registered", arguments: {} }));
-      // May contain hooks from other tests, just check it's an array
-      expect(Array.isArray(data)).toBe(true);
+      // May contain hooks from other tests, just check compact shape.
+      expect(Array.isArray(data.hooks)).toBe(true);
+      expect(data).toHaveProperty("total");
     });
 
     test("hooks_registered shows installed hooks", async () => {
       await client.callTool({ name: "hooks_install", arguments: { hooks: ["gitguard"] } });
       const data = parseResult(await client.callTool({ name: "hooks_registered", arguments: {} }));
-      expect(data.some((h: any) => h.name === "gitguard")).toBe(true);
-      expect(data.find((h: any) => h.name === "gitguard").event).toBe("PreToolUse");
+      const hooks = listItems(data);
+      expect(hooks.some((h: any) => h.name === "gitguard")).toBe(true);
+      expect(hooks.find((h: any) => h.name === "gitguard").event).toBe("PreToolUse");
     });
 
     // --- project scope ---
@@ -397,7 +472,7 @@ describe("MCP server", () => {
     test("hooks_registered with project scope", async () => {
       await client.callTool({ name: "hooks_install", arguments: { hooks: ["packageage"], scope: "project", overwrite: true } });
       const data = parseResult(await client.callTool({ name: "hooks_registered", arguments: { scope: "project" } }));
-      expect(data.some((h: any) => h.name === "packageage")).toBe(true);
+      expect(listItems(data).some((h: any) => h.name === "packageage")).toBe(true);
     });
 
     test("hooks_doctor with project scope", async () => {
@@ -452,7 +527,7 @@ describe("MCP server", () => {
 
     // --- docs for every hook ---
 
-    test("hooks_docs returns readme for every hook", async () => {
+    test("hooks_docs verbose returns readme for every hook", async () => {
       const allHooks = [
         "gitguard", "branchprotect", "checkpoint",
         "checktests", "checklint", "checkfiles",
@@ -464,7 +539,7 @@ describe("MCP server", () => {
         "fleet-catchup", "agent-rules-version-check", "fleet-blockers-gate",
       ];
       for (const name of allHooks) {
-        const data = parseResult(await client.callTool({ name: "hooks_docs", arguments: { name } }));
+        const data = parseResult(await client.callTool({ name: "hooks_docs", arguments: { name, verbose: true } }));
         expect(data.name).toBe(name);
         expect(typeof data.readme).toBe("string");
         expect(data.version).toMatch(/^\d+\.\d+\.\d+$/);
@@ -473,9 +548,9 @@ describe("MCP server", () => {
 
     // --- registered field validation ---
 
-    test("hooks_registered result has all metadata fields", async () => {
+    test("hooks_registered compact false result has all metadata fields", async () => {
       await client.callTool({ name: "hooks_install", arguments: { hooks: ["gitguard"] } });
-      const data = parseResult(await client.callTool({ name: "hooks_registered", arguments: {} }));
+      const data = parseResult(await client.callTool({ name: "hooks_registered", arguments: { compact: false } }));
       const hook = data.find((h: any) => h.name === "gitguard");
       expect(hook).toBeDefined();
       expect(hook.event).toBe("PreToolUse");
@@ -525,8 +600,9 @@ describe("MCP server", () => {
       }
 
       const after = parseResult(await client.callTool({ name: "hooks_registered", arguments: {} }));
+      const afterHooks = listItems(after);
       for (const name of allHooks) {
-        expect(after.some((h: any) => h.name === name)).toBe(false);
+        expect(afterHooks.some((h: any) => h.name === name)).toBe(false);
       }
     });
 
@@ -534,8 +610,9 @@ describe("MCP server", () => {
 
     test("hooks_search by description keyword", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_search", arguments: { query: "destructive" } }));
-      expect(data.length).toBeGreaterThanOrEqual(1);
-      expect(data[0].name).toBe("gitguard");
+      const results = listItems(data);
+      expect(results.length).toBeGreaterThanOrEqual(1);
+      expect(results[0].name).toBe("gitguard");
     });
 
     test("hooks_search case insensitive", async () => {
@@ -546,29 +623,32 @@ describe("MCP server", () => {
 
     test("hooks_search by category-related term", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_search", arguments: { query: "security" } }));
-      expect(data.some((h: any) => h.name === "checksecurity")).toBe(true);
+      expect(listItems(data).some((h: any) => h.name === "checksecurity")).toBe(true);
     });
 
     // --- hooks_list every category individually ---
 
     test("hooks_list Notifications category", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_list", arguments: { category: "Notifications" } }));
-      expect(data).toHaveLength(5);
-      expect(data[0].event).toBe("Stop");
+      const hooks = listItems(data);
+      expect(hooks).toHaveLength(5);
+      expect(hooks[0].event).toBe("Stop");
     });
 
     test("hooks_list Context Management category", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_list", arguments: { category: "Context Management" } }));
-      expect(data).toHaveLength(3);
-      expect(data[0].event).toBe("Notification");
+      const hooks = listItems(data);
+      expect(hooks).toHaveLength(3);
+      expect(hooks[0].event).toBe("Notification");
     });
 
     test("hooks_list Code Quality category", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_list", arguments: { category: "Code Quality" } }));
-      expect(data).toHaveLength(9);
+      const hooks = listItems(data);
+      expect(hooks).toHaveLength(9);
       // stylescheck is PreToolUse, others are PostToolUse
-      expect(data.some((h: any) => h.event === "PreToolUse")).toBe(true);
-      expect(data.some((h: any) => h.event === "PostToolUse")).toBe(true);
+      expect(hooks.some((h: any) => h.event === "PreToolUse")).toBe(true);
+      expect(hooks.some((h: any) => h.event === "PostToolUse")).toBe(true);
     });
 
     // --- full lifecycle ---
@@ -586,8 +666,9 @@ describe("MCP server", () => {
 
       // Registered — both present
       const reg = parseResult(await client.callTool({ name: "hooks_registered", arguments: {} }));
-      expect(reg.some((h: any) => h.name === "gitguard")).toBe(true);
-      expect(reg.some((h: any) => h.name === "packageage")).toBe(true);
+      const regHooks = listItems(reg);
+      expect(regHooks.some((h: any) => h.name === "gitguard")).toBe(true);
+      expect(regHooks.some((h: any) => h.name === "packageage")).toBe(true);
 
       // Info — shows global=true
       const info = parseResult(await client.callTool({ name: "hooks_info", arguments: { name: "gitguard" } }));
@@ -599,8 +680,9 @@ describe("MCP server", () => {
 
       // Verify gitguard gone, packageage still there
       const afterReg = parseResult(await client.callTool({ name: "hooks_registered", arguments: {} }));
-      expect(afterReg.some((h: any) => h.name === "gitguard")).toBe(false);
-      expect(afterReg.some((h: any) => h.name === "packageage")).toBe(true);
+      const afterRegHooks = listItems(afterReg);
+      expect(afterRegHooks.some((h: any) => h.name === "gitguard")).toBe(false);
+      expect(afterRegHooks.some((h: any) => h.name === "packageage")).toBe(true);
 
       // Info now shows global=false
       const afterInfo = parseResult(await client.callTool({ name: "hooks_info", arguments: { name: "gitguard" } }));
@@ -737,24 +819,64 @@ describe("MCP server", () => {
       expect(enabled.disabled).toBe(false);
     });
 
+    // --- hooks_log_* compact/full defaults ---
+
+    test("hooks_log_list compact false preserves legacy 50-row default", async () => {
+      const cleanup = seedLogDb(55);
+      try {
+        const compact = parseResult(await client.callTool({ name: "hooks_log_list", arguments: {} }));
+        expect(compact.count).toBe(20);
+        expect(compact.compact).toBe(true);
+        expect(compact.events[0]).toHaveProperty("tool_input_preview");
+        expect(compact.events[0]).not.toHaveProperty("tool_input");
+
+        const full = parseResult(await client.callTool({ name: "hooks_log_list", arguments: { compact: false } }));
+        expect(full.count).toBe(50);
+        expect(full.compact).toBe(false);
+        expect(full.events).toHaveLength(50);
+        expect(full.events[0]).toHaveProperty("tool_input");
+        expect(full.events[0]).not.toHaveProperty("tool_input_preview");
+      } finally {
+        cleanup();
+      }
+    });
+
+    test("hooks_log_errors compact false preserves legacy 50-row default", async () => {
+      const cleanup = seedLogDb(55, { withErrors: true });
+      try {
+        const compact = parseResult(await client.callTool({ name: "hooks_log_errors", arguments: {} }));
+        expect(compact.count).toBe(20);
+        expect(compact.compact).toBe(true);
+        expect(compact.events[0].error.length).toBeLessThanOrEqual(180);
+
+        const full = parseResult(await client.callTool({ name: "hooks_log_errors", arguments: { compact: false } }));
+        expect(full.count).toBe(50);
+        expect(full.compact).toBe(false);
+        expect(full.events).toHaveLength(50);
+        expect(full.events[0].error.length).toBeGreaterThan(180);
+      } finally {
+        cleanup();
+      }
+    });
+
     // --- compact mode ---
 
     test("hooks_list compact returns minimal fields", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_list", arguments: { compact: true } }));
-      expect(Array.isArray(data)).toBe(true);
-      expect(data.length).toBe(48);
-      expect(data[0]).toHaveProperty("name");
-      expect(data[0]).toHaveProperty("event");
-      expect(data[0]).toHaveProperty("matcher");
-      expect(data[0]).not.toHaveProperty("description");
+      expect(data.total).toBe(48);
+      expect(data.count).toBe(25);
+      expect(data.hooks[0]).toHaveProperty("name");
+      expect(data.hooks[0]).toHaveProperty("event");
+      expect(data.hooks[0]).toHaveProperty("matcher");
+      expect(data.hooks[0]).not.toHaveProperty("description");
     });
 
     test("hooks_search compact returns minimal fields", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_search", arguments: { query: "git", compact: true } }));
-      expect(Array.isArray(data)).toBe(true);
-      expect(data[0]).toHaveProperty("name");
-      expect(data[0]).toHaveProperty("event");
-      expect(data[0]).not.toHaveProperty("tags");
+      expect(Array.isArray(data.hooks)).toBe(true);
+      expect(data.hooks[0]).toHaveProperty("name");
+      expect(data.hooks[0]).toHaveProperty("event");
+      expect(data.hooks[0]).not.toHaveProperty("tags");
     });
 
     // --- matcher in hooks_registered ---
@@ -763,7 +885,7 @@ describe("MCP server", () => {
       backupSettings();
       await client.callTool({ name: "hooks_install", arguments: { hooks: ["gitguard"] } });
       const data = parseResult(await client.callTool({ name: "hooks_registered", arguments: {} }));
-      const hook = data.find((h: any) => h.name === "gitguard");
+      const hook = listItems(data).find((h: any) => h.name === "gitguard");
       expect(hook).toHaveProperty("matcher");
       restoreSettings();
     });

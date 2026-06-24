@@ -77,12 +77,17 @@ describe("CLI", () => {
   describe("hooks list", () => {
     test("lists all hooks", async () => {
       const { stdout } = await run("list");
-      expect(stdout).toContain("Available hooks (48)");
+      expect(stdout).toContain("Available hooks (48, showing 20)");
       expect(stdout).toContain("Git Safety");
       expect(stdout).toContain("Code Quality");
       expect(stdout).toContain("Security");
-      expect(stdout).toContain("Notifications");
-      expect(stdout).toContain("Context Management");
+      expect(stdout).toContain("Showing a compact subset");
+      expect(stdout).not.toContain("Blocks destructive git operations");
+    });
+
+    test("--verbose includes descriptions", async () => {
+      const { stdout } = await run("list", "--limit", "1", "--verbose");
+      expect(stdout).toContain("Blocks destructive git operations");
     });
 
     test("--json returns all hooks grouped by category", async () => {
@@ -96,7 +101,7 @@ describe("CLI", () => {
 
     test("lists by category", async () => {
       const { stdout } = await run("list", "-c", "Security");
-      expect(stdout).toContain("Security (3)");
+      expect(stdout).toContain("Security (3, showing 3)");
       expect(stdout).toContain("checksecurity");
       expect(stdout).toContain("packageage");
       expect(stdout).toContain("pre-bash");
@@ -136,6 +141,13 @@ describe("CLI", () => {
       const { stdout } = await run("search", "git");
       expect(stdout).toContain("Found");
       expect(stdout).toContain("gitguard");
+      expect(stdout).not.toContain("Blocks destructive git operations");
+      expect(stdout).not.toContain("--all");
+    });
+
+    test("search --verbose includes descriptions", async () => {
+      const { stdout } = await run("search", "gitguard", "--verbose");
+      expect(stdout).toContain("Blocks destructive git operations");
     });
 
     test("shows no results for bad query", async () => {
@@ -359,6 +371,14 @@ describe("CLI", () => {
       expect(stdout).toContain("Git Guard");
       expect(stdout).toContain("Configuration");
       expect(stdout).toContain("Install");
+      expect(stdout).toContain("README Preview");
+      expect(stdout).toContain("Claude Code hook that blocks destructive git operations.");
+      expect(stdout).toContain("--verbose");
+    });
+
+    test("hook-specific docs --verbose includes full README section", async () => {
+      const { stdout } = await run("docs", "gitguard", "--verbose");
+      expect(stdout).toContain("README:");
     });
 
     test("--json for specific hook includes readme", async () => {
