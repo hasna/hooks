@@ -1,6 +1,6 @@
 {
   "name": "@hasna/hooks",
-  "version": "0.2.18",
+  "version": "0.2.19",
   "description": "Open source hooks library for AI coding agents - Install safety, quality, and automation hooks with a single command",
   "type": "module",
   "bin": {
@@ -18,7 +18,7 @@
     "build": "bun build ./src/cli/index.tsx --outdir ./bin --target bun --external ink --external react --external chalk --external conf --external @modelcontextprotocol/sdk --external zod && bun build ./src/index.ts --outdir ./dist --target bun",
     "dev": "bun run ./src/cli/index.tsx",
     "test": "bun test",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bunx tsc --noEmit",
     "prepublishOnly": "bun run build",
     "dashboard:dev": "cd dashboard && bun run dev",
     "dashboard:build": "cd dashboard && bun run build",

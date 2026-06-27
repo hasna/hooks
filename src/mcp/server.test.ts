@@ -2,7 +2,7 @@ import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } fr
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { Client } from "@modelcontextprotocol/sdk/client";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createHooksServer, MCP_PORT } from "./server.js";
 

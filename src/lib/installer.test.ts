@@ -417,6 +417,7 @@ describe("installer", () => {
         projectBackup = null;
       }
       // Start each test with clean project settings
+      mkdirSync(join(process.cwd(), ".claude"), { recursive: true });
       writeFileSync(projectSettings, "{}\n");
     });
 
