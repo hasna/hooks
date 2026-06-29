@@ -27,6 +27,7 @@ temp/
 
 # Claude settings (local)
 .claude/
+.hasna/
 
 # External project refs
 .connectors/

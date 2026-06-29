@@ -5,7 +5,7 @@
  * Supports HASNA_HOOKS_DATA_DIR / HOOKS_DATA_DIR and HASNA_HOOKS_DB_PATH / HOOKS_DB_PATH env overrides.
  */
 
-import { SqliteAdapter as Database } from "@hasna/cloud";
+import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, cpSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
@@ -56,8 +56,8 @@ export function getDb(): Database {
   instance = new Database(dbPath);
   instance.exec("PRAGMA journal_mode=WAL");
   instance.exec("PRAGMA foreign_keys=ON");
-  runMigrations(instance.raw);
-  runRetention(instance.raw);
+  runMigrations(instance);
+  runRetention(instance);
   instance.exec(`CREATE TABLE IF NOT EXISTS feedback (
     id TEXT PRIMARY KEY DEFAULT (lower(hex(randomblob(16)))),
     message TEXT NOT NULL,
@@ -69,7 +69,7 @@ export function getDb(): Database {
   )`);
 
   if (isNew) {
-    runLegacyImport(instance.raw);
+    runLegacyImport(instance);
   }
 
   return instance;

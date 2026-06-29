@@ -1,5 +1,5 @@
 /**
- * PostgreSQL migrations for open-hooks cloud sync.
+ * PostgreSQL migrations for open-hooks storage sync.
  *
  * Equivalent to the SQLite schema in schema.ts, migrations/, and index.ts,
  * translated for PostgreSQL.

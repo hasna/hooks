@@ -1,0 +1,21 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": true,
+    "declarationMap": false,
+    "emitDeclarationOnly": true,
+    "noEmit": false,
+    "outDir": "./dist"
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "bin",
+    "hooks",
+    "temp",
+    "src/**/*.test.ts",
+    "src/**/__tests__/**",
+    "dashboard/**"
+  ]
+}

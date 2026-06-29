@@ -26,15 +26,12 @@ hooks --help
 - `hooks doctor`
 - `hooks run`
 
-## Cloud Sync
+## Storage
 
-This package supports cloud sync via `@hasna/cloud`:
-
-```bash
-cloud setup
-cloud sync push --service hooks
-cloud sync pull --service hooks
-```
+Hooks stores data locally by default in `~/.hasna/hooks/` and uses SQLite
+directly for hook event history. The package owns its database schema and
+migrations; it does not depend on the deprecated shared runtime or its CLI. Use
+the `hooks log` commands to inspect local hook event data.
 
 ## Data Directory
 
