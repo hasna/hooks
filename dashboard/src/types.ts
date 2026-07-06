@@ -4,7 +4,7 @@ export interface HookMeta {
   description: string;
   version: string;
   category: string;
-  event: "PreToolUse" | "PostToolUse" | "Stop" | "Notification";
+  event: "PreToolUse" | "PostToolUse" | "Stop" | "Notification" | "SessionStart" | "SessionEnd";
   matcher: string;
   tags: string[];
 }

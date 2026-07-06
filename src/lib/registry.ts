@@ -2,13 +2,30 @@
  * Hook registry - metadata about all available hooks
  */
 
+export type HookEvent =
+  | "PreToolUse"
+  | "PostToolUse"
+  | "Stop"
+  | "Notification"
+  | "SessionStart"
+  | "SessionEnd";
+
+export const HOOK_EVENTS: HookEvent[] = [
+  "PreToolUse",
+  "PostToolUse",
+  "Stop",
+  "Notification",
+  "SessionStart",
+  "SessionEnd",
+];
+
 export interface HookMeta {
   name: string;
   displayName: string;
   description: string;
   version: string;
   category: string;
-  event: "PreToolUse" | "PostToolUse" | "Stop" | "Notification";
+  event: HookEvent;
   matcher: string;
   tags: string[];
 }
@@ -423,10 +440,10 @@ export const HOOKS: HookMeta[] = [
   {
     name: "announce-start",
     displayName: "Announce Start",
-    description: "On session start, auto-registers agent, reads messages, and announces to space",
-    version: "0.1.0",
+    description: "On SessionStart, auto-registers agent, reads messages, and announces to space",
+    version: "0.2.0",
     category: "Agent Teams",
-    event: "Notification",
+    event: "SessionStart",
     matcher: "",
     tags: ["announcement", "start", "register", "messages", "agent-teams"],
   },
@@ -449,6 +466,41 @@ export const HOOKS: HookMeta[] = [
     event: "Notification",
     matcher: "",
     tags: ["messages", "dm", "context", "inject", "agent-teams"],
+  },
+
+  // Agent Teams — fleet comms (SessionStart/PreToolUse)
+  {
+    name: "fleet-catchup",
+    displayName: "Fleet Catchup",
+    description:
+      "On SessionStart, injects unread blockers, channel notifications, and the announcements digest into context (deterministic CLI reads, fail-open)",
+    version: "0.1.0",
+    category: "Agent Teams",
+    event: "SessionStart",
+    matcher: "",
+    tags: ["fleet", "catchup", "blockers", "announcements", "context", "agent-teams"],
+  },
+  {
+    name: "agent-rules-version-check",
+    displayName: "Agent Rules Version Check",
+    description:
+      "On SessionStart, compares the rendered hasna:agent-operating-rules sentinel version against configs state and warns on mismatch",
+    version: "0.1.0",
+    category: "Agent Teams",
+    event: "SessionStart",
+    matcher: "",
+    tags: ["fleet", "rules", "version", "sentinel", "configs", "drift", "agent-teams"],
+  },
+  {
+    name: "fleet-blockers-gate",
+    displayName: "Fleet Blockers Gate",
+    description:
+      "Before tool calls, blocks mutating tools while an unread [FREEZE] blocker is active (TTL-cached conversations check, fail-open <500ms)",
+    version: "0.1.0",
+    category: "Agent Teams",
+    event: "PreToolUse",
+    matcher: "",
+    tags: ["fleet", "freeze", "blockers", "gate", "safety", "agent-teams"],
   },
 ];
 

@@ -10,11 +10,13 @@
 
 export {
   HOOKS,
+  HOOK_EVENTS,
   CATEGORIES,
   getHook,
   getHooksByCategory,
   searchHooks,
   type HookMeta,
+  type HookEvent,
   type Category,
 } from "./lib/registry.js";
 
@@ -28,6 +30,7 @@ export {
   hookExists,
   getHookPath,
   getSettingsPath,
+  isEventSupported,
   type InstallResult,
   type InstallOptions,
   type Scope,

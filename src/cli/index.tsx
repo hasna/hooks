@@ -578,7 +578,7 @@ program
           const eventHooks = settings.hooks?.[meta.event] || [];
           const found = eventHooks.some((entry: any) =>
             entry.hooks?.some((h: any) => {
-              const match = h.command?.match(/^hooks run (\w+)/);
+              const match = h.command?.match(/^hooks run ([\w-]+)/);
               return match && match[1] === name;
             })
           );
@@ -736,8 +736,10 @@ program
       events: {
         PreToolUse: "Fires before a tool executes. Can block the operation by returning { \"decision\": \"block\" }.",
         PostToolUse: "Fires after a tool executes. Runs asynchronously, cannot block.",
-        Stop: "Fires when a session ends. Useful for notifications and cleanup.",
+        Stop: "Fires when the agent finishes responding. Useful for notifications and cleanup.",
         Notification: "Fires on notification events like context compaction.",
+        SessionStart: "Fires when a session starts or resumes. Can inject context via hookSpecificOutput.additionalContext.",
+        SessionEnd: "Fires when a session terminates. Useful for cleanup and final announcements.",
       },
       installation: {
         global: "hooks install gitguard",

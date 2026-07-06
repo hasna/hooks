@@ -74,7 +74,7 @@ describe("CLI", () => {
   describe("hooks list", () => {
     test("lists all hooks", async () => {
       const { stdout } = await run("list");
-      expect(stdout).toContain("Available hooks (39)");
+      expect(stdout).toContain("Available hooks (42)");
       expect(stdout).toContain("Git Safety");
       expect(stdout).toContain("Code Quality");
       expect(stdout).toContain("Security");
@@ -367,13 +367,13 @@ describe("CLI", () => {
   });
 
   describe("hooks install --all (JSON)", () => {
-    test("--all --json installs all 39 hooks", async () => {
+    test("--all --json installs all 42 hooks", async () => {
       backupSettings();
       try {
         const data = await runJson("install", "--all");
-        expect(data.total).toBe(39);
-        expect(data.success).toBe(39);
-        expect(data.installed).toHaveLength(39);
+        expect(data.total).toBe(42);
+        expect(data.success).toBe(42);
+        expect(data.installed).toHaveLength(42);
         expect(data.scope).toBe("global");
       } finally {
         restoreSettings();
@@ -674,7 +674,7 @@ describe("CLI", () => {
       backupSettings();
       try {
         const install = await runJson("install", "--all");
-        expect(install.success).toBe(39);
+        expect(install.success).toBe(42);
 
         const listed = await runJson("list", "--installed");
         expect(listed.length).toBeGreaterThanOrEqual(30);
@@ -690,7 +690,7 @@ describe("CLI", () => {
       } finally {
         restoreSettings();
       }
-    });
+    }, 60_000); // 42 hooks × spawn per install/remove — needs more than the 5s default
   });
 
   describe("hooks info --json for every hook", () => {
@@ -702,6 +702,7 @@ describe("CLI", () => {
       "checksecurity", "packageage",
       "phonenotify", "agentmessages",
       "contextrefresh", "precompact",
+      "fleet-catchup", "agent-rules-version-check", "fleet-blockers-gate",
     ];
 
     for (const name of allHooks) {
