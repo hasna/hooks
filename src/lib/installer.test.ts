@@ -634,6 +634,24 @@ describe("installer", () => {
       expect(result.target).toBe("all");
     });
 
+    test("installHook with target all rejects hooks unsupported by any target", () => {
+      const result = installHook("fleet-catchup", { target: "all", overwrite: true });
+      expect(result.success).toBe(false);
+      expect(result.target).toBe("all");
+      expect(result.error).toContain("SessionStart");
+      expect(result.error).toContain("gemini");
+
+      const claudeSettings = existsSync(GLOBAL_SETTINGS)
+        ? JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"))
+        : {};
+      const claudeInstalled = Object.values(claudeSettings.hooks ?? {}).some((entries: any) =>
+        entries.some((entry: any) =>
+          entry.hooks?.some((h: any) => h.command === "hooks run fleet-catchup")
+        )
+      );
+      expect(claudeInstalled).toBe(false);
+    });
+
     test("removeHook with target all", () => {
       installHook("gitguard", { target: "all" });
       const removed = removeHook("gitguard", "global", "all");

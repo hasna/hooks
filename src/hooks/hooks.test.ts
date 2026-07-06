@@ -945,12 +945,14 @@ fi
 
   test("gate denies mutating tools while frozen (cached state)", async () => {
     writeFrozenCache(tmpHome);
-    const { stdout, exitCode } = await runFleetHook("fleet-blockers-gate", preToolUseInput("Bash"));
-    expect(exitCode).toBe(0);
-    const out = JSON.parse(stdout.trim());
-    expect(out.hookSpecificOutput.permissionDecision).toBe("deny");
-    expect(out.hookSpecificOutput.permissionDecisionReason).toContain("[FREEZE]");
-    expect(out.hookSpecificOutput.permissionDecisionReason).toContain("chief");
+    for (const tool of ["Bash", "TodoWrite"]) {
+      const { stdout, exitCode } = await runFleetHook("fleet-blockers-gate", preToolUseInput(tool));
+      expect(exitCode).toBe(0);
+      const out = JSON.parse(stdout.trim());
+      expect(out.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(out.hookSpecificOutput.permissionDecisionReason).toContain("[FREEZE]");
+      expect(out.hookSpecificOutput.permissionDecisionReason).toContain("chief");
+    }
   });
 
   test("gate allows read-only tools while frozen", async () => {
@@ -965,11 +967,7 @@ fi
     const { stdout, exitCode } = await runFleetHook("fleet-blockers-gate", preToolUseInput("Bash"));
     expect(exitCode).toBe(0);
     expect(JSON.parse(stdout.trim())).toEqual({ continue: true });
-    // and it caches the non-frozen result
-    const cache = JSON.parse(
-      readFileSync(join(tmpHome, ".hasna", "hooks", "state", "fleet-blockers-gate.json"), "utf-8")
-    );
-    expect(cache.frozen).toBe(false);
+    expect(existsSync(join(tmpHome, ".hasna", "hooks", "state", "fleet-blockers-gate.json"))).toBe(false);
   });
 
   test("gate ignores an expired frozen cache and re-checks (fail-open without CLI)", async () => {

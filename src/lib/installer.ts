@@ -190,8 +190,38 @@ export function installHook(name: string, options: InstallOptions = {}): Install
   const { scope = "global", overwrite = false, target = "claude", profile } = options;
 
   if (target === "all") {
+    const shortName = shortHookName(name);
+    const meta = getHook(shortName);
+    if (meta) {
+      const unsupportedTargets = (["claude", "gemini"] as const).filter(
+        (agentTarget) => !isEventSupported(meta.event, agentTarget)
+      );
+      if (unsupportedTargets.length > 0) {
+        return {
+          hook: shortName,
+          success: false,
+          error: `Event '${meta.event}' is not supported by target(s): ${unsupportedTargets.join(", ")}`,
+          target: "all",
+        };
+      }
+    }
+
     const claudeResult = installForTarget(name, scope, overwrite, "claude", profile);
-    installForTarget(name, scope, overwrite, "gemini", profile);
+    if (!claudeResult.success) {
+      return {
+        ...claudeResult,
+        error: `Failed for target 'claude': ${claudeResult.error}`,
+        target: "all",
+      };
+    }
+    const geminiResult = installForTarget(name, scope, overwrite, "gemini", profile);
+    if (!geminiResult.success) {
+      return {
+        ...geminiResult,
+        error: `Failed for target 'gemini': ${geminiResult.error}`,
+        target: "all",
+      };
+    }
     return { ...claudeResult, target: "all" };
   }
 

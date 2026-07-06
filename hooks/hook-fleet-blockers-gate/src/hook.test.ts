@@ -17,6 +17,7 @@ describe("hook-fleet-blockers-gate", () => {
       expect(isReadOnlyTool("Write")).toBe(false);
       expect(isReadOnlyTool("NotebookEdit")).toBe(false);
       expect(isReadOnlyTool("Task")).toBe(false);
+      expect(isReadOnlyTool("TodoWrite")).toBe(false);
     });
 
     test("read-style MCP operations pass", () => {
@@ -101,4 +102,5 @@ describe("hook-fleet-blockers-gate", () => {
       expect(parseBlockersJson("")).toHaveLength(0);
     });
   });
+
 });

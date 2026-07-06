@@ -62,7 +62,6 @@ const READ_ONLY_TOOLS = new Set([
   "NotebookRead",
   "WebFetch",
   "WebSearch",
-  "TodoWrite",
   "ToolSearch",
   "AskUserQuestion",
 ]);
@@ -182,8 +181,6 @@ function checkFreeze(now: Date): FreezeState {
   const cached = readCache(now);
   if (cached) return cached;
 
-  let frozen = false;
-  let reason = "";
   try {
     const agent = process.env.HOOKS_FLEET_AGENT;
     const from = agent && /^[A-Za-z0-9._-]{1,64}$/.test(agent) ? ` --from ${agent}` : "";
@@ -193,17 +190,14 @@ function checkFreeze(now: Date): FreezeState {
       stdio: ["pipe", "pipe", "pipe"],
     });
     const result = detectFreeze(parseBlockersJson(raw.trim()));
-    frozen = result.frozen;
-    reason = result.reason;
+    const state: FreezeState = { checked_at: now.toISOString(), frozen: result.frozen, reason: result.reason };
+    writeCache(state);
+    return state;
   } catch {
     // CLI missing / timeout / service down → fail open (never wedge the agent)
-    frozen = false;
-    reason = "";
+    // Do not cache an unverified "not frozen" state; retry on the next mutating tool.
+    return { checked_at: now.toISOString(), frozen: false, reason: "" };
   }
-
-  const state: FreezeState = { checked_at: now.toISOString(), frozen, reason };
-  writeCache(state);
-  return state;
 }
 
 export function run(): void {

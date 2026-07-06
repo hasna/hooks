@@ -118,6 +118,21 @@ export function parseJsonList(raw: string | null, ...wrapperKeys: string[]): unk
   }
 }
 
+/** True when raw CLI output was parseable as the expected list shape. */
+export function hasJsonList(raw: string | null, ...wrapperKeys: string[]): boolean {
+  if (!raw) return false;
+  try {
+    const data = JSON.parse(raw);
+    if (Array.isArray(data)) return true;
+    if (data && typeof data === "object") {
+      return wrapperKeys.some((key) => Array.isArray((data as Record<string, unknown>)[key]));
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 /** Read the last catchup timestamp; fall back to a bounded 24h lookback. */
 export function resolveSince(now: Date, stored: string | null): string {
   if (stored) {
@@ -241,9 +256,10 @@ export async function run(): Promise<void> {
   const blockers = parseJsonList(blockersRaw, "blockers", "messages");
   const notifications = parseJsonList(notificationsRaw, "notifications", "messages");
 
-  // Advance the last-seen cursor ONLY when the notifications read succeeded —
-  // otherwise an outage at session start would silently swallow the window.
-  if (notificationsRaw !== null) {
+  // Advance the last-seen cursor ONLY when the notifications read succeeded
+  // and returned the expected JSON shape. Otherwise bad output at session
+  // start would silently swallow the window.
+  if (hasJsonList(notificationsRaw, "notifications", "messages")) {
     writeLastSeen(now);
   }
 

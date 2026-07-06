@@ -118,7 +118,7 @@ interface HookMeta {
   description: string;  // One-line description
   version: string;      // Semver: "0.1.0"
   category: string;     // One of 10 CATEGORIES
-  event: "PreToolUse" | "PostToolUse" | "Stop" | "Notification";
+  event: "PreToolUse" | "PostToolUse" | "Stop" | "Notification" | "SessionStart" | "SessionEnd";
   matcher: string;      // Tool name pattern or "" for all tools
   tags: string[];       // Search tags
 }
@@ -128,17 +128,17 @@ interface HookMeta {
 
 ```typescript
 const CATEGORIES = [
-  "Git Safety",           // 3 hooks
-  "Code Quality",         // 6 hooks
+  "Git Safety",           // 4 hooks
+  "Code Quality",         // 9 hooks
   "Security",             // 2 hooks
   "Notifications",        // 5 hooks
   "Context Management",   // 2 hooks
-  "Workflow Automation",  // 3 hooks
+  "Workflow Automation",  // 4 hooks
   "Environment",          // 1 hook
   "Permissions",          // 3 hooks
   "Observability",        // 4 hooks
-  "Agent Teams",          // 1 hook
-] as const;               // Total: 30 hooks
+  "Agent Teams",          // 8 hooks
+] as const;               // Total: 42 hooks
 ```
 
 ### AgentProfile (profiles.ts)
@@ -162,6 +162,8 @@ interface AgentProfile {
 | PostToolUse | After tool execution | No | Tool name pattern |
 | Stop | Session end | No | Empty string |
 | Notification | System events (e.g., compaction) | No | Empty string |
+| SessionStart | Session start or resume | No | Empty string |
+| SessionEnd | Session end | No | Empty string |
 
 ## MCP Server Tools (13)
 
@@ -172,7 +174,7 @@ interface AgentProfile {
 | `hooks_info` | `name` | Get detailed hook info including install status |
 | `hooks_install` | `hooks[], scope?, overwrite?, profile?` | Install hooks by name |
 | `hooks_install_category` | `category, scope?, overwrite?` | Install all hooks in a category |
-| `hooks_install_all` | `scope?, overwrite?` | Install all 30 hooks |
+| `hooks_install_all` | `scope?, overwrite?` | Install all 42 hooks |
 | `hooks_remove` | `name, scope?` | Remove a hook from settings |
 | `hooks_doctor` | `scope?` | Check health of installed hooks |
 | `hooks_categories` | (none) | List categories with counts |

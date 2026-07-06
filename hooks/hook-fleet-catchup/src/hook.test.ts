@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import {
   parseJsonList,
+  hasJsonList,
   resolveSince,
   formatCatchup,
   truncate,
@@ -23,6 +24,20 @@ describe("hook-fleet-catchup", () => {
       expect(parseJsonList("nope")).toEqual([]);
       expect(parseJsonList(null)).toEqual([]);
       expect(parseJsonList('{"other":true}')).toEqual([]);
+    });
+  });
+
+  describe("hasJsonList", () => {
+    test("accepts bare arrays and configured array envelopes", () => {
+      expect(hasJsonList("[]", "notifications", "messages")).toBe(true);
+      expect(hasJsonList('{"notifications":[]}', "notifications", "messages")).toBe(true);
+      expect(hasJsonList('{"messages":[1]}', "notifications", "messages")).toBe(true);
+    });
+
+    test("rejects invalid JSON and unexpected envelopes", () => {
+      expect(hasJsonList(null, "notifications", "messages")).toBe(false);
+      expect(hasJsonList("not json", "notifications", "messages")).toBe(false);
+      expect(hasJsonList('{"other":[]}', "notifications", "messages")).toBe(false);
     });
   });
 
