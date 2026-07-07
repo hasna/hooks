@@ -6,7 +6,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, readFileSync, mkdirSync, rmSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import { tmpdir } from "os";
@@ -552,6 +552,7 @@ describe("hook package.json structure", () => {
     "hook-typecheck-gate", "hook-filelock", "hook-failure-to-task",
     "hook-dm-inject", "hook-announce-stop", "hook-announce-start",
     "hook-affected-tests", "hook-conflict-detect",
+    "hook-fleet-catchup", "hook-agent-rules-version-check", "hook-fleet-blockers-gate",
   ];
 
   for (const hookDir of hookDirsForPkg) {
@@ -588,6 +589,7 @@ describe("hook source files exist", () => {
     "hook-typecheck-gate", "hook-filelock", "hook-failure-to-task",
     "hook-dm-inject", "hook-announce-stop", "hook-announce-start",
     "hook-affected-tests", "hook-conflict-detect",
+    "hook-fleet-catchup", "hook-agent-rules-version-check", "hook-fleet-blockers-gate",
   ];
 
   for (const hookDir of hookDirs) {
@@ -730,5 +732,264 @@ describe("observability hooks write to SQLite", () => {
       const rows = readDb(dbPath);
       expect(rows.length).toBe(0);
     }
+  });
+});
+
+// ====================================================================
+// Fleet comms hooks — behavioral tests (subprocess with isolated HOME)
+// The hooks read/write state under $HOME/.hasna/hooks/state, so each
+// test uses a temp HOME. conversations/configs CLIs are made
+// unavailable via a restricted PATH so tests are deterministic and
+// exercise the fail-open paths.
+// ====================================================================
+
+describe("fleet comms hooks (SessionStart/PreToolUse behavior)", () => {
+  let tmpHome: string;
+
+  beforeEach(() => {
+    tmpHome = join(tmpdir(), `fleet-hooks-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(tmpHome, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  async function runFleetHook(
+    hookName: string,
+    input: object,
+    env: Record<string, string> = {}
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const hookScript = join(HOOKS_DIR, `hook-${hookName}`, "src", "hook.ts");
+    const proc = Bun.spawn([process.execPath, "run", hookScript], {
+      stdin: new Response(JSON.stringify(input)),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        HOME: tmpHome,
+        // No conversations/configs CLI reachable — deterministic fail-open
+        PATH: "/usr/bin:/bin",
+        ...env,
+      },
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    return { stdout, stderr, exitCode };
+  }
+
+  const sessionStartInput = {
+    session_id: "fleet-test-001",
+    cwd: "/tmp",
+    hook_event_name: "SessionStart",
+    source: "startup",
+  };
+
+  // --- fleet-catchup ---
+
+  test("fleet-catchup fails open with continue:true when conversations CLI is unavailable", async () => {
+    const { stdout, exitCode } = await runFleetHook("fleet-catchup", sessionStartInput);
+    expect(exitCode).toBe(0);
+    const out = JSON.parse(stdout.trim());
+    expect(out.continue).toBe(true);
+    expect(out.hookSpecificOutput).toBeUndefined();
+  });
+
+  test("fleet-catchup does NOT advance last-seen when the notifications read fails", async () => {
+    await runFleetHook("fleet-catchup", sessionStartInput); // no CLI on PATH
+    const stateFile = join(tmpHome, ".hasna", "hooks", "state", "fleet-catchup.last_seen");
+    expect(existsSync(stateFile)).toBe(false);
+  });
+
+  function writeConversationsShim(script: string): string {
+    const shimDir = join(tmpHome, "bin");
+    mkdirSync(shimDir, { recursive: true });
+    const shim = join(shimDir, "conversations");
+    writeFileSync(shim, script, { mode: 0o755 });
+    return shimDir;
+  }
+
+  test("fleet-catchup writes last-seen state after a successful notifications read", async () => {
+    const shimDir = writeConversationsShim(`#!/bin/sh\necho "[]"\n`);
+
+    const { stdout, exitCode } = await runFleetHook("fleet-catchup", sessionStartInput, {
+      PATH: `${shimDir}:/usr/bin:/bin`,
+    });
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.trim())).toEqual({ continue: true }); // all lists empty → no injection
+
+    const stateFile = join(tmpHome, ".hasna", "hooks", "state", "fleet-catchup.last_seen");
+    expect(existsSync(stateFile)).toBe(true);
+    const ts = new Date(readFileSync(stateFile, "utf-8"));
+    expect(Number.isNaN(ts.getTime())).toBe(false);
+  });
+
+  test("fleet-catchup injects blockers returned by the CLI", async () => {
+    const shimDir = writeConversationsShim(`#!/bin/sh
+if [ "$1" = "blockers" ]; then
+  echo '[{"from":"chief","content":"[FREEZE] cutover in progress","created_at":"2026-07-06T10:00:00Z"}]'
+else
+  echo "[]"
+fi
+`);
+
+    const { stdout, exitCode } = await runFleetHook("fleet-catchup", sessionStartInput, {
+      PATH: `${shimDir}:/usr/bin:/bin`,
+    });
+    expect(exitCode).toBe(0);
+    const out = JSON.parse(stdout.trim());
+    expect(out.continue).toBe(true);
+    expect(out.hookSpecificOutput.hookEventName).toBe("SessionStart");
+    expect(out.hookSpecificOutput.additionalContext).toContain("UNREAD BLOCKING MESSAGES (1)");
+    expect(out.hookSpecificOutput.additionalContext).toContain("[FREEZE] cutover in progress");
+  });
+
+  test("fleet-catchup respects the kill switch", async () => {
+    const { stdout, exitCode } = await runFleetHook("fleet-catchup", sessionStartInput, {
+      HOOKS_FLEET_CATCHUP_DISABLE: "1",
+    });
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.trim())).toEqual({ continue: true });
+    // Disabled → no state written
+    expect(existsSync(join(tmpHome, ".hasna", "hooks", "state", "fleet-catchup.last_seen"))).toBe(false);
+  });
+
+  test("fleet-catchup handles empty stdin", async () => {
+    const proc = Bun.spawn([process.execPath, "run", join(HOOKS_DIR, "hook-fleet-catchup", "src", "hook.ts")], {
+      stdin: new Response(""),
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { HOME: tmpHome, PATH: "/usr/bin:/bin" },
+    });
+    const stdout = await new Response(proc.stdout).text();
+    expect(await proc.exited).toBe(0);
+    expect(JSON.parse(stdout.trim())).toEqual({ continue: true });
+  });
+
+  // --- agent-rules-version-check ---
+
+  test("rules-version-check stays silent when no artifacts are rendered", async () => {
+    const { stdout, exitCode } = await runFleetHook("agent-rules-version-check", sessionStartInput, {
+      HOOKS_RULES_FILES: join(tmpHome, "does-not-exist.md"),
+    });
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.trim())).toEqual({ continue: true });
+  });
+
+  test("rules-version-check warns on version mismatch vs expected", async () => {
+    const rendered = join(tmpHome, "rendered.md");
+    writeFileSync(rendered, "<!-- hasna:agent-operating-rules v=0.9.0 sha256=old -->");
+
+    const { stdout, exitCode } = await runFleetHook("agent-rules-version-check", sessionStartInput, {
+      HOOKS_RULES_FILES: rendered,
+      HOOKS_RULES_EXPECTED_VERSION: "1.0.0",
+    });
+    expect(exitCode).toBe(0);
+    const out = JSON.parse(stdout.trim());
+    expect(out.continue).toBe(true);
+    expect(out.hookSpecificOutput.hookEventName).toBe("SessionStart");
+    expect(out.hookSpecificOutput.additionalContext).toContain("OUT OF DATE");
+    expect(out.hookSpecificOutput.additionalContext).toContain("v0.9.0");
+  });
+
+  test("rules-version-check silent when rendered version matches expected", async () => {
+    const rendered = join(tmpHome, "rendered.md");
+    writeFileSync(rendered, "<!-- hasna:agent-operating-rules v=1.0.0 sha256=new -->");
+
+    const { stdout, exitCode } = await runFleetHook("agent-rules-version-check", sessionStartInput, {
+      HOOKS_RULES_FILES: rendered,
+      HOOKS_RULES_EXPECTED_VERSION: "1.0.0",
+    });
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.trim())).toEqual({ continue: true });
+  });
+
+  test("rules-version-check warns when artifacts disagree and configs is unavailable", async () => {
+    const a = join(tmpHome, "a.md");
+    const b = join(tmpHome, "b.md");
+    writeFileSync(a, "<!-- hasna:agent-operating-rules v=1.0.0 -->");
+    writeFileSync(b, "<!-- hasna:agent-operating-rules v=1.1.0 -->");
+
+    const { stdout, exitCode } = await runFleetHook("agent-rules-version-check", sessionStartInput, {
+      HOOKS_RULES_FILES: `${a}:${b}`,
+    });
+    expect(exitCode).toBe(0);
+    const out = JSON.parse(stdout.trim());
+    expect(out.hookSpecificOutput.additionalContext).toContain("DISAGREE");
+  });
+
+  // --- fleet-blockers-gate ---
+
+  const preToolUseInput = (toolName: string) => ({
+    session_id: "fleet-test-002",
+    cwd: "/tmp",
+    hook_event_name: "PreToolUse",
+    tool_name: toolName,
+    tool_input: {},
+  });
+
+  function writeFrozenCache(home: string): void {
+    const stateDir = join(home, ".hasna", "hooks", "state");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(
+      join(stateDir, "fleet-blockers-gate.json"),
+      JSON.stringify({
+        checked_at: new Date().toISOString(),
+        frozen: true,
+        reason: "Unread [FREEZE] blocking message from chief: [FREEZE] cutover step 3",
+      })
+    );
+  }
+
+  test("gate denies mutating tools while frozen (cached state)", async () => {
+    writeFrozenCache(tmpHome);
+    for (const tool of ["Bash", "TodoWrite"]) {
+      const { stdout, exitCode } = await runFleetHook("fleet-blockers-gate", preToolUseInput(tool));
+      expect(exitCode).toBe(0);
+      const out = JSON.parse(stdout.trim());
+      expect(out.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(out.hookSpecificOutput.permissionDecisionReason).toContain("[FREEZE]");
+      expect(out.hookSpecificOutput.permissionDecisionReason).toContain("chief");
+    }
+  });
+
+  test("gate allows read-only tools while frozen", async () => {
+    writeFrozenCache(tmpHome);
+    for (const tool of ["Read", "Grep", "mcp__conversations__get_blockers"]) {
+      const { stdout } = await runFleetHook("fleet-blockers-gate", preToolUseInput(tool));
+      expect(JSON.parse(stdout.trim())).toEqual({ continue: true });
+    }
+  });
+
+  test("gate fails open when conversations CLI is unavailable and no cache exists", async () => {
+    const { stdout, exitCode } = await runFleetHook("fleet-blockers-gate", preToolUseInput("Bash"));
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout.trim())).toEqual({ continue: true });
+    expect(existsSync(join(tmpHome, ".hasna", "hooks", "state", "fleet-blockers-gate.json"))).toBe(false);
+  });
+
+  test("gate ignores an expired frozen cache and re-checks (fail-open without CLI)", async () => {
+    const stateDir = join(tmpHome, ".hasna", "hooks", "state");
+    mkdirSync(stateDir, { recursive: true });
+    writeFileSync(
+      join(stateDir, "fleet-blockers-gate.json"),
+      JSON.stringify({
+        checked_at: new Date(Date.now() - 10 * 60_000).toISOString(), // 10 min ago > TTL
+        frozen: true,
+        reason: "stale freeze",
+      })
+    );
+    const { stdout } = await runFleetHook("fleet-blockers-gate", preToolUseInput("Bash"));
+    expect(JSON.parse(stdout.trim())).toEqual({ continue: true });
+  });
+
+  test("gate respects the kill switch even while frozen", async () => {
+    writeFrozenCache(tmpHome);
+    const { stdout } = await runFleetHook("fleet-blockers-gate", preToolUseInput("Bash"), {
+      HOOKS_FLEET_GATE_DISABLE: "1",
+    });
+    expect(JSON.parse(stdout.trim())).toEqual({ continue: true });
   });
 });

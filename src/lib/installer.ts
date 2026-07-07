@@ -2,8 +2,8 @@
  * Hook installer - registers hooks in AI coding agent settings
  *
  * Supports:
- * - Claude Code: ~/.claude/settings.json (PreToolUse, PostToolUse, Stop, Notification)
- * - Gemini CLI: ~/.gemini/settings.json (BeforeTool, AfterTool, AfterAgent, Notification)
+ * - Claude Code: ~/.claude/settings.json (PreToolUse, PostToolUse, Stop, Notification, SessionStart, SessionEnd)
+ * - Gemini CLI: ~/.gemini/settings.json (BeforeTool, AfterTool, AfterAgent, Notification — no session events)
  *
  * Hooks run directly from the globally installed @hasna/hooks package.
  * No files are copied. The settings entry points to `hooks run <name>`.
@@ -34,25 +34,35 @@ function shortHookName(name: string): string {
 function removeHookEntriesByName(entries: any[], hookName: string): any[] {
   return entries.filter(
     (entry: any) => !entry.hooks?.some((h: any) => {
-      const match = h.command?.match(/^hooks run (\w+)/);
+      // [\w-]+ — hook names may contain hyphens (announce-start, fleet-catchup, …)
+      const match = h.command?.match(/^hooks run ([\w-]+)/);
       return match && match[1] === hookName;
     })
   );
 }
 
-/** Map our internal event names to each target's event names */
-const EVENT_MAP: Record<string, Record<string, string>> = {
+/**
+ * Map our internal event names to each target's event names.
+ * `null` means the target has no equivalent surface for that event —
+ * installs for that target fail with a clear error instead of writing
+ * an event key the runtime would silently ignore.
+ */
+const EVENT_MAP: Record<string, Record<string, string | null>> = {
   claude: {
     PreToolUse: "PreToolUse",
     PostToolUse: "PostToolUse",
     Stop: "Stop",
     Notification: "Notification",
+    SessionStart: "SessionStart",
+    SessionEnd: "SessionEnd",
   },
   gemini: {
     PreToolUse: "BeforeTool",
     PostToolUse: "AfterTool",
     Stop: "AfterAgent",
     Notification: "Notification",
+    SessionStart: null,
+    SessionEnd: null,
   },
 };
 
@@ -115,8 +125,17 @@ function writeSettings(settings: Record<string, any>, scope: Scope = "global", t
   writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
 }
 
-function getTargetEventName(internalEvent: string, target: "claude" | "gemini"): string {
-  return EVENT_MAP[target]?.[internalEvent] || internalEvent;
+/** Returns the target's event key, or null when the target does not support the event */
+function getTargetEventName(internalEvent: string, target: "claude" | "gemini"): string | null {
+  const targetMap = EVENT_MAP[target];
+  if (!targetMap) return internalEvent;
+  if (!(internalEvent in targetMap)) return internalEvent;
+  return targetMap[internalEvent];
+}
+
+/** Whether a hook's event can be registered for the given target */
+export function isEventSupported(internalEvent: string, target: "claude" | "gemini"): boolean {
+  return getTargetEventName(internalEvent, target) !== null;
 }
 
 /** Check if a hook conflicts with any already-installed hook (same event + overlapping matcher) */
@@ -171,8 +190,38 @@ export function installHook(name: string, options: InstallOptions = {}): Install
   const { scope = "global", overwrite = false, target = "claude", profile } = options;
 
   if (target === "all") {
+    const shortName = shortHookName(name);
+    const meta = getHook(shortName);
+    if (meta) {
+      const unsupportedTargets = (["claude", "gemini"] as const).filter(
+        (agentTarget) => !isEventSupported(meta.event, agentTarget)
+      );
+      if (unsupportedTargets.length > 0) {
+        return {
+          hook: shortName,
+          success: false,
+          error: `Event '${meta.event}' is not supported by target(s): ${unsupportedTargets.join(", ")}`,
+          target: "all",
+        };
+      }
+    }
+
     const claudeResult = installForTarget(name, scope, overwrite, "claude", profile);
-    installForTarget(name, scope, overwrite, "gemini", profile);
+    if (!claudeResult.success) {
+      return {
+        ...claudeResult,
+        error: `Failed for target 'claude': ${claudeResult.error}`,
+        target: "all",
+      };
+    }
+    const geminiResult = installForTarget(name, scope, overwrite, "gemini", profile);
+    if (!geminiResult.success) {
+      return {
+        ...geminiResult,
+        error: `Failed for target 'gemini': ${geminiResult.error}`,
+        target: "all",
+      };
+    }
     return { ...claudeResult, target: "all" };
   }
 
@@ -183,14 +232,20 @@ function registerHook(name: string, scope: Scope = "global", target: "claude" | 
   const meta = getHook(name);
   if (!meta) return;
 
+  const eventKey = getTargetEventName(meta.event, target);
+  if (eventKey === null) {
+    throw new Error(`Event '${meta.event}' is not supported by target '${target}'`);
+  }
+
   const settings = readSettings(scope, target);
   if (!settings.hooks) settings.hooks = {};
 
-  const eventKey = getTargetEventName(meta.event, target);
-  if (!settings.hooks[eventKey]) settings.hooks[eventKey] = [];
+  // Remove any existing entries for this hook from ALL event keys —
+  // a hook may have been rebound to a different event since it was installed
+  // (e.g. announce-start moved from Notification to SessionStart).
+  removeHookFromAllEvents(settings, name);
 
-  // Remove any existing entries for this hook (with or without profile)
-  settings.hooks[eventKey] = removeHookEntriesByName(settings.hooks[eventKey], name);
+  if (!settings.hooks[eventKey]) settings.hooks[eventKey] = [];
 
   const hookCommand = profile
     ? `hooks run ${name} --profile ${profile}`
@@ -207,6 +262,17 @@ function registerHook(name: string, scope: Scope = "global", target: "claude" | 
   writeSettings(settings, scope, target);
 }
 
+/** Strip a hook's entries from every event key, deleting keys that become empty */
+function removeHookFromAllEvents(settings: Record<string, any>, name: string): void {
+  if (!settings.hooks) return;
+  for (const key of Object.keys(settings.hooks)) {
+    settings.hooks[key] = removeHookEntriesByName(settings.hooks[key], name);
+    if (settings.hooks[key].length === 0) {
+      delete settings.hooks[key];
+    }
+  }
+}
+
 function unregisterHook(name: string, scope: Scope = "global", target: "claude" | "gemini" = "claude"): void {
   const meta = getHook(name);
   if (!meta) return;
@@ -214,15 +280,10 @@ function unregisterHook(name: string, scope: Scope = "global", target: "claude" 
   const settings = readSettings(scope, target);
   if (!settings.hooks) return;
 
-  const eventKey = getTargetEventName(meta.event, target);
-  if (!settings.hooks[eventKey]) return;
+  // Remove by hook name across all event keys — works regardless of profile
+  // and regardless of which event the hook was bound to when installed.
+  removeHookFromAllEvents(settings, name);
 
-  // Remove by hook name — works regardless of whether profile was used
-  settings.hooks[eventKey] = removeHookEntriesByName(settings.hooks[eventKey], name);
-
-  if (settings.hooks[eventKey].length === 0) {
-    delete settings.hooks[eventKey];
-  }
   if (Object.keys(settings.hooks).length === 0) {
     delete settings.hooks;
   }
@@ -242,8 +303,8 @@ export function getRegisteredHooksForTarget(scope: Scope = "global", target: "cl
   for (const eventKey of Object.keys(settings.hooks)) {
     for (const entry of settings.hooks[eventKey]) {
       for (const hook of entry.hooks || []) {
-        const newMatch = hook.command?.match(/^hooks run (\w+)(?:\s+--profile\s+\w+)?$/);
-        const oldMatch = hook.command?.match(/^hook-(\w+)$/);
+        const newMatch = hook.command?.match(/^hooks run ([\w-]+)(?:\s+--profile\s+[\w-]+)?$/);
+        const oldMatch = hook.command?.match(/^hook-([\w-]+)$/);
         const match = newMatch || oldMatch;
         if (match) {
           registered.push(match[1]);

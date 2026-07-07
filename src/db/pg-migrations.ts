@@ -12,7 +12,7 @@ export const PG_MIGRATIONS: string[] = [
     timestamp    TEXT NOT NULL,
     session_id   TEXT NOT NULL,
     hook_name    TEXT NOT NULL,
-    event_type   TEXT NOT NULL CHECK (event_type IN ('PreToolUse', 'PostToolUse', 'Stop', 'Notification')),
+    event_type   TEXT NOT NULL CHECK (event_type IN ('PreToolUse', 'PostToolUse', 'Stop', 'Notification', 'SessionStart', 'SessionEnd')),
     tool_name    TEXT,
     tool_input   TEXT,
     result       TEXT CHECK (result IN ('continue', 'block', NULL)),
@@ -51,4 +51,13 @@ export const PG_MIGRATIONS: string[] = [
     machine_id TEXT,
     created_at TEXT NOT NULL DEFAULT NOW()::text
   )`,
+
+  // Session events (002) — rebuild the event_type CHECK on tables created
+  // before SessionStart/SessionEnd existed. Appended at the END of the list so
+  // consumers that track applied statements by position stay consistent;
+  // drop-then-add keeps re-runs idempotent. `hook_events_event_type_check` is
+  // PostgreSQL's default name for the inline column CHECK above.
+  `ALTER TABLE hook_events DROP CONSTRAINT IF EXISTS hook_events_event_type_check`,
+  `ALTER TABLE hook_events ADD CONSTRAINT hook_events_event_type_check
+    CHECK (event_type IN ('PreToolUse', 'PostToolUse', 'Stop', 'Notification', 'SessionStart', 'SessionEnd'))`,
 ];

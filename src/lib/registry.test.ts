@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import {
   HOOKS,
+  HOOK_EVENTS,
   CATEGORIES,
   getHooksByCategory,
   searchHooks,
@@ -11,8 +12,8 @@ import {
 
 describe("registry", () => {
   describe("HOOKS", () => {
-    test("contains 39 hooks", () => {
-      expect(HOOKS).toHaveLength(39);
+    test("contains 42 hooks", () => {
+      expect(HOOKS).toHaveLength(42);
     });
 
     test("every hook has required fields", () => {
@@ -34,10 +35,11 @@ describe("registry", () => {
     });
 
     test("every hook has a valid event type", () => {
-      const validEvents = ["PreToolUse", "PostToolUse", "Stop", "Notification"];
+      const validEvents = ["PreToolUse", "PostToolUse", "Stop", "Notification", "SessionStart", "SessionEnd"];
       for (const hook of HOOKS) {
         expect(validEvents).toContain(hook.event);
       }
+      expect(HOOK_EVENTS).toEqual(validEvents as typeof HOOK_EVENTS);
     });
 
     test("every hook belongs to a valid category", () => {
@@ -118,7 +120,10 @@ describe("registry", () => {
 
     test("returns Agent Teams hooks", () => {
       const hooks = getHooksByCategory("Agent Teams");
-      expect(hooks).toHaveLength(5);
+      expect(hooks).toHaveLength(8);
+      expect(hooks.map((h) => h.name)).toContain("fleet-catchup");
+      expect(hooks.map((h) => h.name)).toContain("agent-rules-version-check");
+      expect(hooks.map((h) => h.name)).toContain("fleet-blockers-gate");
     });
 
     test("returns empty array for unknown category", () => {
@@ -271,11 +276,46 @@ describe("registry", () => {
       }
     });
 
+    test("SessionStart/SessionEnd hooks have empty matchers", () => {
+      const sessionHooks = HOOKS.filter((h) => h.event === "SessionStart" || h.event === "SessionEnd");
+      for (const h of sessionHooks) {
+        expect(h.matcher).toBe("");
+      }
+    });
+
     test("correct count per event type", () => {
-      expect(HOOKS.filter((h) => h.event === "PreToolUse")).toHaveLength(12);
+      expect(HOOKS.filter((h) => h.event === "PreToolUse")).toHaveLength(13);
       expect(HOOKS.filter((h) => h.event === "PostToolUse")).toHaveLength(15);
       expect(HOOKS.filter((h) => h.event === "Stop")).toHaveLength(8);
-      expect(HOOKS.filter((h) => h.event === "Notification")).toHaveLength(4);
+      expect(HOOKS.filter((h) => h.event === "Notification")).toHaveLength(3);
+      expect(HOOKS.filter((h) => h.event === "SessionStart")).toHaveLength(3);
+      expect(HOOKS.filter((h) => h.event === "SessionEnd")).toHaveLength(0);
+    });
+  });
+
+  describe("session event hooks (fleet comms)", () => {
+    test("announce-start is rebound to SessionStart", () => {
+      const hook = getHook("announce-start")!;
+      expect(hook.event).toBe("SessionStart");
+      expect(hook.version).toBe("0.2.0");
+    });
+
+    test("fleet-catchup fires on SessionStart", () => {
+      const hook = getHook("fleet-catchup")!;
+      expect(hook.event).toBe("SessionStart");
+      expect(hook.category).toBe("Agent Teams");
+    });
+
+    test("agent-rules-version-check fires on SessionStart", () => {
+      const hook = getHook("agent-rules-version-check")!;
+      expect(hook.event).toBe("SessionStart");
+      expect(hook.category).toBe("Agent Teams");
+    });
+
+    test("fleet-blockers-gate fires on PreToolUse with empty matcher", () => {
+      const hook = getHook("fleet-blockers-gate")!;
+      expect(hook.event).toBe("PreToolUse");
+      expect(hook.matcher).toBe("");
     });
   });
 

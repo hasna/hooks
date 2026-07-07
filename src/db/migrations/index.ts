@@ -6,13 +6,17 @@
 
 import type { Database } from "bun:sqlite";
 import { up as migration001 } from "./001_initial";
+import { up as migration002 } from "./002_session_events";
 
 interface Migration {
   version: string;
   up: (db: Database) => void;
 }
 
-const MIGRATIONS: Migration[] = [{ version: "001_initial", up: migration001 }];
+const MIGRATIONS: Migration[] = [
+  { version: "001_initial", up: migration001 },
+  { version: "002_session_events", up: migration002 },
+];
 
 function ensureMigrationsTable(db: Database): void {
   db.exec(`

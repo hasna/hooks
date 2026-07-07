@@ -230,7 +230,7 @@ export function createHooksServer(): McpServer {
             const eventHooks = settings.hooks?.[meta.event] || [];
             const found = eventHooks.some((entry: any) =>
               entry.hooks?.some((h: any) => {
-                const match = h.command?.match(/^hooks run (\w+)/);
+                const match = h.command?.match(/^hooks run ([\w-]+)/);
                 return match && match[1] === name;
               })
             );
@@ -288,8 +288,10 @@ export function createHooksServer(): McpServer {
             events: {
               PreToolUse: "Fires before a tool executes. Can block the operation.",
               PostToolUse: "Fires after a tool executes. Runs asynchronously.",
-              Stop: "Fires when a session ends. Useful for notifications.",
+              Stop: "Fires when the agent finishes responding. Useful for notifications.",
               Notification: "Fires on notification events like context compaction.",
+              SessionStart: "Fires when a session starts or resumes. Can inject context.",
+              SessionEnd: "Fires when a session terminates. Useful for cleanup and final announcements.",
             },
             commands: {
               install: "hooks install <name>",

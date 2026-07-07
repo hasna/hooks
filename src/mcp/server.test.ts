@@ -269,11 +269,11 @@ describe("MCP server", () => {
 
     // --- hooks_install_all ---
 
-    test("hooks_install_all installs all 39", async () => {
+    test("hooks_install_all installs all 42", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_install_all", arguments: {} }));
-      expect(data.total).toBe(39);
-      expect(data.success).toBe(39);
-      expect(data.installed).toHaveLength(39);
+      expect(data.total).toBe(42);
+      expect(data.success).toBe(42);
+      expect(data.installed).toHaveLength(42);
     });
 
     // --- hooks_remove ---
@@ -435,7 +435,7 @@ describe("MCP server", () => {
     test("hooks_install_all with overwrite after install", async () => {
       await client.callTool({ name: "hooks_install_all", arguments: {} });
       const data = parseResult(await client.callTool({ name: "hooks_install_all", arguments: { overwrite: true } }));
-      expect(data.success).toBe(39);
+      expect(data.success).toBe(42);
     });
 
     // --- docs for every hook ---
@@ -449,6 +449,7 @@ describe("MCP server", () => {
         "checksecurity", "packageage",
         "phonenotify", "agentmessages",
         "contextrefresh", "precompact",
+        "fleet-catchup", "agent-rules-version-check", "fleet-blockers-gate",
       ];
       for (const name of allHooks) {
         const data = parseResult(await client.callTool({ name: "hooks_docs", arguments: { name } }));
@@ -493,9 +494,9 @@ describe("MCP server", () => {
 
     // --- install all → remove all via MCP ---
 
-    test("install all 39 then remove all 39", async () => {
+    test("install all 42 then remove a subset", async () => {
       const install = parseResult(await client.callTool({ name: "hooks_install_all", arguments: {} }));
-      expect(install.success).toBe(39);
+      expect(install.success).toBe(42);
 
       const allHooks = [
         "gitguard", "branchprotect", "checkpoint",
@@ -729,7 +730,7 @@ describe("MCP server", () => {
     test("hooks_list compact returns minimal fields", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_list", arguments: { compact: true } }));
       expect(Array.isArray(data)).toBe(true);
-      expect(data.length).toBe(39);
+      expect(data.length).toBe(42);
       expect(data[0]).toHaveProperty("name");
       expect(data[0]).toHaveProperty("event");
       expect(data[0]).toHaveProperty("matcher");

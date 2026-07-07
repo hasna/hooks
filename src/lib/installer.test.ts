@@ -11,6 +11,7 @@ import {
   hookExists,
   getHookPath,
   getSettingsPath,
+  isEventSupported,
 } from "./installer.js";
 
 const GLOBAL_SETTINGS = join(homedir(), ".claude", "settings.json");
@@ -505,7 +506,7 @@ describe("installer", () => {
   });
 
   describe("hook source files", () => {
-    const ALL_30_NAMES = [
+    const HOOK_SOURCE_NAMES = [
       "gitguard", "branchprotect", "checkpoint",
       "checktests", "checklint", "checkfiles",
       "checkbugs", "checkdocs", "checktasks",
@@ -518,10 +519,11 @@ describe("installer", () => {
       "desktopnotify", "slacknotify", "soundnotify",
       "sessionlog", "commandlog", "costwatch", "errornotify",
       "taskgate",
+      "announce-start", "fleet-catchup", "agent-rules-version-check", "fleet-blockers-gate",
     ];
 
     test("every hook has src/hook.ts in package (except agentmessages)", () => {
-      for (const name of ALL_30_NAMES) {
+      for (const name of HOOK_SOURCE_NAMES) {
         if (name === "agentmessages") continue; // uses different file structure
         const hookScript = join(getHookPath(name), "src", "hook.ts");
         expect(existsSync(hookScript)).toBe(true);
@@ -529,17 +531,99 @@ describe("installer", () => {
     });
 
     test("every hook has package.json in package", () => {
-      for (const name of ALL_30_NAMES) {
+      for (const name of HOOK_SOURCE_NAMES) {
         const pkgJson = join(getHookPath(name), "package.json");
         expect(existsSync(pkgJson)).toBe(true);
       }
     });
 
     test("every hook has README.md in package", () => {
-      for (const name of ALL_30_NAMES) {
+      for (const name of HOOK_SOURCE_NAMES) {
         const readme = join(getHookPath(name), "README.md");
         expect(existsSync(readme)).toBe(true);
       }
+    });
+  });
+
+  describe("session events (SessionStart/SessionEnd)", () => {
+    test("isEventSupported matrix", () => {
+      expect(isEventSupported("SessionStart", "claude")).toBe(true);
+      expect(isEventSupported("SessionEnd", "claude")).toBe(true);
+      expect(isEventSupported("SessionStart", "gemini")).toBe(false);
+      expect(isEventSupported("SessionEnd", "gemini")).toBe(false);
+      expect(isEventSupported("PreToolUse", "gemini")).toBe(true);
+      expect(isEventSupported("Notification", "gemini")).toBe(true);
+    });
+
+    test("SessionStart hook installs under the SessionStart settings key", () => {
+      const result = installHook("fleet-catchup", { overwrite: true });
+      expect(result.success).toBe(true);
+
+      const settings = JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"));
+      const entries = settings.hooks?.SessionStart ?? [];
+      const found = entries.some((entry: any) =>
+        entry.hooks?.some((h: any) => h.command === "hooks run fleet-catchup")
+      );
+      expect(found).toBe(true);
+
+      removeHook("fleet-catchup");
+    });
+
+    test("gemini target rejects SessionStart hooks with a clear error", () => {
+      const result = installHook("fleet-catchup", { target: "gemini", overwrite: true });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("not supported by target 'gemini'");
+    });
+
+    test("hyphenated hook names round-trip install → list → remove (regression)", () => {
+      const result = installHook("fleet-blockers-gate", { overwrite: true });
+      expect(result.success).toBe(true);
+
+      // list --installed must see hyphenated names
+      expect(getRegisteredHooks()).toContain("fleet-blockers-gate");
+
+      // remove must actually strip the entry
+      expect(removeHook("fleet-blockers-gate")).toBe(true);
+      expect(getRegisteredHooks()).not.toContain("fleet-blockers-gate");
+
+      const settings = JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"));
+      const leftover = Object.values(settings.hooks ?? {}).some((entries: any) =>
+        entries.some((entry: any) =>
+          entry.hooks?.some((h: any) => /hooks run fleet-blockers-gate/.test(h.command || ""))
+        )
+      );
+      expect(leftover).toBe(false);
+    });
+
+    test("reinstall migrates a hook rebound from Notification to SessionStart", () => {
+      // Simulate a pre-rebind install: announce-start registered under Notification
+      const before = existsSync(GLOBAL_SETTINGS)
+        ? JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"))
+        : {};
+      before.hooks = before.hooks || {};
+      before.hooks.Notification = [
+        ...(before.hooks.Notification || []),
+        { hooks: [{ type: "command", command: "hooks run announce-start" }] },
+      ];
+      writeFileSync(GLOBAL_SETTINGS, JSON.stringify(before, null, 2) + "\n");
+
+      const result = installHook("announce-start", { overwrite: true });
+      expect(result.success).toBe(true);
+
+      const after = JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"));
+      const notificationEntries = after.hooks?.Notification ?? [];
+      const stillUnderNotification = notificationEntries.some((entry: any) =>
+        entry.hooks?.some((h: any) => /hooks run announce-start/.test(h.command || ""))
+      );
+      expect(stillUnderNotification).toBe(false);
+
+      const sessionStartEntries = after.hooks?.SessionStart ?? [];
+      const movedToSessionStart = sessionStartEntries.some((entry: any) =>
+        entry.hooks?.some((h: any) => h.command === "hooks run announce-start")
+      );
+      expect(movedToSessionStart).toBe(true);
+
+      removeHook("announce-start");
     });
   });
 
@@ -548,6 +632,24 @@ describe("installer", () => {
       const result = installHook("gitguard", { target: "all" });
       expect(result.success).toBe(true);
       expect(result.target).toBe("all");
+    });
+
+    test("installHook with target all rejects hooks unsupported by any target", () => {
+      const result = installHook("fleet-catchup", { target: "all", overwrite: true });
+      expect(result.success).toBe(false);
+      expect(result.target).toBe("all");
+      expect(result.error).toContain("SessionStart");
+      expect(result.error).toContain("gemini");
+
+      const claudeSettings = existsSync(GLOBAL_SETTINGS)
+        ? JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"))
+        : {};
+      const claudeInstalled = Object.values(claudeSettings.hooks ?? {}).some((entries: any) =>
+        entries.some((entry: any) =>
+          entry.hooks?.some((h: any) => h.command === "hooks run fleet-catchup")
+        )
+      );
+      expect(claudeInstalled).toBe(false);
     });
 
     test("removeHook with target all", () => {

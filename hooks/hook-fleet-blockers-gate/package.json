@@ -1,7 +1,7 @@
 {
-  "name": "@hasna/hook-announce-start",
-  "version": "0.2.0",
-  "description": "Claude Code SessionStart hook that registers agent, reads messages, and announces to space on session start",
+  "name": "@hasna/hook-fleet-blockers-gate",
+  "version": "0.1.0",
+  "description": "Claude Code PreToolUse hook that blocks mutating tools while an unread [FREEZE] blocker is active (TTL-cached, fail-open under 500ms)",
   "type": "module",
   "main": "./dist/hook.js",
   "exports": {
@@ -23,10 +23,11 @@
     "claude-code",
     "claude",
     "hook",
-    "announcement",
-    "start",
-    "register",
-    "messages",
+    "fleet",
+    "freeze",
+    "blockers",
+    "gate",
+    "safety",
     "agent-teams"
   ],
   "author": "Hasna",
