@@ -50,6 +50,12 @@ import {
   listProfiles,
   type AgentProfile,
 } from "../lib/profiles.js";
+import {
+  getStorageStatus,
+  storagePull,
+  storagePush,
+  storageSync,
+} from "../storage.js";
 
 export const MCP_PORT = 39427;
 
@@ -784,6 +790,34 @@ export function createHooksServer(): McpServer {
         }],
       };
     }
+  );
+
+  server.tool(
+    "storage_status",
+    "Show hooks storage sync configuration and local sync history.",
+    {},
+    async () => ({ content: [{ type: "text" as const, text: JSON.stringify(getStorageStatus()) }] }),
+  );
+
+  server.tool(
+    "storage_push",
+    "Push local hook data to storage PostgreSQL.",
+    { tables: z.array(z.string()).optional() },
+    async (params) => ({ content: [{ type: "text" as const, text: JSON.stringify(await storagePush(params.tables ? { tables: params.tables } : undefined)) }] }),
+  );
+
+  server.tool(
+    "storage_pull",
+    "Pull hook data from storage PostgreSQL to local SQLite.",
+    { tables: z.array(z.string()).optional() },
+    async (params) => ({ content: [{ type: "text" as const, text: JSON.stringify(await storagePull(params.tables ? { tables: params.tables } : undefined)) }] }),
+  );
+
+  server.tool(
+    "storage_sync",
+    "Bidirectional hooks storage sync: pull then push.",
+    { tables: z.array(z.string()).optional() },
+    async (params) => ({ content: [{ type: "text" as const, text: JSON.stringify(await storageSync(params.tables ? { tables: params.tables } : undefined)) }] }),
   );
 
   server.tool(

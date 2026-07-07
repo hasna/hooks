@@ -78,9 +78,9 @@ describe("MCP server", () => {
       restoreSettings();
     });
 
-    test("lists all 30 tools", async () => {
+    test("lists all 34 tools", async () => {
       const { tools } = await client.listTools();
-      expect(tools.length).toBe(30);
+      expect(tools.length).toBe(34);
       const names = tools.map((t) => t.name);
       expect(names).toContain("hooks_list");
       expect(names).toContain("hooks_search");
@@ -107,6 +107,15 @@ describe("MCP server", () => {
       expect(names).toContain("hooks_log_tail");
       expect(names).toContain("hooks_log_errors");
       expect(names).toContain("hooks_log_summary");
+      expect(names).toContain("send_feedback");
+      expect(names).toContain("storage_status");
+      expect(names).toContain("storage_push");
+      expect(names).toContain("storage_pull");
+      expect(names).toContain("storage_sync");
+      expect(names).toContain("register_agent");
+      expect(names).toContain("heartbeat");
+      expect(names).toContain("set_focus");
+      expect(names).toContain("list_agents");
     });
 
     test("every tool has a description", async () => {
