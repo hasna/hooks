@@ -16,7 +16,9 @@ export {
   searchHooks,
   type HookMeta,
   type Category,
+  type HookEvent,
 } from "./lib/registry.js";
+import type { HookEvent as HookEventType } from "./lib/registry.js";
 
 export {
   installHook,
@@ -26,19 +28,21 @@ export {
   getRegisteredHooksForTarget,
   removeHook,
   hookExists,
+  buildCodewithTomlFragment,
   getHookPath,
   getSettingsPath,
   type InstallResult,
   type InstallOptions,
   type Scope,
   type Target,
+  type CodewithInstallMode,
 } from "./lib/installer.js";
 
 // ── Hook runtime types ────────────────────────────────────────────────────────
 
 export interface HookAgentInfo {
   agent_id: string;
-  agent_type: "claude" | "gemini" | "custom";
+  agent_type: "claude" | "gemini" | "codewith" | "custom";
   name?: string;
   preferences?: Record<string, unknown>;
 }
@@ -47,6 +51,8 @@ export interface HookAgentInfo {
 export interface HookInput {
   session_id?: string;
   cwd?: string;
+  hook_event_name?: HookEventType | string;
+  prompt?: string;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
   agent?: HookAgentInfo;
@@ -57,6 +63,14 @@ export interface HookInput {
 export interface HookOutput {
   decision?: "approve" | "block";
   reason?: string;
+  continue?: boolean;
+  hookSpecificOutput?: {
+    hookEventName: "SessionStart" | "UserPromptSubmit" | "PreToolUse";
+    additionalContext?: string;
+    permissionDecision?: "allow" | "deny" | "ask";
+    permissionDecisionReason?: string;
+    updatedInput?: unknown;
+  };
   [key: string]: unknown;
 }
 

@@ -12,7 +12,7 @@ export const PG_MIGRATIONS: string[] = [
     timestamp    TEXT NOT NULL,
     session_id   TEXT NOT NULL,
     hook_name    TEXT NOT NULL,
-    event_type   TEXT NOT NULL CHECK (event_type IN ('PreToolUse', 'PostToolUse', 'Stop', 'Notification')),
+    event_type   TEXT NOT NULL CHECK (event_type IN ('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'Notification')),
     tool_name    TEXT,
     tool_input   TEXT,
     result       TEXT CHECK (result IN ('continue', 'block', NULL)),
