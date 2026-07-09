@@ -31,7 +31,7 @@ export interface CodewithHookOutput {
   suppressOutput?: boolean;
   systemMessage?: string;
   hookSpecificOutput?: {
-    hookEventName: "SessionStart" | "UserPromptSubmit" | "PreToolUse";
+    hookEventName: "SessionStart" | "UserPromptSubmit" | "SubagentStart" | "PreToolUse";
     additionalContext?: string;
     permissionDecision?: "allow" | "deny" | "ask";
     permissionDecisionReason?: string;
