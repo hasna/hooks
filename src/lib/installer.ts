@@ -187,7 +187,7 @@ function codewithMatcher(matcher: string): string | undefined {
 function codewithTimeout(name: string): number {
   switch (name) {
     case "knowledge-context":
-      return 2;
+      return 6;
     case "session-start":
       return 8;
     case "pre-bash":

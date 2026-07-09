@@ -650,7 +650,7 @@ describe("installer", () => {
         expect(fragment).toContain(`[[hooks.${eventName}.hooks]]`);
       }
       expect(fragment.match(/command = "hooks run knowledge-context"/g)).toHaveLength(3);
-      expect(fragment).toContain('timeout = 2');
+      expect(fragment).toContain('timeout = 6');
       expect(fragment).toContain('statusMessage = "Loading Knowledge context"');
     });
 

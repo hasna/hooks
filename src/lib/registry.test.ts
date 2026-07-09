@@ -254,7 +254,7 @@ describe("registry", () => {
       agentmessages: "0.1.0",
       contextrefresh: "0.1.0",
       precompact: "0.1.0",
-      "knowledge-context": "0.1.0",
+      "knowledge-context": "0.1.1",
       autoformat: "0.1.0",
       autostage: "0.1.0",
       tddguard: "0.1.0",
