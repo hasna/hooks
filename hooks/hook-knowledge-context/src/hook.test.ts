@@ -16,6 +16,7 @@ const baseConfig: KnowledgeContextConfig = {
   command: "knowledge",
   timeoutMs: 5000,
   maxItems: 3,
+  candidateItems: 12,
   maxTokens: 1200,
   minPromptChars: 6,
   minSignalScore: 3,
@@ -28,6 +29,7 @@ describe("hook-knowledge-context", () => {
   test("defaults Knowledge CLI timeout to 5000ms and keeps env override", () => {
     expect(getConfig({}).timeoutMs).toBe(5000);
     expect(getConfig({}).maxItems).toBe(3);
+    expect(getConfig({}).candidateItems).toBe(12);
     expect(getConfig({}).minPromptChars).toBe(6);
     expect(getConfig({}).minSignalScore).toBe(3);
     expect(getConfig({}).requireHighSignal).toBe(true);
@@ -39,6 +41,7 @@ describe("hook-knowledge-context", () => {
     const config = getConfig({
       HOOKS_KNOWLEDGE_COMMAND: "/tmp/knowledge",
       HOOKS_KNOWLEDGE_MAX_ITEMS: "9",
+      HOOKS_KNOWLEDGE_CANDIDATE_ITEMS: "15",
       HOOKS_KNOWLEDGE_MAX_TOKENS: "2345",
       HOOKS_KNOWLEDGE_MIN_PROMPT_CHARS: "12",
       HOOKS_KNOWLEDGE_MIN_SIGNAL_SCORE: "4",
@@ -48,12 +51,13 @@ describe("hook-knowledge-context", () => {
 
     expect(config.command).toBe("/tmp/knowledge");
     expect(config.maxItems).toBe(9);
+    expect(config.candidateItems).toBe(15);
     expect(config.maxTokens).toBe(2345);
     expect(config.minPromptChars).toBe(12);
     expect(config.minSignalScore).toBe(4);
     expect(config.maxQueryChars).toBe(200);
     expect(config.maxOutputChars).toBe(9999);
-    expect(buildKnowledgeArgs("q", config)).toContain("9");
+    expect(buildKnowledgeArgs("q", config)).toContain("15");
     expect(getConfig({ HOOKS_KNOWLEDGE_COMMAND: "bad command" }).command).toBe("knowledge");
   });
 
@@ -67,7 +71,7 @@ describe("hook-knowledge-context", () => {
       "--from",
       "search",
       "--max-items",
-      "3",
+      "12",
       "--max-tokens",
       "1200",
       "--json",
@@ -302,5 +306,74 @@ describe("hook-knowledge-context", () => {
   test("cleans legacy empty-title bullet artifacts in item text", () => {
     expect(extractContextText(["- : legacy empty title preview"])).toBe("- legacy empty title preview");
     expect(extractContextText("- : legacy direct context")).toBe("- legacy direct context");
+  });
+
+  test("filters historical reference-only archive items from injected context", () => {
+    const text = extractContextText(
+      {
+        citations: [
+          {
+            id: "cite_archived",
+            source_ref: "knowledge://item/k_archived",
+            quote_preview:
+              "Archived on 2026-06-25 before removing brain orchestration startup files from spark01. Historical/reference only; not an active startup instruction.",
+          },
+          {
+            id: "cite_active",
+            source_ref: "knowledge://item/k_active",
+            quote_preview: "Current npm publish convention: use scoped granular tokens through the secrets CLI.",
+          },
+        ],
+      },
+      { maxItems: 3 }
+    );
+
+    expect(text).toContain("item_id=k_active cite=cite_active");
+    expect(text).toContain("Current npm publish convention");
+    expect(text).not.toContain("k_archived");
+    expect(text).not.toContain("Archived on 2026-06-25");
+  });
+
+  test("fails open when all citation candidates are non-autoloadable archive items", () => {
+    expect(
+      extractContextText(
+        {
+          citations: [
+            {
+              id: "cite_archived",
+              source_ref: "knowledge://item/k_archived",
+              quote_preview:
+                "Archived on 2026-06-25 from local Claude startup context. These instructions are historical/reference only and should not be auto-loaded for normal agents.",
+            },
+          ],
+        },
+        { maxItems: 3 }
+      )
+    ).toBeNull();
+  });
+
+  test("caps emitted items after filtering extra search candidates", () => {
+    const text = extractContextText(
+      {
+        citations: [
+          {
+            id: "cite_archived",
+            source_ref: "knowledge://item/k_archived",
+            quote_preview:
+              "Archived on 2026-06-25 before removing brain orchestration startup files. Historical/reference only; not an active startup instruction.",
+          },
+          { id: "cite_one", source_ref: "knowledge://item/k_one", quote_preview: "First active item." },
+          { id: "cite_two", source_ref: "knowledge://item/k_two", quote_preview: "Second active item." },
+          { id: "cite_three", source_ref: "knowledge://item/k_three", quote_preview: "Third active item." },
+        ],
+      },
+      { maxItems: 2 }
+    );
+
+    expect(text?.match(/^- item_id=/gm) ?? []).toHaveLength(2);
+    expect(text).toContain("item_id=k_one");
+    expect(text).toContain("item_id=k_two");
+    expect(text).not.toContain("item_id=k_three");
+    expect(text).not.toContain("item_id=k_archived");
   });
 });
