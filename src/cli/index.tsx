@@ -211,7 +211,7 @@ program
   .option("--profile <id>", "Agent profile ID to scope hooks to")
   .option("--dry-run", "Preview what would be installed without writing to settings", false)
   .option("--apply-codewith", "Explicitly append Codewith TOML to a config file (prefer open-configs for managed configs)", false)
-  .option("--codewith-config <path>", "Override Codewith config path for --apply-codewith/tests")
+  .option("--codewith-config <path>", "Explicit Codewith config path required with --apply-codewith")
   .option("-j, --json", "Output as JSON", false)
   .description("Install one or more hooks")
   .action((hooks: string[], options) => {
@@ -239,6 +239,16 @@ program
 
     if (toInstall.length === 0) {
       render(<App />);
+      return;
+    }
+
+    if (options.applyCodewith && (target === "codewith" || target === "all") && !options.codewithConfig) {
+      const message = "--apply-codewith requires --codewith-config <path>; refusing to write default ~/.codewith/config.toml.";
+      if (options.json) {
+        console.log(JSON.stringify({ error: message, scope, target, applied: false }));
+      } else {
+        console.log(chalk.red(message));
+      }
       return;
     }
 
@@ -300,7 +310,7 @@ program
     }
 
     const settingsFile = target === "codewith"
-      ? (options.applyCodewith ? (options.codewithConfig || getSettingsPath(scope, "codewith")) : "TOML fragment only (open-configs should apply)")
+      ? (options.applyCodewith ? options.codewithConfig : "TOML fragment only (open-configs should apply)")
       : scope === "project" ? ".claude/settings.json" : "~/.claude/settings.json";
     console.log(chalk.bold(`\nInstalling hooks (${scope}, ${target})...\n`));
     for (const result of results) {
@@ -598,7 +608,7 @@ program
           const eventHooks = settings.hooks?.[meta.event] || [];
           const found = eventHooks.some((entry: any) =>
             entry.hooks?.some((h: any) => {
-              const match = h.command?.match(/^hooks run (\w+)/);
+              const match = h.command?.match(/^hooks run ([\w-]+)/);
               return match && match[1] === name;
             })
           );
@@ -754,12 +764,13 @@ program
     const generalDocs = {
       overview: "Hooks are scripts that run at specific points in an AI coding agent session. Install @hasna/hooks globally, then register hooks — no files are copied to your project.",
       events: {
-        SessionStart: "Codewith-native event at session startup; can inject additionalContext.",
+        SessionStart: "Fires when a session starts or resumes. Codewith can inject context via hookSpecificOutput.additionalContext.",
         UserPromptSubmit: "Codewith-native event when a user prompt is submitted; can block obvious injection attempts.",
         PreToolUse: "Fires before a tool executes. Can block the operation by returning { \"decision\": \"block\" }.",
         PostToolUse: "Fires after a tool executes. Runs asynchronously, cannot block.",
-        Stop: "Fires at turn end in Codewith and session/agent stop in other agents. Useful for notifications and cleanup.",
+        Stop: "Fires at turn end in Codewith and when other agents finish responding. Useful for notifications and cleanup.",
         Notification: "Fires on notification events like context compaction.",
+        SessionEnd: "Fires when a session terminates. Useful for cleanup and final announcements.",
       },
       installation: {
         global: "hooks install gitguard",
@@ -1130,6 +1141,98 @@ logCmd
     }
 
     console.log(chalk.green(`✓ Cleared ${count} event(s).`));
+  });
+
+const storageCmd = program
+  .command("storage")
+  .description("Sync local hook data with storage PostgreSQL");
+
+storageCmd
+  .command("status")
+  .description("Show storage sync status")
+  .option("-j, --json", "Output as JSON", false)
+  .action(async (options: { json: boolean }) => {
+    const { getStorageStatus } = await import("../storage.js");
+    const status = getStorageStatus();
+    if (options.json) {
+      console.log(JSON.stringify(status, null, 2));
+      return;
+    }
+    console.log(chalk.bold("\n  Storage Status\n"));
+    console.log(`  Configured: ${status.configured ? chalk.green(`yes (${status.activeEnv})`) : chalk.red("no")}`);
+    console.log(`  Mode:       ${status.mode}`);
+    console.log(`  Tables:     ${status.tables.join(", ")}`);
+    console.log(`  Sync rows:  ${status.sync.length}`);
+  });
+
+storageCmd
+  .command("push")
+  .description("Push local hook data to storage PostgreSQL")
+  .option("-t, --tables <tables>", "Comma-separated table names")
+  .option("-j, --json", "Output as JSON", false)
+  .action(async (options: { tables?: string; json: boolean }) => {
+    try {
+      const { parseStorageTables, storagePush } = await import("../storage.js");
+      const results = await storagePush({ tables: parseStorageTables(options.tables) });
+      if (options.json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+      const written = results.reduce((sum, result) => sum + result.rowsWritten, 0);
+      console.log(chalk.green(`✓ Pushed ${written} row(s)`));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (options.json) console.log(JSON.stringify({ error: message }));
+      else console.error(chalk.red(`✗ ${message}`));
+      process.exitCode = 1;
+    }
+  });
+
+storageCmd
+  .command("pull")
+  .description("Pull hook data from storage PostgreSQL to local SQLite")
+  .option("-t, --tables <tables>", "Comma-separated table names")
+  .option("-j, --json", "Output as JSON", false)
+  .action(async (options: { tables?: string; json: boolean }) => {
+    try {
+      const { parseStorageTables, storagePull } = await import("../storage.js");
+      const results = await storagePull({ tables: parseStorageTables(options.tables) });
+      if (options.json) {
+        console.log(JSON.stringify(results, null, 2));
+        return;
+      }
+      const written = results.reduce((sum, result) => sum + result.rowsWritten, 0);
+      console.log(chalk.green(`✓ Pulled ${written} row(s)`));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (options.json) console.log(JSON.stringify({ error: message }));
+      else console.error(chalk.red(`✗ ${message}`));
+      process.exitCode = 1;
+    }
+  });
+
+storageCmd
+  .command("sync")
+  .description("Bidirectional storage sync: pull then push")
+  .option("-t, --tables <tables>", "Comma-separated table names")
+  .option("-j, --json", "Output as JSON", false)
+  .action(async (options: { tables?: string; json: boolean }) => {
+    try {
+      const { parseStorageTables, storageSync } = await import("../storage.js");
+      const result = await storageSync({ tables: parseStorageTables(options.tables) });
+      if (options.json) {
+        console.log(JSON.stringify(result, null, 2));
+        return;
+      }
+      const pulled = result.pull.reduce((sum, entry) => sum + entry.rowsWritten, 0);
+      const pushed = result.push.reduce((sum, entry) => sum + entry.rowsWritten, 0);
+      console.log(chalk.green(`✓ Synced ${pulled} pulled row(s), ${pushed} pushed row(s)`));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (options.json) console.log(JSON.stringify({ error: message }));
+      else console.error(chalk.red(`✗ ${message}`));
+      process.exitCode = 1;
+    }
   });
 
 // MCP server command

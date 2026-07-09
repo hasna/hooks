@@ -12,6 +12,7 @@ import {
   getHookPath,
   getSettingsPath,
   buildCodewithTomlFragment,
+  isEventSupported,
 } from "./installer.js";
 import { HOOKS } from "./registry.js";
 
@@ -115,9 +116,9 @@ describe("installer", () => {
       expect(hookExists("nonexistent")).toBe(false);
     });
 
-    test("returns true for all 44 registered hooks", () => {
+    test("returns true for all 47 registered hooks", () => {
       const names = HOOKS.map((hook) => hook.name);
-      expect(names).toHaveLength(44);
+      expect(names).toHaveLength(47);
       for (const name of names) {
         expect(hookExists(name)).toBe(true);
       }
@@ -351,12 +352,12 @@ describe("installer", () => {
   describe("install + remove roundtrip", () => {
     test("install all Claude-compatible hooks then remove all", () => {
       const allNames = HOOKS
-        .filter((hook) => hook.event !== "SessionStart" && hook.event !== "UserPromptSubmit")
+        .filter((hook) => hook.event !== "UserPromptSubmit")
         .map((hook) => hook.name);
-      expect(allNames).toHaveLength(42);
+      expect(allNames).toHaveLength(46);
       const results = installHooks(allNames);
       expect(results.every((r) => r.success)).toBe(true);
-      expect(getRegisteredHooks().length).toBeGreaterThanOrEqual(42);
+      expect(getRegisteredHooks().length).toBeGreaterThanOrEqual(46);
 
       for (const name of allNames) {
         expect(removeHook(name)).toBe(true);
@@ -503,23 +504,10 @@ describe("installer", () => {
   });
 
   describe("hook source files", () => {
-    const ALL_30_NAMES = [
-      "gitguard", "branchprotect", "checkpoint",
-      "checktests", "checklint", "checkfiles",
-      "checkbugs", "checkdocs", "checktasks",
-      "checksecurity", "packageage",
-      "phonenotify", "agentmessages",
-      "contextrefresh", "precompact",
-      "autoformat", "autostage", "tddguard",
-      "envsetup",
-      "permissionguard", "protectfiles", "promptguard",
-      "desktopnotify", "slacknotify", "soundnotify",
-      "sessionlog", "commandlog", "costwatch", "errornotify",
-      "taskgate",
-    ];
+    const HOOK_SOURCE_NAMES = HOOKS.map((hook) => hook.name);
 
     test("every hook has src/hook.ts in package (except agentmessages)", () => {
-      for (const name of ALL_30_NAMES) {
+      for (const name of HOOK_SOURCE_NAMES) {
         if (name === "agentmessages") continue; // uses different file structure
         const hookScript = join(getHookPath(name), "src", "hook.ts");
         expect(existsSync(hookScript)).toBe(true);
@@ -527,17 +515,99 @@ describe("installer", () => {
     });
 
     test("every hook has package.json in package", () => {
-      for (const name of ALL_30_NAMES) {
+      for (const name of HOOK_SOURCE_NAMES) {
         const pkgJson = join(getHookPath(name), "package.json");
         expect(existsSync(pkgJson)).toBe(true);
       }
     });
 
     test("every hook has README.md in package", () => {
-      for (const name of ALL_30_NAMES) {
+      for (const name of HOOK_SOURCE_NAMES) {
         const readme = join(getHookPath(name), "README.md");
         expect(existsSync(readme)).toBe(true);
       }
+    });
+  });
+
+  describe("session events (SessionStart/SessionEnd)", () => {
+    test("isEventSupported matrix", () => {
+      expect(isEventSupported("SessionStart", "claude")).toBe(true);
+      expect(isEventSupported("SessionEnd", "claude")).toBe(true);
+      expect(isEventSupported("SessionStart", "gemini")).toBe(false);
+      expect(isEventSupported("SessionEnd", "gemini")).toBe(false);
+      expect(isEventSupported("PreToolUse", "gemini")).toBe(true);
+      expect(isEventSupported("Notification", "gemini")).toBe(true);
+    });
+
+    test("SessionStart hook installs under the SessionStart settings key", () => {
+      const result = installHook("fleet-catchup", { overwrite: true });
+      expect(result.success).toBe(true);
+
+      const settings = JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"));
+      const entries = settings.hooks?.SessionStart ?? [];
+      const found = entries.some((entry: any) =>
+        entry.hooks?.some((h: any) => h.command === "hooks run fleet-catchup")
+      );
+      expect(found).toBe(true);
+
+      removeHook("fleet-catchup");
+    });
+
+    test("gemini target rejects SessionStart hooks with a clear error", () => {
+      const result = installHook("fleet-catchup", { target: "gemini", overwrite: true });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("not supported by target 'gemini'");
+    });
+
+    test("hyphenated hook names round-trip install → list → remove (regression)", () => {
+      const result = installHook("fleet-blockers-gate", { overwrite: true });
+      expect(result.success).toBe(true);
+
+      // list --installed must see hyphenated names
+      expect(getRegisteredHooks()).toContain("fleet-blockers-gate");
+
+      // remove must actually strip the entry
+      expect(removeHook("fleet-blockers-gate")).toBe(true);
+      expect(getRegisteredHooks()).not.toContain("fleet-blockers-gate");
+
+      const settings = JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"));
+      const leftover = Object.values(settings.hooks ?? {}).some((entries: any) =>
+        entries.some((entry: any) =>
+          entry.hooks?.some((h: any) => /hooks run fleet-blockers-gate/.test(h.command || ""))
+        )
+      );
+      expect(leftover).toBe(false);
+    });
+
+    test("reinstall migrates a hook rebound from Notification to SessionStart", () => {
+      // Simulate a pre-rebind install: announce-start registered under Notification
+      const before = existsSync(GLOBAL_SETTINGS)
+        ? JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"))
+        : {};
+      before.hooks = before.hooks || {};
+      before.hooks.Notification = [
+        ...(before.hooks.Notification || []),
+        { hooks: [{ type: "command", command: "hooks run announce-start" }] },
+      ];
+      writeFileSync(GLOBAL_SETTINGS, JSON.stringify(before, null, 2) + "\n");
+
+      const result = installHook("announce-start", { overwrite: true });
+      expect(result.success).toBe(true);
+
+      const after = JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"));
+      const notificationEntries = after.hooks?.Notification ?? [];
+      const stillUnderNotification = notificationEntries.some((entry: any) =>
+        entry.hooks?.some((h: any) => /hooks run announce-start/.test(h.command || ""))
+      );
+      expect(stillUnderNotification).toBe(false);
+
+      const sessionStartEntries = after.hooks?.SessionStart ?? [];
+      const movedToSessionStart = sessionStartEntries.some((entry: any) =>
+        entry.hooks?.some((h: any) => h.command === "hooks run announce-start")
+      );
+      expect(movedToSessionStart).toBe(true);
+
+      removeHook("announce-start");
     });
   });
 
@@ -546,6 +616,24 @@ describe("installer", () => {
       const result = installHook("gitguard", { target: "all" });
       expect(result.success).toBe(true);
       expect(result.target).toBe("all");
+    });
+
+    test("installHook with target all rejects hooks unsupported by any target", () => {
+      const result = installHook("fleet-catchup", { target: "all", overwrite: true });
+      expect(result.success).toBe(false);
+      expect(result.target).toBe("all");
+      expect(result.error).toContain("SessionStart");
+      expect(result.error).toContain("gemini");
+
+      const claudeSettings = existsSync(GLOBAL_SETTINGS)
+        ? JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"))
+        : {};
+      const claudeInstalled = Object.values(claudeSettings.hooks ?? {}).some((entries: any) =>
+        entries.some((entry: any) =>
+          entry.hooks?.some((h: any) => h.command === "hooks run fleet-catchup")
+        )
+      );
+      expect(claudeInstalled).toBe(false);
     });
 
     test("removeHook with target all", () => {
@@ -571,6 +659,26 @@ describe("installer", () => {
       expect(result.fragment).toContain("[[hooks.PreToolUse]]");
       expect(result.fragment).toContain('matcher = "^Bash$"');
       expect(result.note).toContain("open-configs");
+    });
+
+    test("installHook codewith write refuses missing explicit config path", () => {
+      const tmp = join(process.cwd(), `.codewith-env-should-not-write-${Date.now()}.toml`);
+      const previous = process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH;
+      process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH = tmp;
+      try {
+        const result = installHook("session-start", {
+          target: "codewith",
+          codewithMode: "write",
+        });
+        expect(result.success).toBe(false);
+        expect(result.applied).toBe(false);
+        expect(result.error).toContain("--codewith-config");
+        expect(existsSync(tmp)).toBe(false);
+      } finally {
+        if (previous === undefined) delete process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH;
+        else process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH = previous;
+        try { rmSync(tmp, { force: true }); } catch {}
+      }
     });
 
     test("installHook codewith explicit write uses override path", () => {

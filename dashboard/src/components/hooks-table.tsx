@@ -62,6 +62,18 @@ function EventBadge({ event }: { event: HookMeta["event"] }) {
           Notification
         </Badge>
       );
+    case "SessionStart":
+      return (
+        <Badge className="bg-cyan-100 text-cyan-700 dark:bg-cyan-950 dark:text-cyan-300 border-0">
+          SessionStart
+        </Badge>
+      );
+    case "SessionEnd":
+      return (
+        <Badge className="bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-300 border-0">
+          SessionEnd
+        </Badge>
+      );
   }
 }
 

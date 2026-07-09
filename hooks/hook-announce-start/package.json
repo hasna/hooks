@@ -1,7 +1,7 @@
 {
   "name": "@hasna/hook-announce-start",
-  "version": "0.1.0",
-  "description": "Claude Code hook that registers agent, reads messages, and announces to space on session start",
+  "version": "0.2.0",
+  "description": "Claude Code SessionStart hook that registers agent, reads messages, and announces to space on session start",
   "type": "module",
   "main": "./dist/hook.js",
   "exports": {

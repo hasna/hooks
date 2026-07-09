@@ -117,6 +117,35 @@ describe("Codewith-native hooks", () => {
     expect(result.json.reason).toContain("Details redacted");
   });
 
+  test("pre-bash scans git -C commit in the command target cwd", async () => {
+    const bin = join(tmp, "bin");
+    const repo = join(tmp, "shared-repo");
+    const pwdFile = join(tmp, "gitleaks-pwd.txt");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    const fake = join(bin, "gitleaks");
+    writeFileSync(fake, `#!/bin/sh\npwd > ${JSON.stringify(pwdFile)}\necho '{"Secret":"SHOULD_NOT_APPEAR"}'\nexit 1\n`);
+    chmodSync(fake, 0o755);
+
+    const result = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-4b",
+      cwd: tmp,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: `git -C ${repo} commit -m test` },
+      tool_use_id: "tool-1b",
+      transcript_path: null,
+      turn_id: "turn-3b",
+    }, { env: { PATH: bin, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.stdout).not.toContain("SHOULD_NOT_APPEAR");
+    expect(await Bun.file(pwdFile).text()).toBe(`${repo}\n`);
+  });
+
   test("pre-bash fails open when gitleaks errors instead of finding leaks", async () => {
     const bin = join(tmp, "bin");
     mkdirSync(bin, { recursive: true });
@@ -167,8 +196,63 @@ describe("Codewith-native hooks", () => {
     expect(result.json.reason).toContain("--mode required --json");
   });
 
+  test("worktree-guard blocks git -C commit targeting a shared checkout even from a managed cwd", async () => {
+    const repo = join(tmp, "shared-repo");
+    const managed = join(tmp, "worktrees", "station01", "open-hooks-a55c105a", "wt_2ab04216a30ef5ece642792e", "repo");
+    mkdirSync(repo, { recursive: true });
+    mkdirSync(managed, { recursive: true });
+    const init = Bun.spawnSync(["git", "init"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+    expect(init.exitCode).toBe(0);
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-6b",
+      cwd: managed,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: `git -C ${repo} commit -m test` },
+      tool_use_id: "tool-3b",
+      transcript_path: null,
+      turn_id: "turn-5b",
+    }, { env: { HASNA_REPOS_WORKTREES_ROOT: join(tmp, "worktrees") } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain(`Command target cwd: ${repo}`);
+  });
+
+  test("worktree-guard blocks git -c and --git-dir/--work-tree commit or push forms outside managed roots", async () => {
+    const repo = join(tmp, "shared-repo");
+    mkdirSync(repo, { recursive: true });
+    const init = Bun.spawnSync(["git", "init"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+    expect(init.exitCode).toBe(0);
+
+    for (const command of [
+      "git -c user.name=test push origin feature",
+      `git --git-dir ${join(repo, ".git")} --work-tree ${repo} commit -m test`,
+    ]) {
+      const result = await runHook("worktree-guard", {
+        hook_event_name: "PreToolUse",
+        session_id: "sess-6c",
+        cwd: repo,
+        model: "gpt-test",
+        permission_mode: "default",
+        tool_name: "Bash",
+        tool_input: { command },
+        tool_use_id: "tool-3c",
+        transcript_path: null,
+        turn_id: "turn-5c",
+      }, { env: { HASNA_REPOS_WORKTREES_ROOT: join(tmp, "worktrees") } });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.json.decision).toBe("block");
+      expect(result.json.reason).toContain("outside a managed repos worktree");
+    }
+  });
+
   test("worktree-guard allows git commit inside managed worktree root", async () => {
-    const managed = join(tmp, "worktrees", "station01", "open-hooks-a55c105a", "wt_abc123", "repo");
+    const managed = join(tmp, "worktrees", "station01", "open-hooks-a55c105a", "wt_2ab04216a30ef5ece642792e", "repo");
     mkdirSync(managed, { recursive: true });
 
     const result = await runHook("worktree-guard", {

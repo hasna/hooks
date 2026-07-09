@@ -2,10 +2,10 @@
 
 import {
   claimCommand,
+  gitCommandInfo,
   gitRemoteSlug,
   gitRepoRoot,
   getCommand,
-  isGitPushOrCommitCommand,
   managedWorktreeInfo,
   readInput,
   respond,
@@ -19,7 +19,7 @@ const FEATURE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 
 function isFeatureWork(input: CodewithHookInput, command: string): boolean {
   if (typeof input.tool_name === "string" && FEATURE_TOOLS.has(input.tool_name)) return true;
-  if (input.tool_name === "Bash" && /\b(?:git\s+(?:commit|push|add)|(?:npm|pnpm|yarn|bun)\s+(?:test|run|install|build)|apply_patch|python|node|bunx)\b/.test(command)) return true;
+  if (input.tool_name === "Bash" && (gitCommandInfo(command) || /\b(?:git\s+add|(?:npm|pnpm|yarn|bun)\s+(?:test|run|install|build)|apply_patch|python|node|bunx)\b/.test(command))) return true;
   return false;
 }
 
@@ -29,20 +29,22 @@ export async function evaluate(input: CodewithHookInput): Promise<{ output: Reco
 
   const cwd = input.cwd || process.cwd();
   const command = getCommand(input);
-  const managed = managedWorktreeInfo(cwd);
+  const gitInfo = gitCommandInfo(command, cwd);
+  const targetCwd = gitInfo?.targetCwd || cwd;
+  const managed = managedWorktreeInfo(targetCwd);
   if (managed.managed) return { output: { continue: true }, warnings };
 
-  const repoRoot = await gitRepoRoot(cwd);
-  const repo = await gitRemoteSlug(cwd) || (repoRoot ? repoRoot.split("/").filter(Boolean).pop() || null : null);
+  const repoRoot = await gitRepoRoot(targetCwd);
+  const repo = await gitRemoteSlug(targetCwd) || (repoRoot ? repoRoot.split("/").filter(Boolean).pop() || null : null);
   const taskId = taskIdFrom(input);
   const runId = runIdFrom(input);
   const recommended = claimCommand(repo, taskId, runId);
-  const action = isGitPushOrCommitCommand(command);
+  const action = gitInfo?.action || null;
 
-  if (action && repoRoot) {
+  if (action) {
     const reason = [
       `Blocked git ${action} outside a managed repos worktree (${managed.reason || "not under managed root"}).`,
-      `Current cwd: ${cwd}`,
+      `Command target cwd: ${targetCwd}`,
       `Managed root: ${managed.root}`,
       `Claim a task worktree first: ${recommended}`,
     ].join(" ");

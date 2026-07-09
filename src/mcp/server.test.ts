@@ -78,9 +78,9 @@ describe("MCP server", () => {
       restoreSettings();
     });
 
-    test("lists all 30 tools", async () => {
+    test("lists all 34 tools", async () => {
       const { tools } = await client.listTools();
-      expect(tools.length).toBe(30);
+      expect(tools.length).toBe(34);
       const names = tools.map((t) => t.name);
       expect(names).toContain("hooks_list");
       expect(names).toContain("hooks_search");
@@ -107,6 +107,15 @@ describe("MCP server", () => {
       expect(names).toContain("hooks_log_tail");
       expect(names).toContain("hooks_log_errors");
       expect(names).toContain("hooks_log_summary");
+      expect(names).toContain("send_feedback");
+      expect(names).toContain("storage_status");
+      expect(names).toContain("storage_push");
+      expect(names).toContain("storage_pull");
+      expect(names).toContain("storage_sync");
+      expect(names).toContain("register_agent");
+      expect(names).toContain("heartbeat");
+      expect(names).toContain("set_focus");
+      expect(names).toContain("list_agents");
     });
 
     test("every tool has a description", async () => {
@@ -270,12 +279,12 @@ describe("MCP server", () => {
 
     // --- hooks_install_all ---
 
-    test("hooks_install_all installs Codewith-compatible default hooks", async () => {
+    test("hooks_install_all installs default-compatible hooks", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_install_all", arguments: {} }));
-      expect(data.total).toBe(44);
-      expect(data.success).toBe(42);
-      expect(data.installed).toHaveLength(42);
-      expect(data.failed.map((f: any) => f.hook).sort()).toEqual(["prompt-guard", "session-start"]);
+      expect(data.total).toBe(47);
+      expect(data.success).toBe(46);
+      expect(data.installed).toHaveLength(46);
+      expect(data.failed.map((f: any) => f.hook)).toEqual(["prompt-guard"]);
     });
 
     // --- hooks_remove ---
@@ -437,7 +446,7 @@ describe("MCP server", () => {
     test("hooks_install_all with overwrite after install", async () => {
       await client.callTool({ name: "hooks_install_all", arguments: {} });
       const data = parseResult(await client.callTool({ name: "hooks_install_all", arguments: { overwrite: true } }));
-      expect(data.success).toBe(42);
+      expect(data.success).toBe(46);
     });
 
     // --- docs for every hook ---
@@ -451,6 +460,7 @@ describe("MCP server", () => {
         "checksecurity", "packageage",
         "phonenotify", "agentmessages",
         "contextrefresh", "precompact",
+        "fleet-catchup", "agent-rules-version-check", "fleet-blockers-gate",
       ];
       for (const name of allHooks) {
         const data = parseResult(await client.callTool({ name: "hooks_docs", arguments: { name } }));
@@ -495,9 +505,9 @@ describe("MCP server", () => {
 
     // --- install all → remove all via MCP ---
 
-    test("install all compatible default hooks then remove representative hooks", async () => {
+    test("install all compatible default hooks then remove a subset", async () => {
       const install = parseResult(await client.callTool({ name: "hooks_install_all", arguments: {} }));
-      expect(install.success).toBe(42);
+      expect(install.success).toBe(46);
 
       const allHooks = [
         "gitguard", "branchprotect", "checkpoint",
@@ -731,7 +741,7 @@ describe("MCP server", () => {
     test("hooks_list compact returns minimal fields", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_list", arguments: { compact: true } }));
       expect(Array.isArray(data)).toBe(true);
-      expect(data.length).toBe(44);
+      expect(data.length).toBe(47);
       expect(data[0]).toHaveProperty("name");
       expect(data[0]).toHaveProperty("event");
       expect(data[0]).toHaveProperty("matcher");

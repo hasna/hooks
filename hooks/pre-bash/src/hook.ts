@@ -2,9 +2,9 @@
 
 import {
   commandExists,
+  gitCommandInfo,
   getCommand,
   isBashPreToolUse,
-  isGitCommitOrPush,
   isRiskyOperation,
   readCache,
   readInput,
@@ -52,9 +52,10 @@ export async function evaluate(input: CodewithHookInput): Promise<{ output: Reco
   const command = getCommand(input);
   if (!command) return { output: { continue: true }, warnings };
   const cwd = input.cwd || process.cwd();
+  const gitInfo = gitCommandInfo(command, cwd);
 
-  if (isGitCommitOrPush(command)) {
-    const scan = await runStagedSecretsScan(cwd);
+  if (gitInfo) {
+    const scan = await runStagedSecretsScan(gitInfo.targetCwd);
     if (scan.warning) warnings.push(scan.warning);
     if (scan.block) {
       return { output: { decision: "block", reason: scan.reason }, warnings };

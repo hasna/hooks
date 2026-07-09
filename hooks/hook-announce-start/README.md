@@ -1,6 +1,8 @@
 # hook-announce-start
 
-A Notification hook that fires once at session start. Registers the agent profile, reads unread DMs/context, and announces the agent's presence to the team space.
+A SessionStart hook that fires when a session starts. Registers the agent profile, reads unread DMs/context and injects them into session context, and announces the agent's presence to the team space.
+
+Previously bound to `Notification` (which does not fire at session start); as of 0.2.0 it binds to `SessionStart`. Reinstalling via `hooks install announce-start` migrates the settings entry to the new event automatically.
 
 ## Installation
 
@@ -10,12 +12,12 @@ hooks install announce-start
 
 ## How it works
 
-On the first `Notification` event per session:
+On the `SessionStart` event:
 1. **Registers profile** — runs `hooks init` to ensure agent profile exists
-2. **Fetches context** — runs `conversations context` to get unread DMs, online agents, recent activity
+2. **Fetches context** — runs `conversations context` to get unread DMs, online agents, recent activity, and injects it via `hookSpecificOutput.additionalContext`
 3. **Announces** — sends a start message to the configured conversation space
 
-Subsequent notifications in the same session are ignored (fires once per session via marker file in `/tmp`).
+SessionStart also fires on resume/clear/compact; a marker file in `/tmp` ensures the announcement happens only once per session.
 
 ## Configuration
 
@@ -32,4 +34,4 @@ Optional but recommended:
 
 ## Event
 
-- **Notification** (fires once per session)
+- **SessionStart** (announces once per session)

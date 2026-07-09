@@ -19,6 +19,7 @@ export interface CodewithHookInput {
   stop_hook_active?: boolean;
   agent_id?: string;
   agent_type?: string;
+  agent?: unknown;
   [key: string]: unknown;
 }
 
@@ -118,14 +119,218 @@ export function isBashPreToolUse(input: CodewithHookInput): boolean {
   return input.hook_event_name === "PreToolUse" && input.tool_name === "Bash";
 }
 
+export interface GitCommandInfo {
+  action: "commit" | "push";
+  targetCwd: string;
+  gitDir?: string;
+  workTree?: string;
+}
+
+function splitShellSegments(command: string): string[] {
+  const segments: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i];
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && quote !== "'") {
+      escaped = true;
+      current += ch;
+      continue;
+    }
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === "\"") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === ";" || ch === "|" || ch === "&" || ch === "(" || ch === ")" || ch === "\n") {
+      if (current.trim()) segments.push(current.trim());
+      current = "";
+      if ((ch === "|" || ch === "&") && command[i + 1] === ch) i += 1;
+      continue;
+    }
+    current += ch;
+  }
+
+  if (current.trim()) segments.push(current.trim());
+  return segments;
+}
+
+function shellWords(segment: string): string[] {
+  const words: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+
+  const push = () => {
+    if (current.length > 0) {
+      words.push(current);
+      current = "";
+    }
+  };
+
+  for (let i = 0; i < segment.length; i += 1) {
+    const ch = segment[i];
+    if (escaped) {
+      current += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+      } else {
+        current += ch;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === "\"") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      push();
+      continue;
+    }
+    current += ch;
+  }
+  push();
+  return words;
+}
+
+function expandHome(path: string): string {
+  if (path === "~") return homedir();
+  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+  return path;
+}
+
+function resolveFrom(cwd: string, path: string): string {
+  const expanded = expandHome(path);
+  return isAbsolute(expanded) ? resolve(expanded) : resolve(cwd, expanded);
+}
+
+function optionValue(token: string, next: string | undefined, option: string): { value?: string; consumed: number } | null {
+  if (token === option) return { value: next, consumed: next === undefined ? 1 : 2 };
+  if (token.startsWith(`${option}=`)) return { value: token.slice(option.length + 1), consumed: 1 };
+  return null;
+}
+
+function shortOptionValue(token: string, next: string | undefined, option: string): { value?: string; consumed: number } | null {
+  if (token === option) return { value: next, consumed: next === undefined ? 1 : 2 };
+  if (token.startsWith(option) && token.length > option.length) return { value: token.slice(option.length), consumed: 1 };
+  return null;
+}
+
+function isGitToken(token: string): boolean {
+  return token === "git" || token.endsWith("/git");
+}
+
+function gitInfoFromTokens(tokens: string[], baseCwd: string): GitCommandInfo | null {
+  const gitIndex = tokens.findIndex(isGitToken);
+  if (gitIndex === -1) return null;
+
+  let i = gitIndex + 1;
+  let cwd = resolve(baseCwd);
+  let gitDir: string | undefined;
+  let workTree: string | undefined;
+
+  while (i < tokens.length) {
+    const token = tokens[i];
+
+    const cDir = shortOptionValue(token, tokens[i + 1], "-C");
+    if (cDir) {
+      if (cDir.value) cwd = resolveFrom(cwd, cDir.value);
+      i += cDir.consumed;
+      continue;
+    }
+
+    const config = shortOptionValue(token, tokens[i + 1], "-c");
+    if (config) {
+      i += config.consumed;
+      continue;
+    }
+
+    const gitDirValue = optionValue(token, tokens[i + 1], "--git-dir");
+    if (gitDirValue) {
+      if (gitDirValue.value) gitDir = resolveFrom(cwd, gitDirValue.value);
+      i += gitDirValue.consumed;
+      continue;
+    }
+
+    const workTreeValue = optionValue(token, tokens[i + 1], "--work-tree");
+    if (workTreeValue) {
+      if (workTreeValue.value) workTree = resolveFrom(cwd, workTreeValue.value);
+      i += workTreeValue.consumed;
+      continue;
+    }
+
+    const namespaceValue = optionValue(token, tokens[i + 1], "--namespace");
+    if (namespaceValue) {
+      i += namespaceValue.consumed;
+      continue;
+    }
+
+    const execPathValue = optionValue(token, tokens[i + 1], "--exec-path");
+    if (execPathValue) {
+      i += execPathValue.consumed;
+      continue;
+    }
+
+    if (token === "--config-env") {
+      i += tokens[i + 1] === undefined ? 1 : 2;
+      continue;
+    }
+
+    if (token === "--") {
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith("-")) {
+      i += 1;
+      continue;
+    }
+
+    if (token === "commit" || token === "push") {
+      const targetCwd = workTree || (gitDir ? (gitDir.endsWith(`${sep}.git`) || gitDir.endsWith("/.git") ? dirname(gitDir) : gitDir) : cwd);
+      return { action: token, targetCwd, ...(gitDir ? { gitDir } : {}), ...(workTree ? { workTree } : {}) };
+    }
+    return null;
+  }
+
+  return null;
+}
+
+export function gitCommandInfo(command: string, baseCwd: string = process.cwd()): GitCommandInfo | null {
+  for (const segment of splitShellSegments(command)) {
+    const tokens = shellWords(segment);
+    const info = gitInfoFromTokens(tokens, baseCwd);
+    if (info) return info;
+  }
+  return null;
+}
+
 export function isGitCommitOrPush(command: string): boolean {
-  return /(^|[;&|()\s])git\s+(?:-[^\s]+\s+)*commit\b/.test(command) || /(^|[;&|()\s])git\s+(?:-[^\s]+\s+)*push\b/.test(command);
+  return gitCommandInfo(command) !== null;
 }
 
 export function isGitPushOrCommitCommand(command: string): "commit" | "push" | null {
-  if (/(^|[;&|()\s])git\s+(?:-[^\s]+\s+)*commit\b/.test(command)) return "commit";
-  if (/(^|[;&|()\s])git\s+(?:-[^\s]+\s+)*push\b/.test(command)) return "push";
-  return null;
+  return gitCommandInfo(command)?.action || null;
 }
 
 export function isRiskyOperation(command: string): boolean {
@@ -176,10 +381,14 @@ export function safeJsonSummary(raw: string): string {
 }
 
 export function getAgentName(input: CodewithHookInput): string | null {
+  const agent = input.agent && typeof input.agent === "object" ? input.agent as Record<string, unknown> : null;
   const candidates = [
     process.env.HOOKS_AGENT_NAME,
     process.env.CODEWITH_AGENT_NAME,
     process.env.CONVERSATIONS_AGENT_ID,
+    typeof agent?.name === "string" ? agent.name : undefined,
+    typeof agent?.agent_id === "string" ? agent.agent_id : undefined,
+    typeof agent?.id === "string" ? agent.id : undefined,
     typeof input.agent_id === "string" ? input.agent_id : undefined,
   ];
   for (const candidate of candidates) {
@@ -211,7 +420,13 @@ export function managedWorktreeInfo(cwd: string): { managed: boolean; root: stri
   if (parts.length < 3) return { managed: false, root, reason: "path is inside worktrees root but not deep enough" };
   const [machine, repoSlugHash, lease] = parts;
   if (!machine || !repoSlugHash || !lease) return { managed: false, root, reason: "missing machine/repo/lease path segments" };
-  if (!/^wt_[a-zA-Z0-9]+/.test(lease)) return { managed: false, root, reason: "lease segment does not look like wt_<id>" };
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,80}$/.test(machine)) return { managed: false, root, reason: "machine segment is malformed" };
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*-[0-9a-fA-F]{7,16}$/.test(repoSlugHash)) {
+    return { managed: false, root, reason: "repo segment must end in a hex hash suffix" };
+  }
+  if (!/^wt_[0-9a-fA-F]{16,64}$/.test(lease)) {
+    return { managed: false, root, reason: "lease segment must look like wt_<hex hash>" };
+  }
   return { managed: true, root };
 }
 

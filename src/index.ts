@@ -10,13 +10,14 @@
 
 export {
   HOOKS,
+  HOOK_EVENTS,
   CATEGORIES,
   getHook,
   getHooksByCategory,
   searchHooks,
   type HookMeta,
-  type Category,
   type HookEvent,
+  type Category,
 } from "./lib/registry.js";
 import type { HookEvent as HookEventType } from "./lib/registry.js";
 
@@ -31,6 +32,7 @@ export {
   buildCodewithTomlFragment,
   getHookPath,
   getSettingsPath,
+  isEventSupported,
   type InstallResult,
   type InstallOptions,
   type Scope,
@@ -65,7 +67,7 @@ export interface HookOutput {
   reason?: string;
   continue?: boolean;
   hookSpecificOutput?: {
-    hookEventName: "SessionStart" | "UserPromptSubmit" | "PreToolUse";
+    hookEventName: "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "Stop" | "Notification" | "SessionEnd";
     additionalContext?: string;
     permissionDecision?: "allow" | "deny" | "ask";
     permissionDecisionReason?: string;
@@ -182,3 +184,28 @@ export {
   type AgentProfile,
   type CreateProfileInput,
 } from "./lib/profiles.js";
+
+export {
+  HOOKS_STORAGE_ENV,
+  HOOKS_STORAGE_FALLBACK_ENV,
+  HOOKS_STORAGE_MODE_ENV,
+  HOOKS_STORAGE_MODE_FALLBACK_ENV,
+  HOOKS_STORAGE_TABLES,
+  STORAGE_DATABASE_ENV,
+  STORAGE_MODE_ENV,
+  STORAGE_TABLES,
+  getStorageDatabaseEnv,
+  getStorageDatabaseEnvName,
+  getStorageDatabaseUrl,
+  getStorageMode,
+  getStoragePg,
+  getStorageStatus,
+  getSyncMetaAll,
+  parseStorageTables,
+  resolveTables,
+  runStorageMigrations,
+  storagePull,
+  storagePush,
+  storageSync,
+} from "./storage.js";
+export type { StorageEnv, StorageMode, StorageStatus, SyncMeta, SyncResult } from "./storage.js";

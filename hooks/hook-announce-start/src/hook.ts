@@ -3,28 +3,34 @@
 /**
  * Claude Code Hook: announce-start
  *
- * Notification hook that fires on session start (first notification).
+ * SessionStart hook that fires when a session starts (or resumes).
  * - Registers the agent profile if not already registered
- * - Reads unread DMs and injects them into context
+ * - Reads unread DMs/context and injects them into session context
  * - Announces presence to the team space
  *
- * Uses a per-session marker to only fire once per session.
+ * Uses a per-session marker so resume/clear/compact SessionStart events
+ * do not re-announce the same session.
  */
 
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "fs";
 import { join } from "path";
-import { homedir, tmpdir } from "os";
+import { tmpdir } from "os";
 import { execSync } from "child_process";
 
 interface HookInput {
   session_id: string;
   cwd: string;
   hook_event_name: string;
-  notification_type?: string;
+  /** SessionStart provides how the session began: startup | resume | clear | compact */
+  source?: string;
 }
 
 interface HookOutput {
   continue: boolean;
+  hookSpecificOutput?: {
+    hookEventName: "SessionStart";
+    additionalContext: string;
+  };
 }
 
 const STATE_DIR = join(tmpdir(), "hook-announce-start");
@@ -81,10 +87,16 @@ function fetchContext(): string | null {
   }
 }
 
+/** Strip anything shell-unsafe from values interpolated into the announce command. */
+function shellSafe(value: string, fallback: string): string {
+  const cleaned = value.replace(/[^A-Za-z0-9 ._:-]/g, "").trim().slice(0, 64);
+  return cleaned || fallback;
+}
+
 function announceToSpace(cwd: string, sessionId: string): void {
-  const project = cwd.split("/").filter(Boolean).pop() || "project";
-  const agent = process.env.HOOKS_AGENT_NAME || `session:${sessionId.slice(0, 8)}`;
-  const space = process.env.HOOKS_SPACE || "general";
+  const project = shellSafe(cwd.split("/").filter(Boolean).pop() || "", "project");
+  const agent = shellSafe(process.env.HOOKS_AGENT_NAME || "", `session:${sanitizeId(sessionId).slice(0, 8)}`);
+  const space = shellSafe(process.env.HOOKS_SPACE || "", "general");
   const message = `Agent **${agent}** started a session on **${project}**`;
 
   try {
@@ -107,7 +119,7 @@ export function run(): void {
     return;
   }
 
-  // Only fire once per session
+  // Only fire once per session (SessionStart also fires on resume/clear/compact)
   if (hasAlreadyAnnounced(input.session_id)) {
     respond({ continue: true });
     return;
@@ -120,14 +132,21 @@ export function run(): void {
 
   // 2. Fetch context (unread DMs + online agents + spaces)
   const context = fetchContext();
-  if (context) {
-    process.stderr.write(
-      `[hook-announce-start] Session context:\n${context}\n`
-    );
-  }
 
   // 3. Announce to team space
   announceToSpace(input.cwd, input.session_id);
+
+  // 4. Inject fetched context into the session (SessionStart supports additionalContext)
+  if (context) {
+    respond({
+      continue: true,
+      hookSpecificOutput: {
+        hookEventName: "SessionStart",
+        additionalContext: `[hook-announce-start] Session context:\n${context}`,
+      },
+    });
+    return;
+  }
 
   respond({ continue: true });
 }

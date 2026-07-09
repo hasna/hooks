@@ -6,7 +6,8 @@
 
 import type { Database } from "bun:sqlite";
 import { up as migration001 } from "./001_initial";
-import { up as migration002 } from "./002_codewith_event_types";
+import { up as migration002 } from "./002_session_events";
+import { up as migration003 } from "./003_user_prompt_submit_event";
 
 interface Migration {
   version: string;
@@ -15,7 +16,8 @@ interface Migration {
 
 const MIGRATIONS: Migration[] = [
   { version: "001_initial", up: migration001 },
-  { version: "002_codewith_event_types", up: migration002 },
+  { version: "002_session_events", up: migration002 },
+  { version: "003_user_prompt_submit_event", up: migration003 },
 ];
 
 function ensureMigrationsTable(db: Database): void {
