@@ -11,8 +11,10 @@ import {
   hookExists,
   getHookPath,
   getSettingsPath,
+  buildCodewithTomlFragment,
   isEventSupported,
 } from "./installer.js";
+import { HOOKS } from "./registry.js";
 
 const GLOBAL_SETTINGS = join(homedir(), ".claude", "settings.json");
 
@@ -67,6 +69,15 @@ describe("installer", () => {
     test("project returns .claude/settings.json in cwd", () => {
       expect(getSettingsPath("project")).toBe(join(process.cwd(), ".claude", "settings.json"));
     });
+
+    test("codewith global returns ~/.codewith/config.toml", () => {
+      expect(getSettingsPath("global", "codewith")).toBe(join(homedir(), ".codewith", "config.toml"));
+    });
+
+    test("codewith path accepts explicit override", () => {
+      const configPath = join(process.cwd(), "tmp-codewith-config.toml");
+      expect(getSettingsPath("global", "codewith", configPath)).toBe(configPath);
+    });
   });
 
   describe("getHookPath", () => {
@@ -80,6 +91,12 @@ describe("installer", () => {
       expect(path).toContain("hook-gitguard");
       expect(path).not.toContain("hook-hook-");
     });
+
+    test("returns direct path for unprefixed Codewith-native hook folder", () => {
+      const path = getHookPath("session-start");
+      expect(path).toContain(join("hooks", "session-start"));
+      expect(path).not.toContain("hook-session-start");
+    });
   });
 
   describe("hookExists", () => {
@@ -91,26 +108,17 @@ describe("installer", () => {
       expect(hookExists("hook-gitguard")).toBe(true);
     });
 
+    test("returns true for unprefixed Codewith-native hook", () => {
+      expect(hookExists("session-start")).toBe(true);
+    });
+
     test("returns false for nonexistent hook", () => {
       expect(hookExists("nonexistent")).toBe(false);
     });
 
-    test("returns true for all 30 registered hooks", () => {
-      const names = [
-        "gitguard", "branchprotect", "checkpoint",
-        "checktests", "checklint", "checkfiles",
-        "checkbugs", "checkdocs", "checktasks",
-        "checksecurity", "packageage",
-        "phonenotify", "agentmessages",
-        "contextrefresh", "precompact",
-        "autoformat", "autostage", "tddguard",
-        "envsetup",
-        "permissionguard", "protectfiles", "promptguard",
-        "desktopnotify", "slacknotify", "soundnotify",
-        "sessionlog", "commandlog", "costwatch", "errornotify",
-        "taskgate",
-      ];
-      expect(names).toHaveLength(30);
+    test("returns true for all 47 registered hooks", () => {
+      const names = HOOKS.map((hook) => hook.name);
+      expect(names).toHaveLength(47);
       for (const name of names) {
         expect(hookExists(name)).toBe(true);
       }
@@ -342,24 +350,14 @@ describe("installer", () => {
   });
 
   describe("install + remove roundtrip", () => {
-    test("install all 30 hooks then remove all", () => {
-      const allNames = [
-        "gitguard", "branchprotect", "checkpoint",
-        "checktests", "checklint", "checkfiles",
-        "checkbugs", "checkdocs", "checktasks",
-        "checksecurity", "packageage",
-        "phonenotify", "agentmessages",
-        "contextrefresh", "precompact",
-        "autoformat", "autostage", "tddguard",
-        "envsetup",
-        "permissionguard", "protectfiles", "promptguard",
-        "desktopnotify", "slacknotify", "soundnotify",
-        "sessionlog", "commandlog", "costwatch", "errornotify",
-        "taskgate",
-      ];
+    test("install all Claude-compatible hooks then remove all", () => {
+      const allNames = HOOKS
+        .filter((hook) => hook.event !== "UserPromptSubmit")
+        .map((hook) => hook.name);
+      expect(allNames).toHaveLength(46);
       const results = installHooks(allNames);
       expect(results.every((r) => r.success)).toBe(true);
-      expect(getRegisteredHooks().length).toBeGreaterThanOrEqual(30);
+      expect(getRegisteredHooks().length).toBeGreaterThanOrEqual(46);
 
       for (const name of allNames) {
         expect(removeHook(name)).toBe(true);
@@ -506,21 +504,7 @@ describe("installer", () => {
   });
 
   describe("hook source files", () => {
-    const HOOK_SOURCE_NAMES = [
-      "gitguard", "branchprotect", "checkpoint",
-      "checktests", "checklint", "checkfiles",
-      "checkbugs", "checkdocs", "checktasks",
-      "checksecurity", "packageage",
-      "phonenotify", "agentmessages",
-      "contextrefresh", "precompact",
-      "autoformat", "autostage", "tddguard",
-      "envsetup",
-      "permissionguard", "protectfiles", "promptguard",
-      "desktopnotify", "slacknotify", "soundnotify",
-      "sessionlog", "commandlog", "costwatch", "errornotify",
-      "taskgate",
-      "announce-start", "fleet-catchup", "agent-rules-version-check", "fleet-blockers-gate",
-    ];
+    const HOOK_SOURCE_NAMES = HOOKS.map((hook) => hook.name);
 
     test("every hook has src/hook.ts in package (except agentmessages)", () => {
       for (const name of HOOK_SOURCE_NAMES) {
@@ -656,6 +640,70 @@ describe("installer", () => {
       installHook("gitguard", { target: "all" });
       const removed = removeHook("gitguard", "global", "all");
       expect(removed).toBe(true);
+    });
+  });
+
+  describe("target: codewith", () => {
+    test("buildCodewithTomlFragment emits native SessionStart TOML", () => {
+      const fragment = buildCodewithTomlFragment("session-start");
+      expect(fragment).toContain("[[hooks.SessionStart]]");
+      expect(fragment).toContain("[[hooks.SessionStart.hooks]]");
+      expect(fragment).toContain('command = "hooks run session-start"');
+      expect(fragment).toContain('statusMessage = "Checking Hasna session context"');
+    });
+
+    test("installHook codewith defaults to fragment-only and does not write managed config", () => {
+      const result = installHook("pre-bash", { target: "codewith" });
+      expect(result.success).toBe(true);
+      expect(result.applied).toBe(false);
+      expect(result.fragment).toContain("[[hooks.PreToolUse]]");
+      expect(result.fragment).toContain('matcher = "^Bash$"');
+      expect(result.note).toContain("open-configs");
+    });
+
+    test("installHook codewith write refuses missing explicit config path", () => {
+      const tmp = join(process.cwd(), `.codewith-env-should-not-write-${Date.now()}.toml`);
+      const previous = process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH;
+      process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH = tmp;
+      try {
+        const result = installHook("session-start", {
+          target: "codewith",
+          codewithMode: "write",
+        });
+        expect(result.success).toBe(false);
+        expect(result.applied).toBe(false);
+        expect(result.error).toContain("--codewith-config");
+        expect(existsSync(tmp)).toBe(false);
+      } finally {
+        if (previous === undefined) delete process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH;
+        else process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH = previous;
+        try { rmSync(tmp, { force: true }); } catch {}
+      }
+    });
+
+    test("installHook codewith explicit write uses override path", () => {
+      const tmp = join(process.cwd(), `.codewith-test-${Date.now()}.toml`);
+      try {
+        const result = installHook("prompt-guard", {
+          target: "codewith",
+          codewithMode: "write",
+          codewithConfigPath: tmp,
+        });
+        expect(result.success).toBe(true);
+        expect(result.applied).toBe(true);
+        expect(result.configPath).toBe(tmp);
+        const written = readFileSync(tmp, "utf-8");
+        expect(written).toContain("[[hooks.UserPromptSubmit]]");
+        expect(written).toContain('command = "hooks run prompt-guard"');
+      } finally {
+        try { rmSync(tmp, { force: true }); } catch {}
+      }
+    });
+
+    test("unsupported Notification hook fails for Codewith target", () => {
+      const result = installHook("contextrefresh", { target: "codewith" });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("not supported");
     });
   });
 

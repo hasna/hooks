@@ -33,6 +33,7 @@ import {
   getHookPath,
   getSettingsPath,
   type Scope,
+  type Target,
 } from "../lib/installer.js";
 import {
   createProfile,
@@ -50,8 +51,9 @@ function resolveScope(options: { global?: boolean; project?: boolean }): Scope {
   return "global";
 }
 
-function resolveTarget(options: { target?: string }): "claude" | "gemini" | "all" {
+function resolveTarget(options: { target?: string }): Target {
   if (options.target === "gemini") return "gemini";
+  if (options.target === "codewith") return "codewith";
   if (options.target === "all") return "all";
   return "claude";
 }
@@ -205,9 +207,11 @@ program
   .option("-c, --category <category>", "Install all hooks in a category")
   .option("-g, --global", "Install globally (~/.claude/settings.json)", false)
   .option("-p, --project", "Install for current project (.claude/settings.json)", false)
-  .option("-t, --target <target>", "Agent target: claude, gemini, all (default: claude)", "claude")
+  .option("-t, --target <target>", "Agent target: claude, gemini, codewith, all (default: claude)", "claude")
   .option("--profile <id>", "Agent profile ID to scope hooks to")
   .option("--dry-run", "Preview what would be installed without writing to settings", false)
+  .option("--apply-codewith", "Explicitly append Codewith TOML to a config file (prefer open-configs for managed configs)", false)
+  .option("--codewith-config <path>", "Explicit Codewith config path required with --apply-codewith")
   .option("-j, --json", "Output as JSON", false)
   .description("Install one or more hooks")
   .action((hooks: string[], options) => {
@@ -238,12 +242,22 @@ program
       return;
     }
 
+    if (options.applyCodewith && (target === "codewith" || target === "all") && !options.codewithConfig) {
+      const message = "--apply-codewith requires --codewith-config <path>; refusing to write default ~/.codewith/config.toml.";
+      if (options.json) {
+        console.log(JSON.stringify({ error: message, scope, target, applied: false }));
+      } else {
+        console.log(chalk.red(message));
+      }
+      return;
+    }
+
     // Dry-run: preview what would be installed
     if (options.dryRun) {
       const known = toInstall.filter((n) => getHook(n));
       const unknown = toInstall.filter((n) => !getHook(n));
       if (options.json) {
-        console.log(JSON.stringify({ dryRun: true, would_install: known, unknown, scope, target }));
+        console.log(JSON.stringify({ dryRun: true, would_install: known, unknown, scope, target, mode: target === "codewith" ? "fragment" : "write" }));
         return;
       }
       console.log(chalk.bold(`\nDry run — would install (${scope}, ${target}):\n`));
@@ -270,7 +284,14 @@ program
         results.push({ hook: name, success: false, error: `Hook '${name}' not found${hint}` });
         continue;
       }
-      const result = installHook(name, { scope, overwrite: options.overwrite, target, profile: options.profile });
+      const result = installHook(name, {
+        scope,
+        overwrite: options.overwrite,
+        target,
+        profile: options.profile,
+        codewithMode: options.applyCodewith ? "write" : "fragment",
+        codewithConfigPath: options.codewithConfig,
+      });
       results.push(result);
     }
 
@@ -278,15 +299,19 @@ program
       console.log(JSON.stringify({
         installed: results.filter((r) => r.success).map((r) => r.hook),
         failed: results.filter((r) => !r.success).map((r) => ({ hook: r.hook, error: r.error })),
+        fragments: results.filter((r) => r.success && r.fragment).map((r) => ({ hook: r.hook, fragment: r.fragment, applied: r.applied, configPath: r.configPath, note: r.note })),
         total: results.length,
         success: results.filter((r) => r.success).length,
         scope,
         target,
+        applied: results.some((r) => r.applied),
       }));
       return;
     }
 
-    const settingsFile = scope === "project" ? ".claude/settings.json" : "~/.claude/settings.json";
+    const settingsFile = target === "codewith"
+      ? (options.applyCodewith ? options.codewithConfig : "TOML fragment only (open-configs should apply)")
+      : scope === "project" ? ".claude/settings.json" : "~/.claude/settings.json";
     console.log(chalk.bold(`\nInstalling hooks (${scope}, ${target})...\n`));
     for (const result of results) {
       if (result.success) {
@@ -299,6 +324,11 @@ program
         }
         if (result.conflict) {
           console.log(chalk.yellow(`  ⚠ Warning: ${result.conflict}`));
+        }
+        if (result.fragment && target === "codewith") {
+          console.log(chalk.dim("  Codewith TOML fragment:"));
+          console.log(chalk.cyan(result.fragment.trimEnd().split("\n").map((line) => `    ${line}`).join("\n")));
+          if (result.note) console.log(chalk.yellow(`  ⚠ ${result.note}`));
         }
       } else {
         console.log(chalk.red(`✗ ${result.hook}: ${result.error}`));
@@ -317,14 +347,14 @@ program
   .option("-r, --registered", "Show registered hooks", false)
   .option("-g, --global", "Check global settings", false)
   .option("-p, --project", "Check project settings", false)
-  .option("-t, --target <target>", "Agent target: claude, gemini (default: claude)", "claude")
+  .option("-t, --target <target>", "Agent target: claude, gemini, codewith (default: claude)", "claude")
   .option("-j, --json", "Output as JSON", false)
   .description("List available or installed hooks")
   .action((options) => {
     const scope = resolveScope(options);
 
     if (options.registered || options.installed) {
-      const target = (options.target === "gemini" ? "gemini" : "claude") as "claude" | "gemini";
+      const target = (options.target === "gemini" ? "gemini" : options.target === "codewith" ? "codewith" : "claude") as "claude" | "gemini" | "codewith";
       const registered = getRegisteredHooksForTarget(scope, target);
       if (options.json) {
         console.log(JSON.stringify(registered.map((name) => {
@@ -429,7 +459,7 @@ program
   .argument("<hook>", "Hook to remove")
   .option("-g, --global", "Remove from global settings", false)
   .option("-p, --project", "Remove from project settings", false)
-  .option("-t, --target <target>", "Agent target: claude, gemini, all (default: claude)", "claude")
+  .option("-t, --target <target>", "Agent target: claude, gemini, codewith, all (default: claude)", "claude")
   .option("-j, --json", "Output as JSON", false)
   .description("Remove an installed hook")
   .action((hook: string, options: { global?: boolean; project?: boolean; target?: string; json: boolean }) => {
@@ -734,16 +764,18 @@ program
     const generalDocs = {
       overview: "Hooks are scripts that run at specific points in an AI coding agent session. Install @hasna/hooks globally, then register hooks — no files are copied to your project.",
       events: {
+        SessionStart: "Fires when a session starts or resumes. Codewith can inject context via hookSpecificOutput.additionalContext.",
+        UserPromptSubmit: "Codewith-native event when a user prompt is submitted; can block obvious injection attempts.",
         PreToolUse: "Fires before a tool executes. Can block the operation by returning { \"decision\": \"block\" }.",
         PostToolUse: "Fires after a tool executes. Runs asynchronously, cannot block.",
-        Stop: "Fires when the agent finishes responding. Useful for notifications and cleanup.",
+        Stop: "Fires at turn end in Codewith and when other agents finish responding. Useful for notifications and cleanup.",
         Notification: "Fires on notification events like context compaction.",
-        SessionStart: "Fires when a session starts or resumes. Can inject context via hookSpecificOutput.additionalContext.",
         SessionEnd: "Fires when a session terminates. Useful for cleanup and final announcements.",
       },
       installation: {
         global: "hooks install gitguard",
         project: "hooks install gitguard --project",
+        codewith: "hooks install session-start --target codewith  # emits TOML for open-configs to apply",
         category: "hooks install --category \"Git Safety\"",
         all: "hooks install --all",
       },
@@ -759,7 +791,7 @@ program
       },
       howItWorks: {
         install: "bun install -g @hasna/hooks",
-        register: "hooks install gitguard → writes to ~/.claude/settings.json",
+        register: "hooks install gitguard → writes to ~/.claude/settings.json; hooks install session-start --target codewith emits a TOML fragment",
         execution: "Agent runs 'hooks run gitguard' → executes hook from global package",
         noFileCopy: "No files are copied to your project. Hooks run from the global @hasna/hooks package.",
       },

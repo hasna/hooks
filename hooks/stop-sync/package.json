@@ -1,0 +1,12 @@
+{
+  "name": "stop-sync",
+  "version": "0.1.0",
+  "description": "Codewith-native Stop Sync hook for @hasna/hooks",
+  "type": "module",
+  "main": "./src/hook.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "author": "Hasna",
+  "license": "Apache-2.0"
+}

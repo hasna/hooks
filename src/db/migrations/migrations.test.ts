@@ -2,6 +2,7 @@ import { describe, test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import { runMigrations } from "./index";
 import { up as migration002 } from "./002_session_events";
+import { up as migration003 } from "./003_user_prompt_submit_event";
 
 /** The pre-002 hook_events table (event_type CHECK without session events). */
 const LEGACY_HOOK_EVENTS_TABLE = `
@@ -21,6 +22,24 @@ const LEGACY_HOOK_EVENTS_TABLE = `
   )
 `;
 
+/** The pre-003 hook_events table (session events accepted, UserPromptSubmit absent). */
+const PRE_003_HOOK_EVENTS_TABLE = `
+  CREATE TABLE IF NOT EXISTS hook_events (
+    id           TEXT PRIMARY KEY,
+    timestamp    TEXT NOT NULL,
+    session_id   TEXT NOT NULL,
+    hook_name    TEXT NOT NULL,
+    event_type   TEXT NOT NULL CHECK (event_type IN ('PreToolUse', 'PostToolUse', 'Stop', 'Notification', 'SessionStart', 'SessionEnd')),
+    tool_name    TEXT,
+    tool_input   TEXT,
+    result       TEXT CHECK (result IN ('continue', 'block', NULL)),
+    error        TEXT,
+    duration_ms  INTEGER,
+    project_dir  TEXT,
+    metadata     TEXT
+  )
+`;
+
 function insertEvent(db: Database, id: string, eventType: string): void {
   db.run(
     `INSERT INTO hook_events (id, timestamp, session_id, hook_name, event_type)
@@ -30,16 +49,17 @@ function insertEvent(db: Database, id: string, eventType: string): void {
 }
 
 describe("migrations", () => {
-  test("fresh database accepts SessionStart/SessionEnd events", () => {
+  test("fresh database accepts session and Codewith prompt events", () => {
     const db = new Database(":memory:");
     runMigrations(db);
 
     insertEvent(db, "e1", "SessionStart");
     insertEvent(db, "e2", "SessionEnd");
-    insertEvent(db, "e3", "PreToolUse");
+    insertEvent(db, "e3", "UserPromptSubmit");
+    insertEvent(db, "e4", "PreToolUse");
 
     const rows = db.query<{ event_type: string }, []>("SELECT event_type FROM hook_events").all();
-    expect(rows.map((r) => r.event_type).sort()).toEqual(["PreToolUse", "SessionEnd", "SessionStart"]);
+    expect(rows.map((r) => r.event_type).sort()).toEqual(["PreToolUse", "SessionEnd", "SessionStart", "UserPromptSubmit"]);
     db.close();
   });
 
@@ -63,27 +83,48 @@ describe("migrations", () => {
     // New event types accepted after rebuild
     insertEvent(db, "post-migration", "SessionStart");
     insertEvent(db, "post-migration-2", "SessionEnd");
+    insertEvent(db, "post-migration-3", "UserPromptSubmit");
     const count = db.query<{ n: number }, []>("SELECT COUNT(*) as n FROM hook_events").get();
-    expect(count?.n).toBe(3);
+    expect(count?.n).toBe(4);
 
     // Invalid event types still rejected
     expect(() => insertEvent(db, "bad", "MadeUpEvent")).toThrow();
     db.close();
   });
 
-  test("002 is idempotent on an already-current table", () => {
+  test("003 rebuilds a pre-003 table so UserPromptSubmit is accepted and rows survive", () => {
     const db = new Database(":memory:");
-    runMigrations(db);
-    insertEvent(db, "e1", "SessionStart");
+    db.exec(PRE_003_HOOK_EVENTS_TABLE);
+    insertEvent(db, "legacy-1", "SessionStart");
 
-    migration002(db); // second run must be a no-op, not a failure
+    expect(() => insertEvent(db, "should-fail", "UserPromptSubmit")).toThrow();
 
-    const kept = db.query<{ id: string }, []>("SELECT id FROM hook_events").all();
-    expect(kept).toHaveLength(1);
+    migration003(db);
+
+    insertEvent(db, "post-migration", "UserPromptSubmit");
+    const rows = db
+      .query<{ id: string }, []>("SELECT id FROM hook_events ORDER BY id")
+      .all()
+      .map((r) => r.id);
+    expect(rows).toEqual(["legacy-1", "post-migration"]);
     db.close();
   });
 
-  test("runMigrations records both migrations exactly once", () => {
+  test("002 and 003 are idempotent on an already-current table", () => {
+    const db = new Database(":memory:");
+    runMigrations(db);
+    insertEvent(db, "e1", "SessionStart");
+    insertEvent(db, "e2", "UserPromptSubmit");
+
+    migration002(db); // second run must be a no-op, not a failure
+    migration003(db);
+
+    const kept = db.query<{ id: string }, []>("SELECT id FROM hook_events").all();
+    expect(kept).toHaveLength(2);
+    db.close();
+  });
+
+  test("runMigrations records all migrations exactly once", () => {
     const db = new Database(":memory:");
     runMigrations(db);
     runMigrations(db); // re-running must not double-apply
@@ -92,7 +133,7 @@ describe("migrations", () => {
       .query<{ version: string }, []>("SELECT version FROM schema_migrations ORDER BY version")
       .all()
       .map((r) => r.version);
-    expect(versions).toEqual(["001_initial", "002_session_events"]);
+    expect(versions).toEqual(["001_initial", "002_session_events", "003_user_prompt_submit_event"]);
     db.close();
   });
 
@@ -110,11 +151,12 @@ describe("migrations", () => {
     runMigrations(db);
 
     insertEvent(db, "new-row", "SessionEnd");
+    insertEvent(db, "prompt-row", "UserPromptSubmit");
     const rows = db
       .query<{ id: string }, []>("SELECT id FROM hook_events ORDER BY id")
       .all()
       .map((r) => r.id);
-    expect(rows).toEqual(["new-row", "old-row"]);
+    expect(rows).toEqual(["new-row", "old-row", "prompt-row"]);
     db.close();
   });
 });

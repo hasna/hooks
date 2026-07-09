@@ -552,6 +552,7 @@ describe("hook package.json structure", () => {
     "hook-typecheck-gate", "hook-filelock", "hook-failure-to-task",
     "hook-dm-inject", "hook-announce-stop", "hook-announce-start",
     "hook-affected-tests", "hook-conflict-detect",
+    "session-start", "pre-bash", "prompt-guard", "worktree-guard", "stop-sync",
     "hook-fleet-catchup", "hook-agent-rules-version-check", "hook-fleet-blockers-gate",
   ];
 
@@ -589,6 +590,7 @@ describe("hook source files exist", () => {
     "hook-typecheck-gate", "hook-filelock", "hook-failure-to-task",
     "hook-dm-inject", "hook-announce-stop", "hook-announce-start",
     "hook-affected-tests", "hook-conflict-detect",
+    "session-start", "pre-bash", "prompt-guard", "worktree-guard", "stop-sync",
     "hook-fleet-catchup", "hook-agent-rules-version-check", "hook-fleet-blockers-gate",
   ];
 

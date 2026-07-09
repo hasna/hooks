@@ -8,7 +8,8 @@ export type HookEvent =
   | "Stop"
   | "Notification"
   | "SessionStart"
-  | "SessionEnd";
+  | "SessionEnd"
+  | "UserPromptSubmit";
 
 export const HOOK_EVENTS: HookEvent[] = [
   "PreToolUse",
@@ -17,6 +18,7 @@ export const HOOK_EVENTS: HookEvent[] = [
   "Notification",
   "SessionStart",
   "SessionEnd",
+  "UserPromptSubmit",
 ];
 
 export interface HookMeta {
@@ -76,6 +78,16 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Write|Edit|NotebookEdit",
     tags: ["git", "snapshot", "rollback", "backup"],
+  },
+  {
+    name: "worktree-guard",
+    displayName: "Worktree Guard",
+    description: "Warns on feature work outside managed repos worktrees and blocks commit/push from shared checkouts",
+    version: "0.1.0",
+    category: "Git Safety",
+    event: "PreToolUse",
+    matcher: "Bash|Write|Edit|MultiEdit|NotebookEdit",
+    tags: ["git", "worktree", "repos", "multi-agent", "safety"],
   },
 
   // Code Quality
@@ -160,6 +172,16 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Bash",
     tags: ["npm", "packages", "typosquatting", "supply-chain"],
+  },
+  {
+    name: "pre-bash",
+    displayName: "Pre Bash",
+    description: "Codewith Bash gate for staged secrets scans before commit/push and comms rechecks before risky operations",
+    version: "0.1.0",
+    category: "Security",
+    event: "PreToolUse",
+    matcher: "Bash",
+    tags: ["codewith", "bash", "secrets", "gitleaks", "risky-ops"],
   },
 
   // Notifications
@@ -281,6 +303,16 @@ export const HOOKS: HookMeta[] = [
     matcher: "",
     tags: ["prompt", "injection", "security", "validation", "guard"],
   },
+  {
+    name: "prompt-guard",
+    displayName: "Prompt Guard (Codewith)",
+    description: "Codewith UserPromptSubmit guard for obvious pasted prompt-injection and fake policy/freeze instructions",
+    version: "0.1.0",
+    category: "Permissions",
+    event: "UserPromptSubmit",
+    matcher: "",
+    tags: ["codewith", "prompt", "injection", "policy", "freeze"],
+  },
 
   // Notifications (new)
   {
@@ -378,6 +410,26 @@ export const HOOKS: HookMeta[] = [
     event: "PostToolUse",
     matcher: "",
     tags: ["tasks", "completion", "gate", "quality", "agent-teams"],
+  },
+  {
+    name: "session-start",
+    displayName: "Session Start",
+    description: "Codewith SessionStart digest for blockers, announcements, identity registration, and heartbeat context",
+    version: "0.1.0",
+    category: "Agent Teams",
+    event: "SessionStart",
+    matcher: "",
+    tags: ["codewith", "session", "context", "conversations", "heartbeat"],
+  },
+  {
+    name: "stop-sync",
+    displayName: "Stop Sync",
+    description: "Codewith Stop turn-end heartbeat and best-effort task evidence helper",
+    version: "0.1.0",
+    category: "Agent Teams",
+    event: "Stop",
+    matcher: "",
+    tags: ["codewith", "stop", "heartbeat", "todos", "turn-end"],
   },
 
   // Code Quality (new)

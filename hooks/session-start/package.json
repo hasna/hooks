@@ -1,0 +1,12 @@
+{
+  "name": "session-start",
+  "version": "0.1.0",
+  "description": "Codewith-native Session Start hook for @hasna/hooks",
+  "type": "module",
+  "main": "./src/hook.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "author": "Hasna",
+  "license": "Apache-2.0"
+}

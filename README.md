@@ -26,6 +26,30 @@ hooks --help
 - `hooks doctor`
 - `hooks run`
 
+## Codewith-native hooks
+
+@hasna/hooks includes five unprefixed Codewith-native hook names:
+
+- `session-start` — `SessionStart` digest and additional context.
+- `prompt-guard` — `UserPromptSubmit` guard for pasted fake policy/freeze/run-this-now content.
+- `pre-bash` — `PreToolUse` Bash gate for staged secrets scans and risky-op comms checks.
+- `worktree-guard` — `PreToolUse` guard for managed repos worktree boundaries.
+- `stop-sync` — `Stop` turn-end heartbeat/evidence best effort.
+
+For Codewith, the installer is renderer-safe by default: it emits a TOML
+fragment instead of mutating managed `~/.codewith/config.toml`.
+
+```bash
+hooks install session-start prompt-guard pre-bash worktree-guard stop-sync --target codewith
+```
+
+Apply that fragment through `open-configs` or the managed config renderer. A
+direct write path exists only for explicit local/test use:
+
+```bash
+hooks install session-start --target codewith --apply-codewith --codewith-config /tmp/codewith-config.toml
+```
+
 ## Storage
 
 Hooks stores data locally by default in `~/.hasna/hooks/` and uses SQLite
@@ -46,6 +70,11 @@ Configure database storage with `HASNA_HOOKS_DATABASE_URL` or fallback
 `HOOKS_DATABASE_URL`. Optional storage mode env vars are
 `HASNA_HOOKS_STORAGE_MODE` and `HOOKS_STORAGE_MODE`, with `local`, `hybrid`, or
 `remote` values.
+
+## Runtime model
+
+This package is an npm/local CLI, MCP server, and static dashboard package. It
+does not require a deployed cloud or self-hosted runtime to install or run hooks.
 
 ## Data Directory
 
