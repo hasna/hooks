@@ -1,6 +1,6 @@
 {
   "name": "@hasna/hook-knowledge-context",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Codewith hook that injects deterministic Knowledge context packs into lifecycle events",
   "type": "module",
   "main": "./dist/hook.js",

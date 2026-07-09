@@ -14,7 +14,7 @@ import {
 const baseConfig: KnowledgeContextConfig = {
   command: "knowledge",
   timeoutMs: 5000,
-  maxItems: 6,
+  maxItems: 3,
   maxTokens: 1200,
   maxQueryChars: 1200,
   maxOutputChars: 8000,
@@ -23,6 +23,7 @@ const baseConfig: KnowledgeContextConfig = {
 describe("hook-knowledge-context", () => {
   test("defaults Knowledge CLI timeout to 5000ms and keeps env override", () => {
     expect(getConfig({}).timeoutMs).toBe(5000);
+    expect(getConfig({}).maxItems).toBe(3);
     expect(getConfig({ HOOKS_KNOWLEDGE_TIMEOUT_MS: "2345" }).timeoutMs).toBe(2345);
   });
 
@@ -36,7 +37,7 @@ describe("hook-knowledge-context", () => {
       "--from",
       "search",
       "--max-items",
-      "6",
+      "3",
       "--max-tokens",
       "1200",
       "--json",
@@ -171,7 +172,7 @@ describe("hook-knowledge-context", () => {
     expect(extractContextText([{ title: "One", text: "Body", uri: "knowledge://item/one" }])).toContain("Body");
   });
 
-  test("formats citation previews as useful progressive blurbs with read commands", () => {
+  test("formats citation previews as useful progressive blurbs with compact open commands", () => {
     const text = extractContextText({
       citations: [
         {
@@ -182,9 +183,10 @@ describe("hook-knowledge-context", () => {
       ],
     });
 
-    expect(text).toContain("Knowledge item k_example");
+    expect(text).toContain("- k_example (cite_123): A short preview");
     expect(text).toContain("cite_123");
     expect(text).toContain("A short preview");
-    expect(text).toContain("read: knowledge get --id k_example --json");
+    expect(text).toContain("open: knowledge get --id k_example --json");
+    expect(text).not.toContain("source: knowledge://item/k_example");
   });
 });
