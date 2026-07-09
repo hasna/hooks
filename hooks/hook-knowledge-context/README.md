@@ -34,7 +34,9 @@ text from that pack and emits Codewith-native
 `hookSpecificOutput.additionalContext` with the same event name. Citation-only
 packs are expanded into progressive context lines with bounded previews and a
 single `knowledge get --id <item_id> --json` hint so agents can decide which
-full items are worth opening.
+full items are worth opening. Items that mark themselves as
+historical/reference-only or not suitable for auto-loading are filtered out by
+default, because they are not useful ambient context for normal agent work.
 
 Example injected context:
 
@@ -55,7 +57,8 @@ bad stdin, or empty packs return `{"continue":true}` without context.
 export HOOKS_KNOWLEDGE_CONTEXT_DISABLE=1    # Kill switch
 export HOOKS_KNOWLEDGE_COMMAND=knowledge    # CLI command/path
 export HOOKS_KNOWLEDGE_TIMEOUT_MS=5000      # Per-call timeout
-export HOOKS_KNOWLEDGE_MAX_ITEMS=3          # Context pack item budget
+export HOOKS_KNOWLEDGE_MAX_ITEMS=3          # Rendered item budget
+export HOOKS_KNOWLEDGE_CANDIDATE_ITEMS=12   # Internal candidate budget before filtering
 export HOOKS_KNOWLEDGE_MAX_TOKENS=1200      # Context pack token budget
 export HOOKS_KNOWLEDGE_REQUIRE_HIGH_SIGNAL=1
 export HOOKS_KNOWLEDGE_MIN_PROMPT_CHARS=6

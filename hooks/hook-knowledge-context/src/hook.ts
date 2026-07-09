@@ -39,6 +39,7 @@ export interface KnowledgeContextConfig {
   command: string;
   timeoutMs: number;
   maxItems: number;
+  candidateItems: number;
   maxTokens: number;
   minPromptChars: number;
   minSignalScore: number;
@@ -97,10 +98,17 @@ function commandFromEnv(raw: string | undefined): string {
 }
 
 export function getConfig(env: NodeJS.ProcessEnv = process.env): KnowledgeContextConfig {
+  const maxItems = boundedNumber(env.HOOKS_KNOWLEDGE_MAX_ITEMS, DEFAULT_MAX_ITEMS, 1, 20);
   return {
     command: commandFromEnv(env.HOOKS_KNOWLEDGE_COMMAND),
     timeoutMs: boundedNumber(env.HOOKS_KNOWLEDGE_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, 100, 10_000),
-    maxItems: boundedNumber(env.HOOKS_KNOWLEDGE_MAX_ITEMS, DEFAULT_MAX_ITEMS, 1, 20),
+    maxItems,
+    candidateItems: boundedNumber(
+      env.HOOKS_KNOWLEDGE_CANDIDATE_ITEMS,
+      Math.min(20, Math.max(maxItems, maxItems * 4)),
+      maxItems,
+      20
+    ),
     maxTokens: boundedNumber(env.HOOKS_KNOWLEDGE_MAX_TOKENS, DEFAULT_MAX_TOKENS, 100, 8_000),
     minPromptChars: boundedNumber(env.HOOKS_KNOWLEDGE_MIN_PROMPT_CHARS, DEFAULT_MIN_PROMPT_CHARS, 0, 4_000),
     minSignalScore: boundedNumber(env.HOOKS_KNOWLEDGE_MIN_SIGNAL_SCORE, DEFAULT_MIN_SIGNAL_SCORE, 1, 10),
@@ -224,7 +232,7 @@ export function buildKnowledgeArgs(query: string, config: KnowledgeContextConfig
     "--from",
     "search",
     "--max-items",
-    String(config.maxItems),
+    String(config.candidateItems),
     "--max-tokens",
     String(config.maxTokens),
     "--json",
@@ -319,14 +327,31 @@ function knowledgeItemId(source: string | null): string | null {
   return legacyPath?.[1] ?? null;
 }
 
-function formatPackItems(items: unknown[]): string | null {
+interface ExtractContextOptions {
+  maxItems?: number;
+  includeHistorical?: boolean;
+}
+
+const NON_AUTOLOADABLE_HISTORY_RE =
+  /\b(historical\/reference only|historical reference only|should not be auto-?loaded|do not auto-?load|not an active startup instruction|brain orchestration startup files)\b/i;
+const ARCHIVED_STARTUP_RE = /^Archived on \d{4}-\d{2}-\d{2}\b.*\b(startup context|startup files|CLAUDE\.md)\b/i;
+
+function shouldSuppressKnowledgeItem(text: string, options: ExtractContextOptions): boolean {
+  if (options.includeHistorical) return false;
+  const compact = compactText(text);
+  return NON_AUTOLOADABLE_HISTORY_RE.test(compact) || ARCHIVED_STARTUP_RE.test(compact);
+}
+
+function formatPackItems(items: unknown[], options: ExtractContextOptions = {}): string | null {
   const lines: string[] = [];
   let hasKnowledgeItems = false;
+  const maxItems = options.maxItems ?? DEFAULT_MAX_ITEMS;
 
   for (const [index, item] of items.entries()) {
+    if (lines.length >= maxItems) break;
     if (typeof item === "string" && item.trim()) {
       const text = cleanStringItem(item);
-      if (text) lines.push(`- ${truncate(text, 900)}`);
+      if (text && !shouldSuppressKnowledgeItem(text, options)) lines.push(`- ${truncate(text, 900)}`);
       continue;
     }
     if (!item || typeof item !== "object") continue;
@@ -353,6 +378,8 @@ function formatPackItems(items: unknown[]): string | null {
       "description",
     ]);
     if (!body && !source) continue;
+    const itemText = [title, body, source].filter(Boolean).join(" ");
+    if (shouldSuppressKnowledgeItem(itemText, options)) continue;
 
     if (itemId) {
       hasKnowledgeItems = true;
@@ -380,12 +407,19 @@ function formatPackItems(items: unknown[]): string | null {
   ].join("\n");
 }
 
-export function extractContextText(pack: unknown): string | null {
+function shouldIncludeHistoricalItems(input: HookInput): boolean {
+  const prompt = `${stringField(input, "prompt")} ${stringField(input, "user_prompt")}`;
+  return /\b(archive|archived|historical|history|reference-only|reference only|old startup|startup files|CLAUDE\.md)\b/i.test(prompt);
+}
+
+export function extractContextText(pack: unknown, options: ExtractContextOptions = {}): string | null {
   if (typeof pack === "string") {
-    return cleanLegacyEmptyBullet(pack.trim()) || null;
+    const text = cleanLegacyEmptyBullet(pack.trim());
+    if (!text || shouldSuppressKnowledgeItem(text, options)) return null;
+    return text;
   }
   if (Array.isArray(pack)) {
-    return formatPackItems(pack);
+    return formatPackItems(pack, options);
   }
   if (!pack || typeof pack !== "object") {
     return null;
@@ -393,16 +427,16 @@ export function extractContextText(pack: unknown): string | null {
 
   const obj = pack as Record<string, unknown>;
   const direct = firstString(obj, ["additionalContext", "context", "markdown", "content", "text", "summary"]);
-  if (direct) return direct;
+  if (direct) return shouldSuppressKnowledgeItem(direct, options) ? null : direct;
 
   for (const key of ["pack", "contextPack", "context_pack", "data", "result"]) {
     const nested = obj[key];
-    const text = extractContextText(nested);
+    const text = extractContextText(nested, options);
     if (text) return text;
   }
 
   const items = firstArray(obj, ["items", "results", "sources", "citations"]);
-  return items ? formatPackItems(items) : null;
+  return items ? formatPackItems(items, options) : null;
 }
 
 export function formatAdditionalContext(
@@ -450,7 +484,10 @@ export async function buildHookOutput(
     }
 
     const parsed = JSON.parse(result.stdout);
-    const context = extractContextText(parsed);
+    const context = extractContextText(parsed, {
+      maxItems: config.maxItems,
+      includeHistorical: shouldIncludeHistoricalItems(input),
+    });
     if (!context) {
       return { continue: true };
     }
