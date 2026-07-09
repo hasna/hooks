@@ -227,6 +227,18 @@ function firstString(obj: Record<string, unknown>, keys: string[]): string | nul
   return null;
 }
 
+function firstSourceString(obj: Record<string, unknown>): string | null {
+  const direct = firstString(obj, ["source_ref", "source_uri", "source", "uri", "ref", "url", "citation"]);
+  if (direct) return direct;
+
+  const source = obj.source;
+  if (source && typeof source === "object") {
+    return firstString(source as Record<string, unknown>, ["uri", "ref", "url", "id"]);
+  }
+
+  return null;
+}
+
 function firstArray(obj: Record<string, unknown>, keys: string[]): unknown[] | null {
   for (const key of keys) {
     const value = obj[key];
@@ -241,6 +253,15 @@ export function truncate(text: string, max: number): string {
   return `${text.slice(0, max - 3)}...`;
 }
 
+function compactText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function knowledgeItemId(source: string | null): string | null {
+  const match = source?.match(/^knowledge:\/\/item\/([^/?#\s]+)$/);
+  return match?.[1] ?? null;
+}
+
 function formatPackItems(items: unknown[]): string | null {
   const lines: string[] = [];
 
@@ -252,12 +273,35 @@ function formatPackItems(items: unknown[]): string | null {
     if (!item || typeof item !== "object") continue;
 
     const obj = item as Record<string, unknown>;
-    const title = firstString(obj, ["title", "name", "id", "ref", "uri"]) || `item ${index + 1}`;
-    const body = firstString(obj, ["summary", "text", "content", "snippet", "preview", "body"]);
-    const source = firstString(obj, ["source", "uri", "ref", "url", "citation"]);
+    const citationId = firstString(obj, ["id", "citation_id", "citationId"]);
+    const source = firstSourceString(obj);
+    const itemId = knowledgeItemId(source);
+    const title =
+      firstString(obj, ["title", "name"]) ||
+      (itemId ? `Knowledge item ${itemId}` : citationId || `item ${index + 1}`);
+    const body = firstString(obj, [
+      "summary",
+      "text",
+      "content",
+      "snippet",
+      "preview",
+      "quote_preview",
+      "quotePreview",
+      "excerpt",
+      "body",
+      "description",
+    ]);
     if (!body && !source) continue;
-    const suffix = source ? ` (source: ${truncate(source, 180)})` : "";
-    lines.push(`- ${truncate(title, 160)}${suffix}${body ? `: ${truncate(body, 900)}` : ""}`);
+
+    const suffixParts = [
+      citationId && citationId !== title ? citationId : null,
+      source ? `source: ${truncate(source, 180)}` : null,
+    ].filter(Boolean);
+    const suffix = suffixParts.length > 0 ? ` (${suffixParts.join("; ")})` : "";
+    lines.push(`- ${truncate(title, 160)}${suffix}${body ? `: ${truncate(compactText(body), 520)}` : ""}`);
+    if (itemId) {
+      lines.push(`  read: knowledge get --id ${itemId} --json`);
+    }
   }
 
   return lines.length > 0 ? lines.join("\n") : null;
