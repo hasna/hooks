@@ -43,7 +43,7 @@ bad stdin, or empty packs return `{"continue":true}` without context.
 export HOOKS_KNOWLEDGE_CONTEXT_DISABLE=1    # Kill switch
 export HOOKS_KNOWLEDGE_COMMAND=knowledge    # CLI command/path
 export HOOKS_KNOWLEDGE_TIMEOUT_MS=5000      # Per-call timeout
-export HOOKS_KNOWLEDGE_MAX_ITEMS=6          # Context pack item budget
+export HOOKS_KNOWLEDGE_MAX_ITEMS=3          # Context pack item budget
 export HOOKS_KNOWLEDGE_MAX_TOKENS=1200      # Context pack token budget
 export HOOKS_KNOWLEDGE_MAX_QUERY_CHARS=1200 # Redacted query bound
 export HOOKS_KNOWLEDGE_MAX_OUTPUT_CHARS=8000

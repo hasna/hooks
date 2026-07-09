@@ -56,7 +56,7 @@ export type KnowledgeExecutor = (
 ) => Promise<KnowledgeExecResult>;
 
 const DEFAULT_TIMEOUT_MS = 5000;
-const DEFAULT_MAX_ITEMS = 6;
+const DEFAULT_MAX_ITEMS = 3;
 const DEFAULT_MAX_TOKENS = 1200;
 const DEFAULT_MAX_QUERY_CHARS = 1200;
 const DEFAULT_MAX_OUTPUT_CHARS = 8000;
@@ -278,7 +278,9 @@ function formatPackItems(items: unknown[]): string | null {
     const itemId = knowledgeItemId(source);
     const title =
       firstString(obj, ["title", "name"]) ||
-      (itemId ? `Knowledge item ${itemId}` : citationId || `item ${index + 1}`);
+      itemId ||
+      citationId ||
+      `item ${index + 1}`;
     const body = firstString(obj, [
       "summary",
       "text",
@@ -295,12 +297,12 @@ function formatPackItems(items: unknown[]): string | null {
 
     const suffixParts = [
       citationId && citationId !== title ? citationId : null,
-      source ? `source: ${truncate(source, 180)}` : null,
+      source && !itemId ? `source: ${truncate(source, 180)}` : null,
     ].filter(Boolean);
     const suffix = suffixParts.length > 0 ? ` (${suffixParts.join("; ")})` : "";
     lines.push(`- ${truncate(title, 160)}${suffix}${body ? `: ${truncate(compactText(body), 520)}` : ""}`);
     if (itemId) {
-      lines.push(`  read: knowledge get --id ${itemId} --json`);
+      lines.push(`  open: knowledge get --id ${itemId} --json`);
     }
   }
 
