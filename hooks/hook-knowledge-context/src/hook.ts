@@ -55,7 +55,7 @@ export type KnowledgeExecutor = (
   config: KnowledgeContextConfig
 ) => Promise<KnowledgeExecResult>;
 
-const DEFAULT_TIMEOUT_MS = 1500;
+const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_ITEMS = 6;
 const DEFAULT_MAX_TOKENS = 1200;
 const DEFAULT_MAX_QUERY_CHARS = 1200;

@@ -235,7 +235,7 @@ export const HOOKS: HookMeta[] = [
     displayName: "Knowledge Context",
     description:
       "Injects deterministic Knowledge context packs into Codewith SessionStart, UserPromptSubmit, and SubagentStart",
-    version: "0.1.0",
+    version: "0.1.1",
     category: "Context Management",
     event: "SessionStart",
     events: ["SessionStart", "UserPromptSubmit", "SubagentStart"],

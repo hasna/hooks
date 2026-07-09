@@ -13,7 +13,7 @@ import {
 
 const baseConfig: KnowledgeContextConfig = {
   command: "knowledge",
-  timeoutMs: 1500,
+  timeoutMs: 5000,
   maxItems: 6,
   maxTokens: 1200,
   maxQueryChars: 1200,
@@ -21,6 +21,11 @@ const baseConfig: KnowledgeContextConfig = {
 };
 
 describe("hook-knowledge-context", () => {
+  test("defaults Knowledge CLI timeout to 5000ms and keeps env override", () => {
+    expect(getConfig({}).timeoutMs).toBe(5000);
+    expect(getConfig({ HOOKS_KNOWLEDGE_TIMEOUT_MS: "2345" }).timeoutMs).toBe(2345);
+  });
+
   test("builds deterministic knowledge context pack args without semantic, web, or generation flags", () => {
     const args = buildKnowledgeArgs("repo hook context", baseConfig);
 
