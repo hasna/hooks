@@ -170,4 +170,21 @@ describe("hook-knowledge-context", () => {
     expect(extractContextText({ pack: { context: "direct context" } })).toBe("direct context");
     expect(extractContextText([{ title: "One", text: "Body", uri: "knowledge://item/one" }])).toContain("Body");
   });
+
+  test("formats citation previews as useful progressive blurbs with read commands", () => {
+    const text = extractContextText({
+      citations: [
+        {
+          id: "cite_123",
+          source_ref: "knowledge://item/k_example",
+          quote_preview: "A short preview that tells the agent why this Knowledge item might matter.",
+        },
+      ],
+    });
+
+    expect(text).toContain("Knowledge item k_example");
+    expect(text).toContain("cite_123");
+    expect(text).toContain("A short preview");
+    expect(text).toContain("read: knowledge get --id k_example --json");
+  });
 });

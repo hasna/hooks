@@ -29,7 +29,10 @@ The hook intentionally does not pass `--semantic`, does not call web search,
 does not call ask/build/generate flows, and does not crawl raw stores directly.
 When Knowledge returns a nonempty context pack, the hook redacts credential-like
 text from that pack and emits Codewith-native
-`hookSpecificOutput.additionalContext` with the same event name.
+`hookSpecificOutput.additionalContext` with the same event name. Citation-only
+packs are expanded into progressive context lines with a bounded preview and a
+`knowledge get --id ... --json` read hint so agents can decide which full items
+are worth opening.
 
 All failures are fail-open: missing CLI, timeout, nonzero exit, malformed JSON,
 bad stdin, or empty packs return `{"continue":true}` without context.
