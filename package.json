@@ -1,6 +1,6 @@
 {
   "name": "@hasna/hooks",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "Open source hooks library for AI coding agents - Install safety, quality, and automation hooks with a single command",
   "type": "module",
   "bin": {
@@ -73,6 +73,7 @@
     "bin/",
     "dist/",
     "hooks/",
+    "!hooks/*/dist/",
     "README.md",
     "LICENSE"
   ],

@@ -40,8 +40,11 @@ export interface KnowledgeContextConfig {
   timeoutMs: number;
   maxItems: number;
   maxTokens: number;
+  minPromptChars: number;
+  minSignalScore: number;
   maxQueryChars: number;
   maxOutputChars: number;
+  requireHighSignal: boolean;
 }
 
 export interface KnowledgeExecResult {
@@ -58,6 +61,8 @@ export type KnowledgeExecutor = (
 const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_ITEMS = 3;
 const DEFAULT_MAX_TOKENS = 1200;
+const DEFAULT_MIN_PROMPT_CHARS = 6;
+const DEFAULT_MIN_SIGNAL_SCORE = 3;
 const DEFAULT_MAX_QUERY_CHARS = 1200;
 const DEFAULT_MAX_OUTPUT_CHARS = 8000;
 const SUPPORTED_EVENTS = new Set<KnowledgeContextEvent>([
@@ -97,8 +102,11 @@ export function getConfig(env: NodeJS.ProcessEnv = process.env): KnowledgeContex
     timeoutMs: boundedNumber(env.HOOKS_KNOWLEDGE_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, 100, 10_000),
     maxItems: boundedNumber(env.HOOKS_KNOWLEDGE_MAX_ITEMS, DEFAULT_MAX_ITEMS, 1, 20),
     maxTokens: boundedNumber(env.HOOKS_KNOWLEDGE_MAX_TOKENS, DEFAULT_MAX_TOKENS, 100, 8_000),
+    minPromptChars: boundedNumber(env.HOOKS_KNOWLEDGE_MIN_PROMPT_CHARS, DEFAULT_MIN_PROMPT_CHARS, 0, 4_000),
+    minSignalScore: boundedNumber(env.HOOKS_KNOWLEDGE_MIN_SIGNAL_SCORE, DEFAULT_MIN_SIGNAL_SCORE, 1, 10),
     maxQueryChars: boundedNumber(env.HOOKS_KNOWLEDGE_MAX_QUERY_CHARS, DEFAULT_MAX_QUERY_CHARS, 80, 4_000),
     maxOutputChars: boundedNumber(env.HOOKS_KNOWLEDGE_MAX_OUTPUT_CHARS, DEFAULT_MAX_OUTPUT_CHARS, 500, 20_000),
+    requireHighSignal: env.HOOKS_KNOWLEDGE_REQUIRE_HIGH_SIGNAL !== "0",
   };
 }
 
@@ -133,6 +141,52 @@ export function sanitizeQuery(text: string, maxChars: number): string {
     .trim();
   const redacted = redactSecrets(normalized);
   return redacted.length > maxChars ? redacted.slice(0, maxChars).trim() : redacted;
+}
+
+function cleanLegacyEmptyBullet(text: string): string {
+  return text.replace(/^(\s*[-*])\s*:\s*/gm, "$1 ");
+}
+
+function cleanStringItem(text: string): string {
+  return cleanLegacyEmptyBullet(text).replace(/^[-*]\s*/, "").trim();
+}
+
+const DOMAIN_SIGNAL_RE =
+  /\b(auth|authz|rls|tenant|deploy|release|publish|rollback|merge|pr|staged|diff|security|secret|credential|prod|incident|migration|billing|stripe|oauth|webhook|connector|loop|workflow|agent|subagent|knowledge|hook|hooks|codewith|worktree|repo|repository|project|task|todo|todos|memento|mementos|conversation|conversations|context|config|configuration|npm|bun|package|cli|install|global|station|spark|machine|file|path|markdown|docs?|ci|tests?|build|typecheck|verify|debug|error|failing|failure|bug|regression)\b/i;
+const ACTION_SIGNAL_RE =
+  /\b(add|build|change|check|configure|create|debug|fix|implement|improve|inspect|install|merge|patch|publish|refactor|release|rerun|review|rollback|test|update|verify)\b/i;
+const STRUCTURAL_SIGNAL_RE =
+  /(`[^`]+`|(?:^|\s)(?:\.{1,2}\/)?[\w.-]+\/[\w./-]+|\/[\w./-]+|@hasna\/[a-z0-9-]+|\b(?:open|platform|iapp)-[a-z0-9-]+\b|[\w.-]+\.(ts|tsx|js|jsx|json|toml|md|yml|yaml|rs|py|go|sh|sql))/i;
+const PROJECT_CWD_SIGNAL_RE = /\/(?:open|platform|iapp)-[a-z0-9-]+(?:\/|$)|\/hasna\/(?:opensource|infra|community)\//i;
+
+export function promptSignalScore(prompt: string, cwd = ""): number {
+  const text = compactText(prompt);
+  if (!text) return 0;
+
+  let score = 0;
+  if (text.length >= 80) score += 3;
+  else if (text.length >= 40) score += 1;
+
+  const wordCount = text.split(/\s+/).filter(Boolean).length;
+  if (wordCount >= 12) score += 3;
+  if (DOMAIN_SIGNAL_RE.test(text)) score += 3;
+  if (ACTION_SIGNAL_RE.test(text)) score += 2;
+  if (STRUCTURAL_SIGNAL_RE.test(text)) score += 3;
+  if (cwd && PROJECT_CWD_SIGNAL_RE.test(cwd) && text.length >= 20) score += 2;
+  if (/\b(error|exception|failed|failure|regression|stack trace|traceback)\b/i.test(text)) score += 2;
+
+  return score;
+}
+
+export function shouldSearchKnowledge(input: HookInput, config: KnowledgeContextConfig): boolean {
+  if (!config.requireHighSignal) return true;
+  if (input.hook_event_name !== "UserPromptSubmit") return true;
+
+  const prompt = stringField(input, "prompt") || stringField(input, "user_prompt");
+  const score = promptSignalScore(prompt, stringField(input, "cwd"));
+  const promptChars = compactText(prompt).length;
+
+  return promptChars >= config.minPromptChars && score >= config.minSignalScore;
 }
 
 export function buildQuery(input: HookInput, config: KnowledgeContextConfig): string | null {
@@ -258,16 +312,21 @@ function compactText(text: string): string {
 }
 
 function knowledgeItemId(source: string | null): string | null {
-  const match = source?.match(/^knowledge:\/\/item\/([^/?#\s]+)$/);
-  return match?.[1] ?? null;
+  const direct = source?.match(/^knowledge:\/\/item\/([^/?#\s]+)$/);
+  if (direct) return direct[1];
+
+  const legacyPath = source?.match(/(?:^|\/)(k_[A-Za-z0-9]+_[A-Za-z0-9]+)(?:[?#].*)?$/);
+  return legacyPath?.[1] ?? null;
 }
 
 function formatPackItems(items: unknown[]): string | null {
   const lines: string[] = [];
+  let hasKnowledgeItems = false;
 
   for (const [index, item] of items.entries()) {
     if (typeof item === "string" && item.trim()) {
-      lines.push(`- ${truncate(item.trim(), 900)}`);
+      const text = cleanStringItem(item);
+      if (text) lines.push(`- ${truncate(text, 900)}`);
       continue;
     }
     if (!item || typeof item !== "object") continue;
@@ -295,23 +354,35 @@ function formatPackItems(items: unknown[]): string | null {
     ]);
     if (!body && !source) continue;
 
-    const suffixParts = [
-      citationId && citationId !== title ? citationId : null,
-      source && !itemId ? `source: ${truncate(source, 180)}` : null,
-    ].filter(Boolean);
-    const suffix = suffixParts.length > 0 ? ` (${suffixParts.join("; ")})` : "";
-    lines.push(`- ${truncate(title, 160)}${suffix}${body ? `: ${truncate(compactText(body), 520)}` : ""}`);
     if (itemId) {
-      lines.push(`  open: knowledge get --id ${itemId} --json`);
+      hasKnowledgeItems = true;
+      const labelParts = [`item_id=${itemId}`];
+      if (citationId) labelParts.push(`cite=${citationId}`);
+      const preview = body ? compactText(body) : title !== itemId ? title : "";
+      lines.push(`- ${labelParts.join(" ")}${preview ? `: ${truncate(preview, 520)}` : ""}`);
+      continue;
     }
+
+    const suffixParts = [
+      citationId ? `cite=${citationId}` : null,
+      source ? `source=${truncate(source, 180)}` : null,
+    ].filter(Boolean);
+    const label = suffixParts.length > 0 ? suffixParts.join(" ") : truncate(title, 160);
+    lines.push(`- ${label}${body ? `: ${truncate(compactText(body), 520)}` : ""}`);
   }
 
-  return lines.length > 0 ? lines.join("\n") : null;
+  if (lines.length === 0) return null;
+  if (!hasKnowledgeItems) return lines.join("\n");
+  return [
+    "If a match looks relevant, read it with: knowledge get --id <item_id> --json",
+    "",
+    ...lines,
+  ].join("\n");
 }
 
 export function extractContextText(pack: unknown): string | null {
   if (typeof pack === "string") {
-    return pack.trim() || null;
+    return cleanLegacyEmptyBullet(pack.trim()) || null;
   }
   if (Array.isArray(pack)) {
     return formatPackItems(pack);
@@ -339,7 +410,7 @@ export function formatAdditionalContext(
   context: string,
   config: KnowledgeContextConfig
 ): string {
-  const header = `[hook-knowledge-context] Deterministic Knowledge context (${event}; knowledge context pack --from search):`;
+  const header = `[hook-knowledge-context] Knowledge matches (${event}; top ${config.maxItems}, deterministic search):`;
   const safeContext = redactSecrets(context.trim());
   return `${header}\n\n${truncate(safeContext, Math.max(0, config.maxOutputChars - header.length - 2))}`;
 }
@@ -363,6 +434,10 @@ export async function buildHookOutput(
   }
 
   const config = getConfig(env);
+  if (!shouldSearchKnowledge(input, config)) {
+    return { continue: true };
+  }
+
   const query = buildQuery(input, config);
   if (!query) {
     return { continue: true };

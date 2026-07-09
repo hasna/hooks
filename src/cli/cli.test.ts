@@ -19,7 +19,10 @@ function backupSettings(): void {
 function restoreSettings(): void {
   if (settingsBackup !== null) {
     writeFileSync(SETTINGS_PATH, settingsBackup);
+  } else if (existsSync(SETTINGS_PATH)) {
+    rmSync(SETTINGS_PATH);
   }
+  settingsBackup = null;
 }
 
 async function run(...args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
