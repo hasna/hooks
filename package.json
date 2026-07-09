@@ -73,6 +73,7 @@
     "bin/",
     "dist/",
     "hooks/",
+    "!hooks/*/dist/",
     "README.md",
     "LICENSE"
   ],

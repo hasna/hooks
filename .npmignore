@@ -29,3 +29,7 @@ tsconfig.json
 # Test files
 *.test.ts
 *.test.tsx
+
+# Standalone hook package build output is published by each standalone package,
+# not by the root @hasna/hooks package.
+hooks/*/dist/
