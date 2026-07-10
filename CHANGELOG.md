@@ -5,13 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.8] - 2026-07-10
+
+### Changed
+
+- Removed the standalone npm package manifest for `knowledge-context`; the hook is now distributed only inside `@hasna/hooks`.
+- Kept `knowledge-context` available as a catalog hook via `hooks run knowledge-context`.
+
 ## [0.3.7] - 2026-07-09
 
 ### Fixed
 
 - Filtered `knowledge-context` matches that mark themselves as historical/reference-only or not suitable for auto-loading, preventing archived startup files from being injected into normal agent context.
 - `knowledge-context` now fetches extra bounded candidates internally while still rendering only the configured top item budget, so filtering stale matches can reveal useful Knowledge without bloating context.
-- Bumped standalone `@hasna/hook-knowledge-context` to 0.1.6.
 
 ## [0.3.6] - 2026-07-09
 
@@ -19,14 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Compact `knowledge-context` citation output further by printing the full-item read command once and formatting Knowledge bullets as `item_id=... cite=...`.
 - Added deterministic high-signal gating for `UserPromptSubmit` so low-signal prompts fail open instead of injecting Knowledge matches on every short user message.
-- Bumped standalone `@hasna/hook-knowledge-context` to 0.1.5.
 
 ## [0.3.5] - 2026-07-09
 
 ### Fixed
 
-- Fixed the standalone `@hasna/hook-knowledge-context` ESM bundle so importing its exported helpers does not trip the executable-entrypoint guard.
-- Bumped standalone `@hasna/hook-knowledge-context` to 0.1.4.
+- Fixed `knowledge-context` helper imports so importing exported helpers does not trip the executable-entrypoint guard.
 
 ## [0.3.4] - 2026-07-09
 
@@ -34,27 +38,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reduced `knowledge-context`'s default context pack budget to the top 3 items to keep hook-added context compact.
 - Compact Knowledge citation output by omitting repeated `knowledge://item/...` source URIs when the `knowledge get --id ... --json` follow-up command already identifies the item.
-- Bumped standalone `@hasna/hook-knowledge-context` to 0.1.3.
 
 ## [0.3.3] - 2026-07-09
 
 ### Changed
 
 - Improved `knowledge-context` progressive context output by surfacing Knowledge citation previews as bounded blurbs and adding `knowledge get --id ... --json` read hints for full-item follow-up.
-- Bumped standalone `@hasna/hook-knowledge-context` to 0.1.2.
 
 ## [0.3.2] - 2026-07-09
 
 ### Changed
 
 - Raised `knowledge-context`'s default Knowledge CLI timeout to 5000ms and generated Codewith hook timeout to 6s so deterministic context packs can finish reliably by default.
-- Bumped standalone `@hasna/hook-knowledge-context` to 0.1.1.
 
 ## [0.3.1] - 2026-07-09
 
 ### Added
 
-- `knowledge-context` hook package (`@hasna/hook-knowledge-context`) for Codewith `SessionStart`, `UserPromptSubmit`, and `SubagentStart` context injection using deterministic `knowledge context pack --from search` reads
+- `knowledge-context` catalog hook for Codewith `SessionStart`, `UserPromptSubmit`, and `SubagentStart` context injection using deterministic `knowledge context pack --from search` reads
 - Codewith installer target support via `--target codewith`, emitting renderer-safe TOML fragments by default and writing Codewith config only with an explicit `--apply-codewith --codewith-config <path>`
 - Multi-event registry metadata so one hook can register across multiple lifecycle events
 
@@ -102,6 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 15 initial hook packages
 - Initial project setup
 
+[0.3.8]: https://github.com/hasna/hooks/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/hasna/hooks/compare/v0.3.6...v0.3.7
 [0.3.6]: https://github.com/hasna/hooks/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/hasna/hooks/compare/v0.3.4...v0.3.5
