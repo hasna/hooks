@@ -523,6 +523,7 @@ describe("installer", () => {
 
   describe("hook source files", () => {
     const HOOK_SOURCE_NAMES = HOOKS.map((hook) => hook.name);
+    const CATALOG_ONLY_HOOKS = new Set(["knowledge-context"]);
 
     test("every hook has src/hook.ts in package (except agentmessages)", () => {
       for (const name of HOOK_SOURCE_NAMES) {
@@ -532,10 +533,18 @@ describe("installer", () => {
       }
     });
 
-    test("every hook has package.json in package", () => {
+    test("standalone-packaged hooks have package.json in package", () => {
       for (const name of HOOK_SOURCE_NAMES) {
+        if (CATALOG_ONLY_HOOKS.has(name)) continue;
         const pkgJson = join(getHookPath(name), "package.json");
         expect(existsSync(pkgJson)).toBe(true);
+      }
+    });
+
+    test("catalog-only hooks do not expose standalone package manifests", () => {
+      for (const name of CATALOG_ONLY_HOOKS) {
+        const pkgJson = join(getHookPath(name), "package.json");
+        expect(existsSync(pkgJson)).toBe(false);
       }
     });
 

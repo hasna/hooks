@@ -1,6 +1,8 @@
-# hook-knowledge-context
+# knowledge-context
 
 Codewith lifecycle hook that injects deterministic Knowledge context packs.
+This hook is distributed through the `@hasna/hooks` catalog only; do not publish
+this directory as a standalone npm package.
 
 ## Installation
 

@@ -30,6 +30,5 @@ tsconfig.json
 *.test.ts
 *.test.tsx
 
-# Standalone hook package build output is published by each standalone package,
-# not by the root @hasna/hooks package.
+# Hook-local build output is not needed by the root @hasna/hooks package.
 hooks/*/dist/
