@@ -214,8 +214,12 @@ function shellWords(segment: string): string[] {
 }
 
 function expandHome(path: string): string {
+  const home = process.env.HOME || homedir();
   if (path === "~") return homedir();
   if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+  if (path === "$HOME" || path === "${HOME}") return home;
+  if (path.startsWith("$HOME/")) return join(home, path.slice("$HOME/".length));
+  if (path.startsWith("${HOME}/")) return join(home, path.slice("${HOME}/".length));
   return path;
 }
 
@@ -346,6 +350,239 @@ export function isRiskyOperation(command: string): boolean {
     /\bdeploy(?:ment)?\b/,
   ];
   return patterns.some((pattern) => pattern.test(command));
+}
+
+export interface DangerousOperationMatch {
+  block: boolean;
+  reason?: string;
+  targetPath?: string;
+  protectedPath?: string;
+  protectedLabel?: string;
+  operation?: string;
+}
+
+interface ProtectedPathRule {
+  root: string;
+  label: string;
+  mode: "tree" | "root";
+}
+
+function splitPathList(value: unknown): string[] {
+  if (typeof value === "string") return value.split(":").map((v) => v.trim()).filter(Boolean);
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => splitPathList(item));
+}
+
+function inputPathList(input: CodewithHookInput, ...keys: string[]): string[] {
+  const out: string[] = [];
+  for (const key of keys) out.push(...splitPathList(input[key]));
+  return out;
+}
+
+function uniqueResolved(paths: string[], cwd: string): string[] {
+  return [...new Set(paths.map((path) => resolveFrom(cwd, path)))];
+}
+
+function workspaceRootsFor(input: CodewithHookInput, cwd: string): string[] {
+  const home = process.env.HOME || homedir();
+  const candidates = [
+    ...inputPathList(input, "workspace_roots", "workspaceRoots", "workspace_root", "workspaceRoot"),
+    ...splitPathList(process.env.CODEWITH_WORKSPACE_ROOTS),
+    ...splitPathList(process.env.HASNA_WORKSPACE_ROOTS),
+    join(home, "workspace"),
+    join(home, "Workspace"),
+  ];
+  return uniqueResolved(candidates, cwd);
+}
+
+function activeRootsFor(input: CodewithHookInput, cwd: string): string[] {
+  const candidates = [
+    ...inputPathList(input, "active_repo_roots", "activeRepoRoots", "active_worktree_roots", "activeWorktreeRoots"),
+    ...splitPathList(process.env.HASNA_ACTIVE_REPO_ROOTS),
+    ...splitPathList(process.env.HASNA_ACTIVE_WORKTREE_ROOTS),
+  ];
+  return uniqueResolved(candidates, cwd);
+}
+
+function hasnaDivisionRuleFor(target: string, workspaceRoot: string): ProtectedPathRule | null {
+  const rel = relative(resolve(workspaceRoot), resolve(target));
+  if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+  const parts = rel.split(sep).filter(Boolean);
+  if (!parts[0]?.startsWith("hasna")) return null;
+  if (parts.length === 1) {
+    return { root: resolve(workspaceRoot, parts[0]), label: `Hasna division root ${parts[0]}`, mode: "root" };
+  }
+  if (parts.length === 2) {
+    return { root: resolve(workspaceRoot, parts[0], parts[1]), label: `Hasna top-level scope ${parts[0]}/${parts[1]}`, mode: "root" };
+  }
+  return null;
+}
+
+async function protectedRulesFor(input: CodewithHookInput, cwd: string): Promise<ProtectedPathRule[]> {
+  const home = process.env.HOME || homedir();
+  const rules: ProtectedPathRule[] = [
+    { root: join(home, ".hasna"), label: "Hasna state root ~/.hasna", mode: "tree" },
+  ];
+
+  for (const root of workspaceRootsFor(input, cwd)) {
+    rules.push({ root, label: "workspace root", mode: "root" });
+  }
+
+  const repoRoot = await gitRepoRoot(cwd);
+  if (repoRoot) rules.push({ root: repoRoot, label: "active repository root", mode: "root" });
+
+  for (const root of activeRootsFor(input, cwd)) {
+    rules.push({ root, label: "active repository or worktree root", mode: "root" });
+  }
+
+  return [...new Map(rules.map((rule) => [resolve(rule.root), { ...rule, root: resolve(rule.root) }])).values()];
+}
+
+function threatensProtectedPath(targetPath: string, rule: ProtectedPathRule): boolean {
+  const target = resolve(targetPath);
+  const root = resolve(rule.root);
+  if (rule.mode === "tree") {
+    return isInsidePath(target, root) || isInsidePath(root, target);
+  }
+  return target === root || isInsidePath(root, target);
+}
+
+function mutatesProtectedPath(targetPath: string, rule: ProtectedPathRule): boolean {
+  const target = resolve(targetPath);
+  const root = resolve(rule.root);
+  if (rule.mode === "tree") return isInsidePath(target, root);
+  return target === root;
+}
+
+function rmCommandTargets(command: string): string[] {
+  const targets: string[] = [];
+  for (const segment of splitShellSegments(command)) {
+    const tokens = shellWords(segment);
+    const rmIndex = tokens.findIndex((token) => token === "rm" || token.endsWith("/rm"));
+    if (rmIndex === -1) continue;
+
+    let recursive = false;
+    let force = false;
+    let afterOptions = false;
+    const segmentTargets: string[] = [];
+
+    for (let i = rmIndex + 1; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      if (!afterOptions && token === "--") {
+        afterOptions = true;
+        continue;
+      }
+      if (!afterOptions && token.startsWith("--")) {
+        if (token === "--recursive" || token === "--dir") recursive = true;
+        if (token === "--force") force = true;
+        continue;
+      }
+      if (!afterOptions && /^-[A-Za-z]+$/.test(token)) {
+        if (token.includes("r") || token.includes("R")) recursive = true;
+        if (token.includes("f")) force = true;
+        continue;
+      }
+      segmentTargets.push(token);
+    }
+
+    if (recursive && force) targets.push(...segmentTargets);
+  }
+  return targets;
+}
+
+function extractFileToolPaths(input: CodewithHookInput): Array<{ path: string; operation: string }> {
+  if (input.hook_event_name !== "PreToolUse") return [];
+  const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
+  const toolInput = input.tool_input && typeof input.tool_input === "object" ? input.tool_input : {};
+  const paths: Array<{ path: string; operation: string }> = [];
+
+  const addString = (value: unknown, operation: string) => {
+    if (typeof value === "string" && value.trim()) paths.push({ path: value, operation });
+  };
+  const addPathFields = (obj: Record<string, unknown>, operation: string) => {
+    for (const key of ["file_path", "path", "target_path", "old_path", "new_path", "notebook_path"]) {
+      addString(obj[key], operation);
+    }
+  };
+
+  if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(toolName)) {
+    addPathFields(toolInput, `${toolName} file mutation`);
+  } else if (/^(?:apply_patch|mcp__.*|.*(?:write|edit|delete|remove|move).*file.*)$/i.test(toolName)) {
+    addPathFields(toolInput, `${toolName} file mutation`);
+  }
+
+  const patch = toolInput.patch ?? toolInput.input ?? toolInput.content;
+  if ((toolName === "apply_patch" || toolName === "ApplyPatch") && typeof patch === "string") {
+    for (const line of patch.split(/\r?\n/)) {
+      const match = line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/);
+      if (match?.[1]) paths.push({ path: match[1].trim(), operation: "apply_patch file mutation" });
+    }
+  }
+
+  const files = toolInput.files;
+  if (Array.isArray(files)) {
+    for (const item of files) {
+      if (typeof item === "string") addString(item, `${toolName} file mutation`);
+      else if (item && typeof item === "object") addPathFields(item as Record<string, unknown>, `${toolName} file mutation`);
+    }
+  }
+
+  return paths;
+}
+
+function scopedBlockReason(operation: string, targetPath: string, rule: ProtectedPathRule): string {
+  return [
+    `Blocked scoped dangerous operation: ${operation} targets ${targetPath}.`,
+    `Protected scope: ${rule.label} (${rule.root}).`,
+    "This guard is scoped; destructive commands outside protected roots are not blocked.",
+  ].join(" ");
+}
+
+export async function classifyDangerousOperation(input: CodewithHookInput): Promise<DangerousOperationMatch> {
+  if (input.hook_event_name !== "PreToolUse") return { block: false };
+  const cwd = input.cwd || process.cwd();
+  const rules = await protectedRulesFor(input, cwd);
+  const workspaceRoots = workspaceRootsFor(input, cwd);
+
+  if (input.tool_name === "Bash") {
+    for (const rawTarget of rmCommandTargets(getCommand(input))) {
+      const targetPath = resolveFrom(cwd, rawTarget);
+      const extraRule = workspaceRoots.map((root) => hasnaDivisionRuleFor(targetPath, root)).find((rule): rule is ProtectedPathRule => Boolean(rule));
+      const allRules = extraRule ? [...rules, extraRule] : rules;
+      for (const rule of allRules) {
+        if (threatensProtectedPath(targetPath, rule)) {
+          return {
+            block: true,
+            targetPath,
+            protectedPath: rule.root,
+            protectedLabel: rule.label,
+            operation: "rm -rf",
+            reason: scopedBlockReason("rm -rf", targetPath, rule),
+          };
+        }
+      }
+    }
+  }
+
+  for (const candidate of extractFileToolPaths(input)) {
+    const targetPath = resolveFrom(cwd, candidate.path);
+    const extraRule = workspaceRoots.map((root) => hasnaDivisionRuleFor(targetPath, root)).find((rule): rule is ProtectedPathRule => Boolean(rule));
+    const allRules = extraRule ? [...rules, extraRule] : rules;
+    for (const rule of allRules) {
+      if (mutatesProtectedPath(targetPath, rule)) {
+        return {
+          block: true,
+          targetPath,
+          protectedPath: rule.root,
+          protectedLabel: rule.label,
+          operation: candidate.operation,
+          reason: scopedBlockReason(candidate.operation, targetPath, rule),
+        };
+      }
+    }
+  }
+
+  return { block: false };
 }
 
 export function cacheDir(): string {

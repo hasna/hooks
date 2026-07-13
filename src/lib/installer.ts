@@ -374,7 +374,7 @@ export function installHook(name: string, options: InstallOptions = {}): Install
     const shortName = shortHookName(name);
     const meta = getHook(shortName);
     if (meta) {
-      const unsupportedTargets = (["claude", "gemini", "codewith"] as const).filter(
+      const unsupportedTargets = (["claude", "codewith"] as const).filter(
         (agentTarget) => !isEventSupported(meta.event, agentTarget)
       );
       if (unsupportedTargets.length > 0) {
@@ -392,14 +392,6 @@ export function installHook(name: string, options: InstallOptions = {}): Install
       return {
         ...claudeResult,
         error: `Failed for target 'claude': ${claudeResult.error}`,
-        target: "all",
-      };
-    }
-    const geminiResult = installForTarget(name, scope, overwrite, "gemini", profile);
-    if (!geminiResult.success) {
-      return {
-        ...geminiResult,
-        error: `Failed for target 'gemini': ${geminiResult.error}`,
         target: "all",
       };
     }

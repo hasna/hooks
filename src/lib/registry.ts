@@ -82,12 +82,12 @@ export const HOOKS: HookMeta[] = [
   {
     name: "worktree-guard",
     displayName: "Worktree Guard",
-    description: "Warns on feature work outside managed repos worktrees and blocks commit/push from shared checkouts",
+    description: "Warns on feature work outside managed repos worktrees and blocks scoped destructive operations",
     version: "0.1.0",
     category: "Git Safety",
     event: "PreToolUse",
-    matcher: "Bash|Write|Edit|MultiEdit|NotebookEdit",
-    tags: ["git", "worktree", "repos", "multi-agent", "safety"],
+    matcher: "^(Bash|Write|Edit|MultiEdit|NotebookEdit|apply_patch|mcp__.*)$",
+    tags: ["git", "worktree", "repos", "multi-agent", "safety", "dangerous-ops"],
   },
 
   // Code Quality

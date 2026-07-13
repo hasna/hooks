@@ -32,8 +32,8 @@ hooks --help
 
 - `session-start` — `SessionStart` digest and additional context.
 - `prompt-guard` — `UserPromptSubmit` guard for pasted fake policy/freeze/run-this-now content.
-- `pre-bash` — `PreToolUse` Bash gate for staged secrets scans and risky-op comms checks.
-- `worktree-guard` — `PreToolUse` guard for managed repos worktree boundaries.
+- `pre-bash` — `PreToolUse` Bash gate for staged secrets scans, scoped destructive-operation blocks, and risky-op comms checks.
+- `worktree-guard` — `PreToolUse` guard for managed repos worktree boundaries and file-tool-like payloads touching protected Hasna scopes.
 - `stop-sync` — `Stop` turn-end heartbeat/evidence best effort.
 
 For Codewith, the installer is renderer-safe by default: it emits a TOML
@@ -42,6 +42,10 @@ fragment instead of mutating managed `~/.codewith/config.toml`.
 ```bash
 hooks install session-start prompt-guard pre-bash worktree-guard stop-sync --target codewith
 ```
+
+The scoped destructive-operation guard does not block every `rm -rf`. It blocks
+resolved shell/file-tool targets that threaten `~/.hasna`, configured workspace
+roots, Hasna division/scope roots, or active repo/worktree roots.
 
 Apply that fragment through `open-configs` or the managed config renderer. A
 direct write path exists only for explicit local/test use:

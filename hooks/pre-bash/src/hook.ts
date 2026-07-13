@@ -2,6 +2,7 @@
 
 import {
   commandExists,
+  classifyDangerousOperation,
   gitCommandInfo,
   getCommand,
   isBashPreToolUse,
@@ -52,6 +53,12 @@ export async function evaluate(input: CodewithHookInput): Promise<{ output: Reco
   const command = getCommand(input);
   if (!command) return { output: { continue: true }, warnings };
   const cwd = input.cwd || process.cwd();
+
+  const dangerous = await classifyDangerousOperation(input);
+  if (dangerous.block) {
+    return { output: { decision: "block", reason: dangerous.reason }, warnings };
+  }
+
   const gitInfo = gitCommandInfo(command, cwd);
 
   if (gitInfo) {

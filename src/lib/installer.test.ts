@@ -618,19 +618,20 @@ describe("installer", () => {
       expect(result.target).toBe("all");
     });
 
-    test("installHook with target all rejects hooks unsupported by any target", () => {
-      const result = installHook("fleet-catchup", { target: "all", overwrite: true });
+    test("installHook with target all excludes obsolete Gemini and rejects hooks unsupported by active targets", () => {
+      const result = installHook("contextrefresh", { target: "all", overwrite: true });
       expect(result.success).toBe(false);
       expect(result.target).toBe("all");
-      expect(result.error).toContain("SessionStart");
-      expect(result.error).toContain("gemini");
+      expect(result.error).toContain("Notification");
+      expect(result.error).toContain("codewith");
+      expect(result.error).not.toContain("gemini");
 
       const claudeSettings = existsSync(GLOBAL_SETTINGS)
         ? JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"))
         : {};
       const claudeInstalled = Object.values(claudeSettings.hooks ?? {}).some((entries: any) =>
         entries.some((entry: any) =>
-          entry.hooks?.some((h: any) => h.command === "hooks run fleet-catchup")
+          entry.hooks?.some((h: any) => h.command === "hooks run contextrefresh")
         )
       );
       expect(claudeInstalled).toBe(false);
