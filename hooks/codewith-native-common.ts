@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
 import { homedir, tmpdir } from "os";
 
 export interface CodewithHookInput {
@@ -454,6 +454,13 @@ function mutatesProtectedPath(targetPath: string, rule: ProtectedPathRule): bool
   return target === root;
 }
 
+function broadContentWipeBase(targetPath: string): string | null {
+  const target = resolve(targetPath);
+  const last = basename(target);
+  if (!/[*?\[]/.test(last)) return null;
+  return dirname(target);
+}
+
 function managedLeaseRootForPath(path: string): string | null {
   const root = defaultWorktreesRoot();
   if (!isInsidePath(path, root)) return null;
@@ -478,6 +485,8 @@ function shouldSkipHasnaTreeRule(targetPath: string, rule: ProtectedPathRule): b
 
 function threatensRule(targetPath: string, rule: ProtectedPathRule): boolean {
   if (shouldSkipHasnaTreeRule(targetPath, rule)) return false;
+  const contentBase = broadContentWipeBase(targetPath);
+  if (contentBase && mutatesProtectedPath(contentBase, rule)) return true;
   return threatensProtectedPath(targetPath, rule);
 }
 
@@ -785,7 +794,7 @@ function extractFileToolPaths(input: CodewithHookInput): Array<{ path: string; o
   const patch = toolInput.patch ?? toolInput.input ?? toolInput.content;
   if ((toolName === "apply_patch" || toolName === "ApplyPatch") && typeof patch === "string") {
     for (const line of patch.split(/\r?\n/)) {
-      const match = line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/);
+      const match = line.match(/^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$/);
       if (match?.[1]) paths.push({ path: match[1].trim(), operation: "apply_patch file mutation" });
     }
   }

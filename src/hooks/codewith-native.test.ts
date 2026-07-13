@@ -421,6 +421,65 @@ describe("Codewith-native hooks", () => {
     expect(allowed.json.decision).toBeUndefined();
   });
 
+  test("pre-bash blocks protected-root content globs but allows nested cleanup globs", async () => {
+    const repo = join(tmp, "repo");
+    mkdirSync(join(repo, "dist"), { recursive: true });
+    const init = Bun.spawnSync(["git", "init"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+    expect(init.exitCode).toBe(0);
+
+    const repoGlob = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-repo-glob",
+      cwd: repo,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "rm -rf ./*" },
+      tool_use_id: "tool-repo-glob",
+      transcript_path: null,
+      turn_id: "turn-repo-glob",
+    }, { env: { HOME: tmp, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    const workspace = join(tmp, "workspace");
+    mkdirSync(workspace, { recursive: true });
+    const workspaceGlob = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-workspace-glob",
+      cwd: workspace,
+      model: "gpt-test",
+      permission_mode: "default",
+      workspace_roots: [workspace],
+      tool_name: "Bash",
+      tool_input: { command: "rm -rf *" },
+      tool_use_id: "tool-workspace-glob",
+      transcript_path: null,
+      turn_id: "turn-workspace-glob",
+    }, { env: { HOME: tmp, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    const nested = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-nested-glob",
+      cwd: repo,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "rm -rf dist/*" },
+      tool_use_id: "tool-nested-glob",
+      transcript_path: null,
+      turn_id: "turn-nested-glob",
+    }, { env: { HOME: tmp, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(repoGlob.exitCode).toBe(0);
+    expect(repoGlob.json.decision).toBe("block");
+    expect(repoGlob.json.reason).toContain("active repository root");
+    expect(workspaceGlob.exitCode).toBe(0);
+    expect(workspaceGlob.json.decision).toBe("block");
+    expect(workspaceGlob.json.reason).toContain("workspace root");
+    expect(nested.exitCode).toBe(0);
+    expect(nested.json.continue).toBe(true);
+    expect(nested.json.decision).toBeUndefined();
+  });
+
   test("pre-bash blocks destructive git cleanup at active repo root but allows pathspec cleanup", async () => {
     const repo = join(tmp, "repo");
     mkdirSync(join(repo, "dist"), { recursive: true });
@@ -508,6 +567,25 @@ describe("Codewith-native hooks", () => {
       tool_use_id: "tool-apply-patch-state",
       transcript_path: null,
       turn_id: "turn-apply-patch-state",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: join(tmp, "worktrees") } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("apply_patch file mutation");
+  });
+
+  test("worktree-guard blocks apply_patch moves into ~/.hasna", async () => {
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-apply-patch-move-state",
+      cwd: tmp,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { patch: "*** Begin Patch\n*** Update File: safe.txt\n*** Move to: .hasna/projects/projects.db\n*** End Patch\n" },
+      tool_use_id: "tool-apply-patch-move-state",
+      transcript_path: null,
+      turn_id: "turn-apply-patch-move-state",
     }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: join(tmp, "worktrees") } });
 
     expect(result.exitCode).toBe(0);
