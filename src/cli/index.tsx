@@ -32,6 +32,7 @@ import {
   hookExists,
   getHookPath,
   getSettingsPath,
+  type ConcreteTarget,
   type Scope,
   type Target,
 } from "../lib/installer.js";
@@ -56,6 +57,27 @@ function resolveTarget(options: { target?: string }): Target {
   if (options.target === "codewith") return "codewith";
   if (options.target === "all") return "all";
   return "claude";
+}
+
+function resolveConcreteTarget(options: { target?: string }): ConcreteTarget {
+  if (options.target === "gemini") return "gemini";
+  if (options.target === "codewith") return "codewith";
+  return "claude";
+}
+
+function formatSettingsPath(scope: Scope, target: Target): string {
+  if (target === "all") return "target-specific settings";
+  const actual = getSettingsPath(scope, target);
+  if (scope === "project") {
+    if (target === "codewith") return ".codewith/config.toml";
+    if (target === "gemini") return ".gemini/settings.json";
+    return ".claude/settings.json";
+  }
+  if (target === "codewith") {
+    return process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH ? "$HASNA_HOOKS_CODEWITH_CONFIG_PATH" : "~/.codewith/config.toml";
+  }
+  if (target === "gemini") return "~/.gemini/settings.json";
+  return actual === getSettingsPath("global", "claude") ? "~/.claude/settings.json" : actual;
 }
 
 /** Levenshtein distance for did-you-mean suggestions */

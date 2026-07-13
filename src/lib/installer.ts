@@ -14,8 +14,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
-import { getHook } from "./registry.js";
-import type { HookEvent } from "./registry.js";
+import { getHook, getHookEvents, type HookEvent } from "./registry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOOKS_DIR = existsSync(join(__dirname, "..", "..", "hooks", "hook-gitguard"))
@@ -26,6 +25,7 @@ export type Scope = "global" | "project";
 export type Target = "claude" | "gemini" | "codewith" | "all";
 type WritableJsonTarget = "claude" | "gemini";
 type SingleTarget = Exclude<Target, "all">;
+export type ConcreteTarget = SingleTarget;
 export type CodewithInstallMode = "fragment" | "write";
 
 function normalizeHookName(name: string): string {
@@ -61,6 +61,7 @@ const EVENT_MAP: Record<SingleTarget, Record<HookEvent, string | null>> = {
     SessionStart: "SessionStart",
     SessionEnd: "SessionEnd",
     UserPromptSubmit: null,
+    SubagentStart: null,
   },
   gemini: {
     PreToolUse: "BeforeTool",
@@ -70,6 +71,7 @@ const EVENT_MAP: Record<SingleTarget, Record<HookEvent, string | null>> = {
     SessionStart: null,
     SessionEnd: null,
     UserPromptSubmit: null,
+    SubagentStart: null,
   },
   codewith: {
     PreToolUse: "PreToolUse",
@@ -79,6 +81,7 @@ const EVENT_MAP: Record<SingleTarget, Record<HookEvent, string | null>> = {
     SessionStart: "SessionStart",
     SessionEnd: null,
     UserPromptSubmit: "UserPromptSubmit",
+    SubagentStart: "SubagentStart",
   },
 };
 
@@ -183,6 +186,8 @@ function codewithMatcher(matcher: string): string | undefined {
 
 function codewithTimeout(name: string): number {
   switch (name) {
+    case "knowledge-context":
+      return 2;
     case "session-start":
       return 8;
     case "pre-bash":
@@ -199,6 +204,8 @@ function codewithTimeout(name: string): number {
 
 function codewithStatusMessage(name: string): string {
   switch (name) {
+    case "knowledge-context":
+      return "Loading Knowledge context";
     case "session-start":
       return "Checking Hasna session context";
     case "pre-bash":
@@ -218,26 +225,33 @@ export function buildCodewithTomlFragment(name: string, profile?: string): strin
   const shortName = shortHookName(name);
   const meta = getHook(shortName);
   if (!meta) throw new Error(`Hook '${shortName}' not found`);
-  const eventKey = getTargetEventName(meta.event, "codewith");
-  if (!eventKey) {
-    throw new Error(`Hook '${shortName}' uses event '${meta.event}', which is not supported by the Codewith target`);
-  }
 
   const command = profile ? `hooks run ${shortName} --profile ${profile}` : `hooks run ${shortName}`;
   const matcher = codewithMatcher(meta.matcher);
-  const lines: string[] = [
-    `[[hooks.${eventKey}]]`,
-  ];
-  if (matcher) lines.push(`matcher = ${tomlString(matcher)}`);
-  lines.push(
-    "",
-    `[[hooks.${eventKey}.hooks]]`,
-    `type = "command"`,
-    `command = ${tomlString(command)}`,
-    `timeout = ${codewithTimeout(shortName)}`,
-    `statusMessage = ${tomlString(codewithStatusMessage(shortName))}`,
-  );
-  return `${lines.join("\n")}\n`;
+  const fragments: string[] = [];
+
+  for (const event of getHookEvents(meta)) {
+    const eventKey = getTargetEventName(event, "codewith");
+    if (!eventKey) {
+      throw new Error(`Hook '${shortName}' uses event '${event}', which is not supported by the Codewith target`);
+    }
+
+    const lines: string[] = [
+      `[[hooks.${eventKey}]]`,
+    ];
+    if (matcher) lines.push(`matcher = ${tomlString(matcher)}`);
+    lines.push(
+      "",
+      `[[hooks.${eventKey}.hooks]]`,
+      `type = "command"`,
+      `command = ${tomlString(command)}`,
+      `timeout = ${codewithTimeout(shortName)}`,
+      `statusMessage = ${tomlString(codewithStatusMessage(shortName))}`,
+    );
+    fragments.push(lines.join("\n"));
+  }
+
+  return `${fragments.join("\n\n")}\n`;
 }
 
 function readCodewithConfig(scope: Scope, configPath?: string): string {
@@ -263,12 +277,14 @@ function appendCodewithFragment(fragment: string, scope: Scope, configPath?: str
 function detectConflict(name: string, scope: Scope, target: SingleTarget): string | undefined {
   const meta = getHook(name);
   if (!meta || !meta.matcher) return undefined; // hooks with no matcher can't conflict
+  const events = new Set(getHookEvents(meta));
 
   const registered = getRegisteredHooksForTarget(scope, target);
   for (const existingName of registered) {
     if (existingName === name) continue;
     const existing = getHook(existingName);
-    if (!existing || existing.event !== meta.event || !existing.matcher) continue;
+    if (!existing || !existing.matcher) continue;
+    if (!getHookEvents(existing).some((event) => events.has(event))) continue;
     // Check if matchers overlap (either is a substring/prefix of the other, or identical)
     const a = meta.matcher.toLowerCase();
     const b = existing.matcher.toLowerCase();
@@ -375,13 +391,13 @@ export function installHook(name: string, options: InstallOptions = {}): Install
     const meta = getHook(shortName);
     if (meta) {
       const unsupportedTargets = (["claude", "codewith"] as const).filter(
-        (agentTarget) => !isEventSupported(meta.event, agentTarget)
+        (agentTarget) => getHookEvents(meta).some((event) => !isEventSupported(event, agentTarget))
       );
       if (unsupportedTargets.length > 0) {
         return {
           hook: shortName,
           success: false,
-          error: `Event '${meta.event}' is not supported by target(s): ${unsupportedTargets.join(", ")}`,
+          error: `Event(s) '${getHookEvents(meta).join(", ")}' are not supported by target(s): ${unsupportedTargets.join(", ")}`,
           target: "all",
         };
       }
@@ -413,9 +429,16 @@ function registerHook(name: string, scope: Scope = "global", target: WritableJso
   const meta = getHook(name);
   if (!meta) return;
 
-  const eventKey = getTargetEventName(meta.event, target);
-  if (eventKey === null) {
-    throw new Error(`Event '${meta.event}' is not supported by target '${target}'`);
+  const eventKeys = getHookEvents(meta).map((event) => {
+    const eventKey = getTargetEventName(event, target);
+    if (eventKey === null) {
+      throw new Error(`Event '${event}' is not supported by target '${target}'`);
+    }
+    return eventKey;
+  });
+  const uniqueEventKeys = [...new Set(eventKeys)];
+  if (uniqueEventKeys.length === 0) {
+    throw new Error(`Hook '${name}' has no installable events for target '${target}'`);
   }
 
   const settings = readSettings(scope, target);
@@ -426,20 +449,21 @@ function registerHook(name: string, scope: Scope = "global", target: WritableJso
   // (e.g. announce-start moved from Notification to SessionStart).
   removeHookFromAllEvents(settings, name);
 
-  if (!settings.hooks[eventKey]) settings.hooks[eventKey] = [];
-
   const hookCommand = profile
     ? `hooks run ${name} --profile ${profile}`
     : `hooks run ${name}`;
 
-  const entry: Record<string, any> = {
-    hooks: [{ type: "command", command: hookCommand }],
-  };
-  if (meta.matcher) {
-    entry.matcher = meta.matcher;
-  }
+  for (const eventKey of uniqueEventKeys) {
+    if (!settings.hooks[eventKey]) settings.hooks[eventKey] = [];
 
-  settings.hooks[eventKey].push(entry);
+    const entry: Record<string, any> = {
+      hooks: [{ type: "command", command: hookCommand }],
+    };
+    if (meta.matcher) {
+      entry.matcher = meta.matcher;
+    }
+    settings.hooks[eventKey].push(entry);
+  }
   writeSettings(settings, scope, target);
 }
 

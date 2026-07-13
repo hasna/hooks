@@ -13,6 +13,7 @@ export {
   HOOK_EVENTS,
   CATEGORIES,
   getHook,
+  getHookEvents,
   getHooksByCategory,
   searchHooks,
   type HookMeta,
@@ -36,6 +37,7 @@ export {
   type InstallResult,
   type InstallOptions,
   type Scope,
+  type ConcreteTarget,
   type Target,
   type CodewithInstallMode,
 } from "./lib/installer.js";
@@ -67,7 +69,7 @@ export interface HookOutput {
   reason?: string;
   continue?: boolean;
   hookSpecificOutput?: {
-    hookEventName: "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "Stop" | "Notification" | "SessionEnd";
+    hookEventName: "SessionStart" | "UserPromptSubmit" | "SubagentStart" | "PreToolUse" | "PostToolUse" | "Stop" | "Notification" | "SessionEnd";
     additionalContext?: string;
     permissionDecision?: "allow" | "deny" | "ask";
     permissionDecisionReason?: string;

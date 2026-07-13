@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-07-09
+
+### Added
+
+- `knowledge-context` hook package (`@hasna/hook-knowledge-context`) for Codewith `SessionStart`, `UserPromptSubmit`, and `SubagentStart` context injection using deterministic `knowledge context pack --from search` reads
+- Codewith installer target support via `--target codewith`, emitting renderer-safe TOML fragments by default and writing Codewith config only with an explicit `--apply-codewith --codewith-config <path>`
+- Multi-event registry metadata so one hook can register across multiple lifecycle events
+
+### Changed
+
+- Extended hook event typing with Codewith `UserPromptSubmit` and `SubagentStart` lifecycle events while preserving existing Claude/Gemini target behavior
+
 ## [0.3.0] - 2026-07-06
 
 ### Added
@@ -45,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 15 initial hook packages
 - Initial project setup
 
+[0.3.1]: https://github.com/hasna/hooks/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/hasna/hooks/compare/v0.1.1...v0.3.0
 [0.1.1]: https://github.com/hasna/hooks/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/hasna/hooks/releases/tag/v0.1.0

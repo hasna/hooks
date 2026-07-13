@@ -133,7 +133,7 @@ describe("MCP server", () => {
       expect(data["Code Quality"]).toHaveLength(9);
       expect(data["Security"]).toHaveLength(3);
       expect(data["Notifications"]).toHaveLength(5);
-      expect(data["Context Management"]).toHaveLength(2);
+      expect(data["Context Management"]).toHaveLength(3);
     });
 
     test("hooks_list with category filter", async () => {
@@ -281,10 +281,10 @@ describe("MCP server", () => {
 
     test("hooks_install_all installs default-compatible hooks", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_install_all", arguments: {} }));
-      expect(data.total).toBe(47);
+      expect(data.total).toBe(48);
       expect(data.success).toBe(46);
       expect(data.installed).toHaveLength(46);
-      expect(data.failed.map((f: any) => f.hook)).toEqual(["prompt-guard"]);
+      expect(data.failed.map((f: any) => f.hook)).toEqual(["knowledge-context", "prompt-guard"]);
     });
 
     // --- hooks_remove ---
@@ -433,6 +433,7 @@ describe("MCP server", () => {
       const data = parseResult(await client.callTool({ name: "hooks_install_category", arguments: { category: "Context Management" } }));
       expect(data.installed).toContain("contextrefresh");
       expect(data.installed).toContain("precompact");
+      expect(data.failed.map((f: any) => f.hook)).toEqual(["knowledge-context"]);
     });
 
     // --- overwrite flows ---
@@ -558,7 +559,7 @@ describe("MCP server", () => {
 
     test("hooks_list Context Management category", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_list", arguments: { category: "Context Management" } }));
-      expect(data).toHaveLength(2);
+      expect(data).toHaveLength(3);
       expect(data[0].event).toBe("Notification");
     });
 
@@ -741,7 +742,7 @@ describe("MCP server", () => {
     test("hooks_list compact returns minimal fields", async () => {
       const data = parseResult(await client.callTool({ name: "hooks_list", arguments: { compact: true } }));
       expect(Array.isArray(data)).toBe(true);
-      expect(data.length).toBe(47);
+      expect(data.length).toBe(48);
       expect(data[0]).toHaveProperty("name");
       expect(data[0]).toHaveProperty("event");
       expect(data[0]).toHaveProperty("matcher");
