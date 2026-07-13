@@ -367,6 +367,12 @@ interface ProtectedPathRule {
   mode: "tree" | "root";
 }
 
+interface ProtectedPathContext {
+  rules: ProtectedPathRule[];
+  workspaceRoots: string[];
+  currentManagedRepoRoot: string | null;
+}
+
 function splitPathList(value: unknown): string[] {
   if (typeof value === "string") return value.split(":").map((v) => v.trim()).filter(Boolean);
   if (!Array.isArray(value)) return [];
@@ -418,13 +424,14 @@ function hasnaDivisionRuleFor(target: string, workspaceRoot: string): ProtectedP
   return null;
 }
 
-async function protectedRulesFor(input: CodewithHookInput, cwd: string): Promise<ProtectedPathRule[]> {
+async function protectedPathContextFor(input: CodewithHookInput, cwd: string): Promise<ProtectedPathContext> {
   const home = process.env.HOME || homedir();
   const rules: ProtectedPathRule[] = [
     { root: join(home, ".hasna"), label: "Hasna state root ~/.hasna", mode: "tree" },
   ];
+  const workspaceRoots = workspaceRootsFor(input, cwd);
 
-  for (const root of workspaceRootsFor(input, cwd)) {
+  for (const root of workspaceRoots) {
     rules.push({ root, label: "workspace root", mode: "root" });
   }
 
@@ -435,7 +442,17 @@ async function protectedRulesFor(input: CodewithHookInput, cwd: string): Promise
     rules.push({ root, label: "active repository or worktree root", mode: "root" });
   }
 
-  return [...new Map(rules.map((rule) => [resolve(rule.root), { ...rule, root: resolve(rule.root) }])).values()];
+  const worktreesRoot = resolve(defaultWorktreesRoot());
+  const isCurrentManagedRepo = repoRoot !== null
+    && isInsidePath(cwd, worktreesRoot)
+    && isInsidePath(repoRoot, worktreesRoot);
+  const currentManagedRepoRoot = isCurrentManagedRepo ? resolve(repoRoot) : null;
+
+  return {
+    rules: [...new Map(rules.map((rule) => [resolve(rule.root), { ...rule, root: resolve(rule.root) }])).values()],
+    workspaceRoots,
+    currentManagedRepoRoot,
+  };
 }
 
 function threatensProtectedPath(targetPath: string, rule: ProtectedPathRule): boolean {
@@ -461,37 +478,22 @@ function broadContentWipeBase(targetPath: string): string | null {
   return dirname(target);
 }
 
-function managedLeaseRootForPath(path: string): string | null {
-  const root = defaultWorktreesRoot();
-  if (!isInsidePath(path, root)) return null;
-  const rel = relative(resolve(root), resolve(path));
-  const parts = rel.split(sep).filter(Boolean);
-  if (parts.length < 3) return null;
-  const [machine, repoSlugHash, lease] = parts;
-  if (!machine || !repoSlugHash || !lease) return null;
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,80}$/.test(machine)) return null;
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*-[0-9a-fA-F]{7,16}$/.test(repoSlugHash)) return null;
-  if (!/^wt_[0-9a-fA-F]{16,64}$/.test(lease)) return null;
-  return resolve(root, machine, repoSlugHash, lease);
-}
-
-function shouldSkipHasnaTreeRule(targetPath: string, rule: ProtectedPathRule): boolean {
+function shouldSkipHasnaTreeRule(targetPath: string, rule: ProtectedPathRule, currentManagedRepoRoot: string | null): boolean {
   if (rule.label !== "Hasna state root ~/.hasna") return false;
-  const leaseRoot = managedLeaseRootForPath(targetPath);
-  if (!leaseRoot) return false;
+  if (!currentManagedRepoRoot) return false;
   const target = resolve(targetPath);
-  return target !== leaseRoot && isInsidePath(target, leaseRoot);
+  return isInsidePath(target, currentManagedRepoRoot);
 }
 
-function threatensRule(targetPath: string, rule: ProtectedPathRule): boolean {
-  if (shouldSkipHasnaTreeRule(targetPath, rule)) return false;
+function threatensRule(targetPath: string, rule: ProtectedPathRule, currentManagedRepoRoot: string | null): boolean {
+  if (shouldSkipHasnaTreeRule(targetPath, rule, currentManagedRepoRoot)) return false;
   const contentBase = broadContentWipeBase(targetPath);
   if (contentBase && mutatesProtectedPath(contentBase, rule)) return true;
   return threatensProtectedPath(targetPath, rule);
 }
 
-function mutatesRule(targetPath: string, rule: ProtectedPathRule): boolean {
-  if (shouldSkipHasnaTreeRule(targetPath, rule)) return false;
+function mutatesRule(targetPath: string, rule: ProtectedPathRule, currentManagedRepoRoot: string | null): boolean {
+  if (shouldSkipHasnaTreeRule(targetPath, rule, currentManagedRepoRoot)) return false;
   return mutatesProtectedPath(targetPath, rule);
 }
 
@@ -825,8 +827,7 @@ function scopedBlockReason(operation: string, targetPath: string, rule: Protecte
 export async function classifyDangerousOperation(input: CodewithHookInput): Promise<DangerousOperationMatch> {
   if (input.hook_event_name !== "PreToolUse") return { block: false };
   const cwd = input.cwd || process.cwd();
-  const rules = await protectedRulesFor(input, cwd);
-  const workspaceRoots = workspaceRootsFor(input, cwd);
+  const { rules, workspaceRoots, currentManagedRepoRoot } = await protectedPathContextFor(input, cwd);
 
   if (input.tool_name === "Bash") {
     for (const target of destructiveShellTargets(getCommand(input), cwd)) {
@@ -834,7 +835,7 @@ export async function classifyDangerousOperation(input: CodewithHookInput): Prom
       const extraRule = workspaceRoots.map((root) => hasnaDivisionRuleFor(targetPath, root)).find((rule): rule is ProtectedPathRule => Boolean(rule));
       const allRules = extraRule ? [...rules, extraRule] : rules;
       for (const rule of allRules) {
-        if (threatensRule(targetPath, rule)) {
+        if (threatensRule(targetPath, rule, currentManagedRepoRoot)) {
           return {
             block: true,
             targetPath,
@@ -853,7 +854,7 @@ export async function classifyDangerousOperation(input: CodewithHookInput): Prom
     const extraRule = workspaceRoots.map((root) => hasnaDivisionRuleFor(targetPath, root)).find((rule): rule is ProtectedPathRule => Boolean(rule));
     const allRules = extraRule ? [...rules, extraRule] : rules;
     for (const rule of allRules) {
-      if (mutatesRule(targetPath, rule)) {
+      if (mutatesRule(targetPath, rule, currentManagedRepoRoot)) {
         return {
           block: true,
           targetPath,
