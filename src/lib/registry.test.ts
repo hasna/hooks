@@ -230,6 +230,13 @@ describe("registry", () => {
       expect(checktasks).toBeDefined();
       expect(checktasks!.version).toBe("1.0.8");
 
+      const worktreeGuard = getHook("worktree-guard");
+      expect(worktreeGuard).toBeDefined();
+      expect(worktreeGuard!.matcher).toContain("apply_patch");
+      expect(worktreeGuard!.matcher).toContain("ApplyPatch");
+      expect(worktreeGuard!.matcher).toContain("functions\\.apply_patch");
+      expect(worktreeGuard!.matcher).toContain("mcp__.*");
+
       const phonenotify = getHook("phonenotify");
       expect(phonenotify).toBeDefined();
       expect(phonenotify!.event).toBe("Stop");

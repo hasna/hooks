@@ -574,6 +574,27 @@ describe("Codewith-native hooks", () => {
     expect(result.json.reason).toContain("apply_patch file mutation");
   });
 
+  test("worktree-guard blocks Codewith apply patch tool aliases against ~/.hasna", async () => {
+    for (const toolName of ["ApplyPatch", "functions.apply_patch"]) {
+      const result = await runHook("worktree-guard", {
+        hook_event_name: "PreToolUse",
+        session_id: `sess-${toolName}`,
+        cwd: tmp,
+        model: "gpt-test",
+        permission_mode: "default",
+        tool_name: toolName,
+        tool_input: { patch: "*** Begin Patch\n*** Delete File: .hasna/projects/projects.db\n*** End Patch\n" },
+        tool_use_id: `tool-${toolName}`,
+        transcript_path: null,
+        turn_id: `turn-${toolName}`,
+      }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: join(tmp, "worktrees") } });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.json.decision).toBe("block");
+      expect(result.json.reason).toContain("apply_patch file mutation");
+    }
+  });
+
   test("worktree-guard blocks apply_patch moves into ~/.hasna", async () => {
     const result = await runHook("worktree-guard", {
       hook_event_name: "PreToolUse",

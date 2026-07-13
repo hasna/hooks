@@ -770,6 +770,10 @@ function destructiveShellTargets(command: string, cwd: string): DestructiveShell
   ];
 }
 
+function isApplyPatchTool(toolName: string): boolean {
+  return toolName === "apply_patch" || toolName === "ApplyPatch" || toolName === "functions.apply_patch";
+}
+
 function extractFileToolPaths(input: CodewithHookInput): Array<{ path: string; operation: string }> {
   if (input.hook_event_name !== "PreToolUse") return [];
   const toolName = typeof input.tool_name === "string" ? input.tool_name : "";
@@ -787,12 +791,12 @@ function extractFileToolPaths(input: CodewithHookInput): Array<{ path: string; o
 
   if (["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(toolName)) {
     addPathFields(toolInput, `${toolName} file mutation`);
-  } else if (/^(?:apply_patch|mcp__.*|.*(?:write|edit|delete|remove|move).*file.*)$/i.test(toolName)) {
+  } else if (/^(?:apply_patch|ApplyPatch|functions\.apply_patch|mcp__.*|.*(?:write|edit|delete|remove|move).*file.*)$/i.test(toolName)) {
     addPathFields(toolInput, `${toolName} file mutation`);
   }
 
   const patch = toolInput.patch ?? toolInput.input ?? toolInput.content;
-  if ((toolName === "apply_patch" || toolName === "ApplyPatch") && typeof patch === "string") {
+  if (isApplyPatchTool(toolName) && typeof patch === "string") {
     for (const line of patch.split(/\r?\n/)) {
       const match = line.match(/^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$/);
       if (match?.[1]) paths.push({ path: match[1].trim(), operation: "apply_patch file mutation" });

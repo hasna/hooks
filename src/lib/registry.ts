@@ -89,7 +89,7 @@ export const HOOKS: HookMeta[] = [
     version: "0.1.0",
     category: "Git Safety",
     event: "PreToolUse",
-    matcher: "^(Bash|Write|Edit|MultiEdit|NotebookEdit|apply_patch|mcp__.*)$",
+    matcher: "^(Bash|Write|Edit|MultiEdit|NotebookEdit|apply_patch|ApplyPatch|functions\\.apply_patch|mcp__.*)$",
     tags: ["git", "worktree", "repos", "multi-agent", "safety", "dangerous-ops"],
   },
 

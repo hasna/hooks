@@ -663,6 +663,15 @@ describe("installer", () => {
       expect(fragment).toContain('statusMessage = "Loading Knowledge context"');
     });
 
+    test("worktree-guard Codewith matcher covers file tool aliases", () => {
+      const fragment = buildCodewithTomlFragment("worktree-guard");
+      expect(fragment).toContain("[[hooks.PreToolUse]]");
+      expect(fragment).toContain("apply_patch");
+      expect(fragment).toContain("ApplyPatch");
+      expect(fragment).toContain("functions\\\\.apply_patch");
+      expect(fragment).toContain("mcp__.*");
+    });
+
     test("installHook codewith defaults to fragment-only and does not write managed config", () => {
       const result = installHook("knowledge-context", { target: "codewith" });
       expect(result.success).toBe(true);

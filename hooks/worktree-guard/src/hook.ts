@@ -16,7 +16,7 @@ import {
   type CodewithHookInput,
 } from "../../codewith-native-common";
 
-const FEATURE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+const FEATURE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch", "ApplyPatch", "functions.apply_patch"]);
 
 function isFeatureWork(input: CodewithHookInput, command: string): boolean {
   if (typeof input.tool_name === "string" && FEATURE_TOOLS.has(input.tool_name)) return true;
