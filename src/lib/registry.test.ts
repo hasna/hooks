@@ -6,14 +6,15 @@ import {
   getHooksByCategory,
   searchHooks,
   getHook,
+  getHookEvents,
   type HookMeta,
   type Category,
 } from "./registry.js";
 
 describe("registry", () => {
   describe("HOOKS", () => {
-    test("contains 47 hooks", () => {
-      expect(HOOKS).toHaveLength(47);
+    test("contains 48 hooks", () => {
+      expect(HOOKS).toHaveLength(48);
     });
 
     test("every hook has required fields", () => {
@@ -35,9 +36,21 @@ describe("registry", () => {
     });
 
     test("every hook has a valid event type", () => {
-      const validEvents = ["PreToolUse", "PostToolUse", "Stop", "Notification", "SessionStart", "SessionEnd", "UserPromptSubmit"];
+      const validEvents = [
+        "PreToolUse",
+        "PostToolUse",
+        "Stop",
+        "Notification",
+        "SessionStart",
+        "SessionEnd",
+        "UserPromptSubmit",
+        "SubagentStart",
+      ];
       for (const hook of HOOKS) {
         expect(validEvents).toContain(hook.event);
+        for (const event of getHookEvents(hook)) {
+          expect(validEvents).toContain(event);
+        }
       }
       expect(HOOK_EVENTS).toEqual(validEvents as typeof HOOK_EVENTS);
     });
@@ -96,7 +109,8 @@ describe("registry", () => {
 
     test("returns Context Management hooks", () => {
       const hooks = getHooksByCategory("Context Management");
-      expect(hooks).toHaveLength(2);
+      expect(hooks).toHaveLength(3);
+      expect(hooks.map((h) => h.name)).toContain("knowledge-context");
     });
 
     test("returns Workflow Automation hooks", () => {
@@ -216,6 +230,13 @@ describe("registry", () => {
       expect(checktasks).toBeDefined();
       expect(checktasks!.version).toBe("1.0.8");
 
+      const worktreeGuard = getHook("worktree-guard");
+      expect(worktreeGuard).toBeDefined();
+      expect(worktreeGuard!.matcher).toContain("apply_patch");
+      expect(worktreeGuard!.matcher).toContain("ApplyPatch");
+      expect(worktreeGuard!.matcher).toContain("functions\\.apply_patch");
+      expect(worktreeGuard!.matcher).toContain("mcp__.*");
+
       const phonenotify = getHook("phonenotify");
       expect(phonenotify).toBeDefined();
       expect(phonenotify!.event).toBe("Stop");
@@ -240,6 +261,7 @@ describe("registry", () => {
       agentmessages: "0.1.0",
       contextrefresh: "0.1.0",
       precompact: "0.1.0",
+      "knowledge-context": "0.1.6",
       autoformat: "0.1.0",
       autostage: "0.1.0",
       tddguard: "0.1.0",
@@ -296,7 +318,7 @@ describe("registry", () => {
       expect(HOOKS.filter((h) => h.event === "PostToolUse")).toHaveLength(15);
       expect(HOOKS.filter((h) => h.event === "Stop")).toHaveLength(9);
       expect(HOOKS.filter((h) => h.event === "Notification")).toHaveLength(3);
-      expect(HOOKS.filter((h) => h.event === "SessionStart")).toHaveLength(4);
+      expect(HOOKS.filter((h) => h.event === "SessionStart")).toHaveLength(5);
       expect(HOOKS.filter((h) => h.event === "SessionEnd")).toHaveLength(0);
       expect(HOOKS.filter((h) => h.event === "UserPromptSubmit")).toHaveLength(1);
     });
@@ -331,6 +353,13 @@ describe("registry", () => {
       const hook = getHook("agent-rules-version-check")!;
       expect(hook.event).toBe("SessionStart");
       expect(hook.category).toBe("Agent Teams");
+    });
+
+    test("knowledge-context covers the Codewith lifecycle context events", () => {
+      const hook = getHook("knowledge-context")!;
+      expect(hook.event).toBe("SessionStart");
+      expect(getHookEvents(hook)).toEqual(["SessionStart", "UserPromptSubmit", "SubagentStart"]);
+      expect(hook.category).toBe("Context Management");
     });
 
     test("fleet-blockers-gate fires on PreToolUse with empty matcher", () => {
@@ -399,10 +428,10 @@ describe("registry", () => {
       }
     });
 
-    test("Context Management hooks are all Notification events", () => {
+    test("Context Management hooks use context injection events", () => {
       const hooks = getHooksByCategory("Context Management");
       for (const h of hooks) {
-        expect(h.event).toBe("Notification");
+        expect(["Notification", "SessionStart"]).toContain(h.event);
       }
     });
   });

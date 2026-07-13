@@ -38,9 +38,9 @@ import {
 } from "./index.js";
 
 describe("library exports", () => {
-  test("HOOKS is an array of 47 hooks", () => {
+  test("HOOKS is an array of 48 hooks", () => {
     expect(Array.isArray(HOOKS)).toBe(true);
-    expect(HOOKS).toHaveLength(47);
+    expect(HOOKS).toHaveLength(48);
   });
 
   test("CATEGORIES is an array of 10 categories", () => {

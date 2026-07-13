@@ -19,7 +19,10 @@ function backupSettings(): void {
 function restoreSettings(): void {
   if (settingsBackup !== null) {
     writeFileSync(SETTINGS_PATH, settingsBackup);
+  } else if (existsSync(SETTINGS_PATH)) {
+    rmSync(SETTINGS_PATH);
   }
+  settingsBackup = null;
 }
 
 async function run(...args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
@@ -74,7 +77,7 @@ describe("CLI", () => {
   describe("hooks list", () => {
     test("lists all hooks", async () => {
       const { stdout } = await run("list");
-      expect(stdout).toContain("Available hooks (47)");
+      expect(stdout).toContain("Available hooks (48)");
       expect(stdout).toContain("Git Safety");
       expect(stdout).toContain("Code Quality");
       expect(stdout).toContain("Security");
@@ -88,7 +91,7 @@ describe("CLI", () => {
       expect(data["Code Quality"]).toHaveLength(9);
       expect(data["Security"]).toHaveLength(3);
       expect(data["Notifications"]).toHaveLength(5);
-      expect(data["Context Management"]).toHaveLength(2);
+      expect(data["Context Management"]).toHaveLength(3);
     });
 
     test("lists by category", async () => {
@@ -403,14 +406,14 @@ describe("CLI", () => {
   });
 
   describe("hooks install --all (JSON)", () => {
-    test("--all --json attempts all 47 hooks and reports target-incompatible prompt guard", async () => {
+    test("--all --json attempts all 48 hooks and reports target-incompatible Codewith-only hooks", async () => {
       backupSettings();
       try {
         const data = await runJson("install", "--all");
-        expect(data.total).toBe(47);
+        expect(data.total).toBe(48);
         expect(data.success).toBe(46);
         expect(data.installed).toHaveLength(46);
-        expect(data.failed.map((f: any) => f.hook)).toEqual(["prompt-guard"]);
+        expect(data.failed.map((f: any) => f.hook)).toEqual(["knowledge-context", "prompt-guard"]);
         expect(data.scope).toBe("global");
       } finally {
         restoreSettings();

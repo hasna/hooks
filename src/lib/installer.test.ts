@@ -1,12 +1,13 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "fs";
-import { join } from "path";
-import { homedir } from "os";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, mkdtempSync } from "fs";
+import { dirname, join } from "path";
+import { homedir, tmpdir } from "os";
 import {
   installHook,
   installHooks,
   getInstalledHooks,
   getRegisteredHooks,
+  getRegisteredHooksForTarget,
   removeHook,
   hookExists,
   getHookPath,
@@ -14,7 +15,7 @@ import {
   buildCodewithTomlFragment,
   isEventSupported,
 } from "./installer.js";
-import { HOOKS } from "./registry.js";
+import { HOOKS, getHookEvents } from "./registry.js";
 
 const GLOBAL_SETTINGS = join(homedir(), ".claude", "settings.json");
 
@@ -116,9 +117,9 @@ describe("installer", () => {
       expect(hookExists("nonexistent")).toBe(false);
     });
 
-    test("returns true for all 47 registered hooks", () => {
+    test("returns true for all 48 registered hooks", () => {
       const names = HOOKS.map((hook) => hook.name);
-      expect(names).toHaveLength(47);
+      expect(names).toHaveLength(48);
       for (const name of names) {
         expect(hookExists(name)).toBe(true);
       }
@@ -352,7 +353,7 @@ describe("installer", () => {
   describe("install + remove roundtrip", () => {
     test("install all Claude-compatible hooks then remove all", () => {
       const allNames = HOOKS
-        .filter((hook) => hook.event !== "UserPromptSubmit")
+        .filter((hook) => getHookEvents(hook).every((event) => isEventSupported(event, "claude")))
         .map((hook) => hook.name);
       expect(allNames).toHaveLength(46);
       const results = installHooks(allNames);
@@ -489,6 +490,23 @@ describe("installer", () => {
     test("gemini project path", () => {
       expect(getSettingsPath("project", "gemini")).toBe(join(process.cwd(), ".gemini", "settings.json"));
     });
+
+    test("codewith global path uses explicit managed config override when set", () => {
+      const previous = process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH;
+      const path = join(mkdtempSync(join(tmpdir(), "hooks-codewith-home-")), "config.toml");
+      process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH = path;
+      try {
+        expect(getSettingsPath("global", "codewith")).toBe(path);
+      } finally {
+        if (previous === undefined) delete process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH;
+        else process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH = previous;
+        rmSync(dirname(path), { recursive: true, force: true });
+      }
+    });
+
+    test("codewith project path", () => {
+      expect(getSettingsPath("project", "codewith")).toBe(join(process.cwd(), ".codewith", "config.toml"));
+    });
   });
 
   describe("installHooks edge cases", () => {
@@ -505,6 +523,7 @@ describe("installer", () => {
 
   describe("hook source files", () => {
     const HOOK_SOURCE_NAMES = HOOKS.map((hook) => hook.name);
+    const CATALOG_ONLY_HOOKS = new Set(["knowledge-context"]);
 
     test("every hook has src/hook.ts in package (except agentmessages)", () => {
       for (const name of HOOK_SOURCE_NAMES) {
@@ -514,10 +533,18 @@ describe("installer", () => {
       }
     });
 
-    test("every hook has package.json in package", () => {
+    test("standalone-packaged hooks have package.json in package", () => {
       for (const name of HOOK_SOURCE_NAMES) {
+        if (CATALOG_ONLY_HOOKS.has(name)) continue;
         const pkgJson = join(getHookPath(name), "package.json");
         expect(existsSync(pkgJson)).toBe(true);
+      }
+    });
+
+    test("catalog-only hooks do not expose standalone package manifests", () => {
+      for (const name of CATALOG_ONLY_HOOKS) {
+        const pkgJson = join(getHookPath(name), "package.json");
+        expect(existsSync(pkgJson)).toBe(false);
       }
     });
 
@@ -537,6 +564,11 @@ describe("installer", () => {
       expect(isEventSupported("SessionEnd", "gemini")).toBe(false);
       expect(isEventSupported("PreToolUse", "gemini")).toBe(true);
       expect(isEventSupported("Notification", "gemini")).toBe(true);
+      expect(isEventSupported("SessionStart", "codewith")).toBe(true);
+      expect(isEventSupported("UserPromptSubmit", "codewith")).toBe(true);
+      expect(isEventSupported("SubagentStart", "codewith")).toBe(true);
+      expect(isEventSupported("Notification", "codewith")).toBe(false);
+      expect(isEventSupported("SessionEnd", "codewith")).toBe(false);
     });
 
     test("SessionStart hook installs under the SessionStart settings key", () => {
@@ -611,6 +643,100 @@ describe("installer", () => {
     });
   });
 
+  describe("target: codewith", () => {
+    test("buildCodewithTomlFragment emits native SessionStart TOML", () => {
+      const fragment = buildCodewithTomlFragment("session-start");
+      expect(fragment).toContain("[[hooks.SessionStart]]");
+      expect(fragment).toContain("[[hooks.SessionStart.hooks]]");
+      expect(fragment).toContain('command = "hooks run session-start"');
+      expect(fragment).toContain('statusMessage = "Checking Hasna session context"');
+    });
+
+    test("knowledge-context emits all Codewith lifecycle context fragments", () => {
+      const fragment = buildCodewithTomlFragment("knowledge-context");
+      for (const eventName of ["SessionStart", "UserPromptSubmit", "SubagentStart"]) {
+        expect(fragment).toContain(`[[hooks.${eventName}]]`);
+        expect(fragment).toContain(`[[hooks.${eventName}.hooks]]`);
+      }
+      expect(fragment.match(/command = "hooks run knowledge-context"/g)).toHaveLength(3);
+      expect(fragment).toContain('timeout = 6');
+      expect(fragment).toContain('statusMessage = "Loading Knowledge context"');
+    });
+
+    test("worktree-guard Codewith matcher covers file tool aliases", () => {
+      const fragment = buildCodewithTomlFragment("worktree-guard");
+      expect(fragment).toContain("[[hooks.PreToolUse]]");
+      expect(fragment).toContain("apply_patch");
+      expect(fragment).toContain("ApplyPatch");
+      expect(fragment).toContain("functions\\\\.apply_patch");
+      expect(fragment).toContain("mcp__.*");
+    });
+
+    test("installHook codewith defaults to fragment-only and does not write managed config", () => {
+      const result = installHook("knowledge-context", { target: "codewith" });
+      expect(result.success).toBe(true);
+      expect(result.applied).toBe(false);
+      expect(result.fragment).toContain("[[hooks.SessionStart]]");
+      expect(result.fragment).toContain("[[hooks.UserPromptSubmit]]");
+      expect(result.fragment).toContain("[[hooks.SubagentStart]]");
+      expect(result.note).toContain("open-configs");
+    });
+
+    test("installHook codewith write refuses missing explicit config path", () => {
+      const tmp = join(process.cwd(), `.codewith-env-should-not-write-${Date.now()}.toml`);
+      const previous = process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH;
+      process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH = tmp;
+      try {
+        const result = installHook("knowledge-context", {
+          target: "codewith",
+          codewithMode: "write",
+        });
+        expect(result.success).toBe(false);
+        expect(result.applied).toBe(false);
+        expect(result.error).toContain("--codewith-config");
+        expect(existsSync(tmp)).toBe(false);
+      } finally {
+        if (previous === undefined) delete process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH;
+        else process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH = previous;
+        try { rmSync(tmp, { force: true }); } catch {}
+      }
+    });
+
+    test("installHook codewith explicit write uses override path", () => {
+      const tmp = join(process.cwd(), `.codewith-test-${Date.now()}.toml`);
+      try {
+        const result = installHook("knowledge-context", {
+          target: "codewith",
+          codewithMode: "write",
+          codewithConfigPath: tmp,
+        });
+        expect(result.success).toBe(true);
+        expect(result.applied).toBe(true);
+        expect(result.configPath).toBe(tmp);
+        const written = readFileSync(tmp, "utf-8");
+        expect(written).toContain("[[hooks.SessionStart]]");
+        expect(written).toContain("[[hooks.UserPromptSubmit]]");
+        expect(written).toContain("[[hooks.SubagentStart]]");
+        expect(written.match(/command = "hooks run knowledge-context"/g)).toHaveLength(3);
+      } finally {
+        try { rmSync(tmp, { force: true }); } catch {}
+      }
+    });
+
+    test("unsupported Notification hook fails for Codewith target", () => {
+      const result = installHook("contextrefresh", { target: "codewith" });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("not supported");
+    });
+
+    test("default Claude target rejects Codewith-only multi-event hook clearly", () => {
+      const result = installHook("knowledge-context", { overwrite: true });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("UserPromptSubmit");
+      expect(result.error).toContain("target 'claude'");
+    });
+  });
+
   describe("target: all", () => {
     test("installHook with target all returns target all", () => {
       const result = installHook("gitguard", { target: "all" });
@@ -618,19 +744,20 @@ describe("installer", () => {
       expect(result.target).toBe("all");
     });
 
-    test("installHook with target all rejects hooks unsupported by any target", () => {
-      const result = installHook("fleet-catchup", { target: "all", overwrite: true });
+    test("installHook with target all excludes obsolete Gemini and rejects hooks unsupported by active targets", () => {
+      const result = installHook("contextrefresh", { target: "all", overwrite: true });
       expect(result.success).toBe(false);
       expect(result.target).toBe("all");
-      expect(result.error).toContain("SessionStart");
-      expect(result.error).toContain("gemini");
+      expect(result.error).toContain("Notification");
+      expect(result.error).toContain("codewith");
+      expect(result.error).not.toContain("gemini");
 
       const claudeSettings = existsSync(GLOBAL_SETTINGS)
         ? JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"))
         : {};
       const claudeInstalled = Object.values(claudeSettings.hooks ?? {}).some((entries: any) =>
         entries.some((entry: any) =>
-          entry.hooks?.some((h: any) => h.command === "hooks run fleet-catchup")
+          entry.hooks?.some((h: any) => h.command === "hooks run contextrefresh")
         )
       );
       expect(claudeInstalled).toBe(false);

@@ -9,7 +9,8 @@ export type HookEvent =
   | "Notification"
   | "SessionStart"
   | "SessionEnd"
-  | "UserPromptSubmit";
+  | "UserPromptSubmit"
+  | "SubagentStart";
 
 export const HOOK_EVENTS: HookEvent[] = [
   "PreToolUse",
@@ -19,6 +20,7 @@ export const HOOK_EVENTS: HookEvent[] = [
   "SessionStart",
   "SessionEnd",
   "UserPromptSubmit",
+  "SubagentStart",
 ];
 
 export interface HookMeta {
@@ -28,6 +30,7 @@ export interface HookMeta {
   version: string;
   category: string;
   event: HookEvent;
+  events?: HookEvent[];
   matcher: string;
   tags: string[];
 }
@@ -82,12 +85,12 @@ export const HOOKS: HookMeta[] = [
   {
     name: "worktree-guard",
     displayName: "Worktree Guard",
-    description: "Warns on feature work outside managed repos worktrees and blocks commit/push from shared checkouts",
+    description: "Warns on feature work outside managed repos worktrees and blocks scoped destructive operations",
     version: "0.1.0",
     category: "Git Safety",
     event: "PreToolUse",
-    matcher: "Bash|Write|Edit|MultiEdit|NotebookEdit",
-    tags: ["git", "worktree", "repos", "multi-agent", "safety"],
+    matcher: "^(Bash|Write|Edit|MultiEdit|NotebookEdit|apply_patch|ApplyPatch|functions\\.apply_patch|mcp__.*)$",
+    tags: ["git", "worktree", "repos", "multi-agent", "safety", "dangerous-ops"],
   },
 
   // Code Quality
@@ -226,6 +229,18 @@ export const HOOKS: HookMeta[] = [
     event: "Notification",
     matcher: "",
     tags: ["context", "compaction", "state", "backup"],
+  },
+  {
+    name: "knowledge-context",
+    displayName: "Knowledge Context",
+    description:
+      "Injects deterministic Knowledge context packs into Codewith SessionStart, UserPromptSubmit, and SubagentStart",
+    version: "0.1.6",
+    category: "Context Management",
+    event: "SessionStart",
+    events: ["SessionStart", "UserPromptSubmit", "SubagentStart"],
+    matcher: "",
+    tags: ["knowledge", "context", "codewith", "deterministic", "session-start", "prompt", "subagent"],
   },
 
   // Workflow Automation
@@ -558,6 +573,10 @@ export const HOOKS: HookMeta[] = [
 
 export function getHooksByCategory(category: Category): HookMeta[] {
   return HOOKS.filter((h) => h.category === category);
+}
+
+export function getHookEvents(hook: HookMeta): HookEvent[] {
+  return hook.events && hook.events.length > 0 ? hook.events : [hook.event];
 }
 
 export function searchHooks(query: string): HookMeta[] {

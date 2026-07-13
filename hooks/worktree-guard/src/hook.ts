@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import {
+  classifyDangerousOperation,
   claimCommand,
   gitCommandInfo,
   gitRemoteSlug,
@@ -15,7 +16,7 @@ import {
   type CodewithHookInput,
 } from "../../codewith-native-common";
 
-const FEATURE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
+const FEATURE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit", "apply_patch", "ApplyPatch", "functions.apply_patch"]);
 
 function isFeatureWork(input: CodewithHookInput, command: string): boolean {
   if (typeof input.tool_name === "string" && FEATURE_TOOLS.has(input.tool_name)) return true;
@@ -26,6 +27,11 @@ function isFeatureWork(input: CodewithHookInput, command: string): boolean {
 export async function evaluate(input: CodewithHookInput): Promise<{ output: Record<string, unknown>; warnings: string[] }> {
   const warnings: string[] = [];
   if (input.hook_event_name !== "PreToolUse") return { output: { continue: true }, warnings };
+
+  const dangerous = await classifyDangerousOperation(input);
+  if (dangerous.block) {
+    return { output: { decision: "block", reason: dangerous.reason }, warnings };
+  }
 
   const cwd = input.cwd || process.cwd();
   const command = getCommand(input);

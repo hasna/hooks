@@ -29,3 +29,6 @@ tsconfig.json
 # Test files
 *.test.ts
 *.test.tsx
+
+# Hook-local build output is not needed by the root @hasna/hooks package.
+hooks/*/dist/
