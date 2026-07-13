@@ -229,6 +229,26 @@ describe("Codewith-native hooks", () => {
     expect(result.json.reason).toContain("Hasna state root ~/.hasna");
   });
 
+  test("pre-bash blocks recursive rm without force against protected roots", async () => {
+    const result = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-rm-r-state",
+      cwd: tmp,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "rm -r ~/.hasna/hooks/state" },
+      tool_use_id: "tool-rm-r-state",
+      transcript_path: null,
+      turn_id: "turn-rm-r-state",
+    }, { env: { HOME: tmp, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("rm -r");
+    expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+  });
+
   test("pre-bash blocks Hasna division and top-level scope roots but allows nested cleanup", async () => {
     const workspace = join(tmp, "workspace");
     const scopeRoot = join(workspace, "hasna", "opensource");
@@ -269,6 +289,98 @@ describe("Codewith-native hooks", () => {
     expect(allowed.json.decision).toBeUndefined();
   });
 
+  test("pre-bash blocks rsync delete against protected roots but allows managed worktree child cleanup", async () => {
+    const worktreeRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const managed = join(worktreeRoot, "station01", "open-hooks-a55c105a", "wt_2ab04216a30ef5ece642792e");
+
+    const blocked = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-rsync-state",
+      cwd: tmp,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "rsync -a --delete empty/ ~/.hasna/hooks/state/" },
+      tool_use_id: "tool-rsync-state",
+      transcript_path: null,
+      turn_id: "turn-rsync-state",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreeRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    const allowed = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-rsync-managed",
+      cwd: tmp,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: `rsync -a --delete empty/ ${join(managed, "dist")}/` },
+      tool_use_id: "tool-rsync-managed",
+      transcript_path: null,
+      turn_id: "turn-rsync-managed",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreeRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(blocked.exitCode).toBe(0);
+    expect(blocked.json.decision).toBe("block");
+    expect(blocked.json.reason).toContain("rsync --delete");
+    expect(allowed.exitCode).toBe(0);
+    expect(allowed.json.continue).toBe(true);
+    expect(allowed.json.decision).toBeUndefined();
+  });
+
+  test("pre-bash blocks destructive find against protected roots but allows managed worktree child cleanup", async () => {
+    const worktreeRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const managed = join(worktreeRoot, "station01", "open-hooks-a55c105a", "wt_2ab04216a30ef5ece642792e");
+
+    const deleteBlocked = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-find-delete-state",
+      cwd: tmp,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "find ~/.hasna/hooks/state -delete" },
+      tool_use_id: "tool-find-delete-state",
+      transcript_path: null,
+      turn_id: "turn-find-delete-state",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreeRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    const execBlocked = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-find-exec-state",
+      cwd: tmp,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "find ~/.hasna/hooks/state -exec rm -rf {} \\;" },
+      tool_use_id: "tool-find-exec-state",
+      transcript_path: null,
+      turn_id: "turn-find-exec-state",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreeRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    const allowed = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-find-managed",
+      cwd: tmp,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: `find ${join(managed, "dist")} -delete` },
+      tool_use_id: "tool-find-managed",
+      transcript_path: null,
+      turn_id: "turn-find-managed",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreeRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(deleteBlocked.exitCode).toBe(0);
+    expect(deleteBlocked.json.decision).toBe("block");
+    expect(deleteBlocked.json.reason).toContain("find -delete");
+    expect(execBlocked.exitCode).toBe(0);
+    expect(execBlocked.json.decision).toBe("block");
+    expect(execBlocked.json.reason).toContain("find -exec rm");
+    expect(allowed.exitCode).toBe(0);
+    expect(allowed.json.continue).toBe(true);
+    expect(allowed.json.decision).toBeUndefined();
+  });
+
   test("pre-bash blocks deleting the active repo root but allows child cleanup", async () => {
     const repo = join(tmp, "repo");
     mkdirSync(join(repo, "dist"), { recursive: true });
@@ -304,6 +416,62 @@ describe("Codewith-native hooks", () => {
     expect(blocked.exitCode).toBe(0);
     expect(blocked.json.decision).toBe("block");
     expect(blocked.json.reason).toContain("active repository root");
+    expect(allowed.exitCode).toBe(0);
+    expect(allowed.json.continue).toBe(true);
+    expect(allowed.json.decision).toBeUndefined();
+  });
+
+  test("pre-bash blocks destructive git cleanup at active repo root but allows pathspec cleanup", async () => {
+    const repo = join(tmp, "repo");
+    mkdirSync(join(repo, "dist"), { recursive: true });
+    const init = Bun.spawnSync(["git", "init"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+    expect(init.exitCode).toBe(0);
+
+    const cleanBlocked = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-git-clean-root",
+      cwd: repo,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "git clean -xfd" },
+      tool_use_id: "tool-git-clean-root",
+      transcript_path: null,
+      turn_id: "turn-git-clean-root",
+    }, { env: { HOME: tmp, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    const resetBlocked = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-git-reset-root",
+      cwd: repo,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "git reset --hard && git clean -xfd" },
+      tool_use_id: "tool-git-reset-root",
+      transcript_path: null,
+      turn_id: "turn-git-reset-root",
+    }, { env: { HOME: tmp, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    const allowed = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-git-clean-dist",
+      cwd: repo,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "git clean -xfd dist" },
+      tool_use_id: "tool-git-clean-dist",
+      transcript_path: null,
+      turn_id: "turn-git-clean-dist",
+    }, { env: { HOME: tmp, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(cleanBlocked.exitCode).toBe(0);
+    expect(cleanBlocked.json.decision).toBe("block");
+    expect(cleanBlocked.json.reason).toContain("git clean -xfd");
+    expect(resetBlocked.exitCode).toBe(0);
+    expect(resetBlocked.json.decision).toBe("block");
+    expect(resetBlocked.json.reason).toContain("git reset --hard");
     expect(allowed.exitCode).toBe(0);
     expect(allowed.json.continue).toBe(true);
     expect(allowed.json.decision).toBeUndefined();

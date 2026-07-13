@@ -43,9 +43,11 @@ fragment instead of mutating managed `~/.codewith/config.toml`.
 hooks install session-start prompt-guard pre-bash worktree-guard stop-sync --target codewith
 ```
 
-The scoped destructive-operation guard does not block every `rm -rf`. It blocks
-resolved shell/file-tool targets that threaten `~/.hasna`, configured workspace
-roots, Hasna division/scope roots, or active repo/worktree roots.
+The scoped destructive-operation guard does not block every cleanup command. It
+blocks resolved shell/file-tool targets that threaten `~/.hasna`, configured
+workspace roots, Hasna division/scope roots, or active repo/worktree roots,
+including recursive `rm`, `rsync --delete`, destructive `find`, and destructive
+`git clean` / `git reset --hard` forms.
 
 Apply that fragment through `open-configs` or the managed config renderer. A
 direct write path exists only for explicit local/test use:

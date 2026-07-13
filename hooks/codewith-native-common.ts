@@ -454,8 +454,45 @@ function mutatesProtectedPath(targetPath: string, rule: ProtectedPathRule): bool
   return target === root;
 }
 
-function rmCommandTargets(command: string): string[] {
-  const targets: string[] = [];
+function managedLeaseRootForPath(path: string): string | null {
+  const root = defaultWorktreesRoot();
+  if (!isInsidePath(path, root)) return null;
+  const rel = relative(resolve(root), resolve(path));
+  const parts = rel.split(sep).filter(Boolean);
+  if (parts.length < 3) return null;
+  const [machine, repoSlugHash, lease] = parts;
+  if (!machine || !repoSlugHash || !lease) return null;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,80}$/.test(machine)) return null;
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*-[0-9a-fA-F]{7,16}$/.test(repoSlugHash)) return null;
+  if (!/^wt_[0-9a-fA-F]{16,64}$/.test(lease)) return null;
+  return resolve(root, machine, repoSlugHash, lease);
+}
+
+function shouldSkipHasnaTreeRule(targetPath: string, rule: ProtectedPathRule): boolean {
+  if (rule.label !== "Hasna state root ~/.hasna") return false;
+  const leaseRoot = managedLeaseRootForPath(targetPath);
+  if (!leaseRoot) return false;
+  const target = resolve(targetPath);
+  return target !== leaseRoot && isInsidePath(target, leaseRoot);
+}
+
+function threatensRule(targetPath: string, rule: ProtectedPathRule): boolean {
+  if (shouldSkipHasnaTreeRule(targetPath, rule)) return false;
+  return threatensProtectedPath(targetPath, rule);
+}
+
+function mutatesRule(targetPath: string, rule: ProtectedPathRule): boolean {
+  if (shouldSkipHasnaTreeRule(targetPath, rule)) return false;
+  return mutatesProtectedPath(targetPath, rule);
+}
+
+interface DestructiveShellTarget {
+  path: string;
+  operation: string;
+}
+
+function rmCommandTargets(command: string): DestructiveShellTarget[] {
+  const targets: DestructiveShellTarget[] = [];
   for (const segment of splitShellSegments(command)) {
     const tokens = shellWords(segment);
     const rmIndex = tokens.findIndex((token) => token === "rm" || token.endsWith("/rm"));
@@ -485,9 +522,243 @@ function rmCommandTargets(command: string): string[] {
       segmentTargets.push(token);
     }
 
-    if (recursive && force) targets.push(...segmentTargets);
+    if (recursive) {
+      targets.push(...segmentTargets.map((path) => ({ path, operation: force ? "rm -rf" : "rm -r" })));
+    }
   }
   return targets;
+}
+
+const RSYNC_OPTIONS_WITH_VALUE = new Set([
+  "-e",
+  "--rsh",
+  "--exclude",
+  "--exclude-from",
+  "--include",
+  "--include-from",
+  "--filter",
+  "--files-from",
+  "--rsync-path",
+  "--out-format",
+  "--log-file",
+  "--password-file",
+  "--backup-dir",
+  "--partial-dir",
+  "--compare-dest",
+  "--copy-dest",
+  "--link-dest",
+]);
+
+function optionTakesValue(token: string, options: Set<string>): boolean {
+  if (options.has(token)) return true;
+  const eq = token.indexOf("=");
+  return eq === -1 ? false : options.has(token.slice(0, eq));
+}
+
+function rsyncDeleteTargets(command: string): DestructiveShellTarget[] {
+  const targets: DestructiveShellTarget[] = [];
+  for (const segment of splitShellSegments(command)) {
+    const tokens = shellWords(segment);
+    const rsyncIndex = tokens.findIndex((token) => token === "rsync" || token.endsWith("/rsync"));
+    if (rsyncIndex === -1) continue;
+
+    let hasDelete = false;
+    let afterOptions = false;
+    const operands: string[] = [];
+
+    for (let i = rsyncIndex + 1; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      if (!afterOptions && token === "--") {
+        afterOptions = true;
+        continue;
+      }
+      if (!afterOptions && (token === "--delete" || token.startsWith("--delete-"))) {
+        hasDelete = true;
+        continue;
+      }
+      if (!afterOptions && token.startsWith("-")) {
+        if (optionTakesValue(token, RSYNC_OPTIONS_WITH_VALUE) && !token.includes("=")) i += 1;
+        continue;
+      }
+      operands.push(token);
+    }
+
+    if (hasDelete && operands.length > 0) {
+      targets.push({ path: operands[operands.length - 1], operation: "rsync --delete" });
+    }
+  }
+  return targets;
+}
+
+function findDestructiveTargets(command: string): DestructiveShellTarget[] {
+  const targets: DestructiveShellTarget[] = [];
+  for (const segment of splitShellSegments(command)) {
+    const tokens = shellWords(segment);
+    const findIndex = tokens.findIndex((token) => token === "find" || token.endsWith("/find"));
+    if (findIndex === -1) continue;
+
+    let hasDelete = false;
+    let hasExecRm = false;
+    const roots: string[] = [];
+
+    for (let i = findIndex + 1; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      if (token === "-H" || token === "-L" || token === "-P") continue;
+      if (token === "-O") {
+        i += 1;
+        continue;
+      }
+      if (token.startsWith("-") || token === "!" || token === "(" || token === ")") break;
+      roots.push(token);
+    }
+
+    for (let i = findIndex + 1; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      if (token === "-delete") hasDelete = true;
+      if (token === "-exec" || token === "-execdir") {
+        const next = tokens[i + 1];
+        if (next === "rm" || next?.endsWith("/rm")) hasExecRm = true;
+      }
+    }
+
+    if (hasDelete || hasExecRm) {
+      targets.push(...(roots.length > 0 ? roots : ["."]).map((path) => ({
+        path,
+        operation: hasDelete ? "find -delete" : "find -exec rm",
+      })));
+    }
+  }
+  return targets;
+}
+
+function gitTargetCwdFromTokens(tokens: string[], baseCwd: string): { gitIndex: number; commandIndex: number; targetCwd: string } | null {
+  const gitIndex = tokens.findIndex(isGitToken);
+  if (gitIndex === -1) return null;
+
+  let i = gitIndex + 1;
+  let cwd = resolve(baseCwd);
+  let gitDir: string | undefined;
+  let workTree: string | undefined;
+
+  while (i < tokens.length) {
+    const token = tokens[i];
+
+    const cDir = shortOptionValue(token, tokens[i + 1], "-C");
+    if (cDir) {
+      if (cDir.value) cwd = resolveFrom(cwd, cDir.value);
+      i += cDir.consumed;
+      continue;
+    }
+
+    const config = shortOptionValue(token, tokens[i + 1], "-c");
+    if (config) {
+      i += config.consumed;
+      continue;
+    }
+
+    const gitDirValue = optionValue(token, tokens[i + 1], "--git-dir");
+    if (gitDirValue) {
+      if (gitDirValue.value) gitDir = resolveFrom(cwd, gitDirValue.value);
+      i += gitDirValue.consumed;
+      continue;
+    }
+
+    const workTreeValue = optionValue(token, tokens[i + 1], "--work-tree");
+    if (workTreeValue) {
+      if (workTreeValue.value) workTree = resolveFrom(cwd, workTreeValue.value);
+      i += workTreeValue.consumed;
+      continue;
+    }
+
+    const namespaceValue = optionValue(token, tokens[i + 1], "--namespace");
+    if (namespaceValue) {
+      i += namespaceValue.consumed;
+      continue;
+    }
+
+    const execPathValue = optionValue(token, tokens[i + 1], "--exec-path");
+    if (execPathValue) {
+      i += execPathValue.consumed;
+      continue;
+    }
+
+    if (token === "--config-env") {
+      i += tokens[i + 1] === undefined ? 1 : 2;
+      continue;
+    }
+
+    if (token === "--") {
+      i += 1;
+      continue;
+    }
+
+    if (token.startsWith("-")) {
+      i += 1;
+      continue;
+    }
+
+    const targetCwd = workTree || (gitDir ? (gitDir.endsWith(`${sep}.git`) || gitDir.endsWith("/.git") ? dirname(gitDir) : gitDir) : cwd);
+    return { gitIndex, commandIndex: i, targetCwd };
+  }
+
+  return null;
+}
+
+function gitDestructiveTargets(command: string, baseCwd: string): DestructiveShellTarget[] {
+  const targets: DestructiveShellTarget[] = [];
+  for (const segment of splitShellSegments(command)) {
+    const tokens = shellWords(segment);
+    const git = gitTargetCwdFromTokens(tokens, baseCwd);
+    if (!git) continue;
+
+    const commandName = tokens[git.commandIndex];
+    if (commandName === "reset" && tokens.slice(git.commandIndex + 1).includes("--hard")) {
+      targets.push({ path: git.targetCwd, operation: "git reset --hard" });
+      continue;
+    }
+
+    if (commandName !== "clean") continue;
+
+    let force = false;
+    let recursive = false;
+    const pathspecs: string[] = [];
+    for (let i = git.commandIndex + 1; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      if (token === "--") continue;
+      if (token === "-f" || token === "--force") {
+        force = true;
+        continue;
+      }
+      if (token === "-d") {
+        recursive = true;
+        continue;
+      }
+      if (/^-[A-Za-z]+$/.test(token)) {
+        if (token.includes("f")) force = true;
+        if (token.includes("d")) recursive = true;
+        continue;
+      }
+      if (token.startsWith("-")) continue;
+      pathspecs.push(token);
+    }
+
+    if (force && recursive) {
+      targets.push(...(pathspecs.length > 0 ? pathspecs : ["."]).map((path) => ({
+        path: resolveFrom(git.targetCwd, path),
+        operation: "git clean -xfd",
+      })));
+    }
+  }
+  return targets;
+}
+
+function destructiveShellTargets(command: string, cwd: string): DestructiveShellTarget[] {
+  return [
+    ...rmCommandTargets(command),
+    ...rsyncDeleteTargets(command),
+    ...findDestructiveTargets(command),
+    ...gitDestructiveTargets(command, cwd),
+  ];
 }
 
 function extractFileToolPaths(input: CodewithHookInput): Array<{ path: string; operation: string }> {
@@ -545,19 +816,19 @@ export async function classifyDangerousOperation(input: CodewithHookInput): Prom
   const workspaceRoots = workspaceRootsFor(input, cwd);
 
   if (input.tool_name === "Bash") {
-    for (const rawTarget of rmCommandTargets(getCommand(input))) {
-      const targetPath = resolveFrom(cwd, rawTarget);
+    for (const target of destructiveShellTargets(getCommand(input), cwd)) {
+      const targetPath = resolveFrom(cwd, target.path);
       const extraRule = workspaceRoots.map((root) => hasnaDivisionRuleFor(targetPath, root)).find((rule): rule is ProtectedPathRule => Boolean(rule));
       const allRules = extraRule ? [...rules, extraRule] : rules;
       for (const rule of allRules) {
-        if (threatensProtectedPath(targetPath, rule)) {
+        if (threatensRule(targetPath, rule)) {
           return {
             block: true,
             targetPath,
             protectedPath: rule.root,
             protectedLabel: rule.label,
-            operation: "rm -rf",
-            reason: scopedBlockReason("rm -rf", targetPath, rule),
+            operation: target.operation,
+            reason: scopedBlockReason(target.operation, targetPath, rule),
           };
         }
       }
@@ -569,7 +840,7 @@ export async function classifyDangerousOperation(input: CodewithHookInput): Prom
     const extraRule = workspaceRoots.map((root) => hasnaDivisionRuleFor(targetPath, root)).find((rule): rule is ProtectedPathRule => Boolean(rule));
     const allRules = extraRule ? [...rules, extraRule] : rules;
     for (const rule of allRules) {
-      if (mutatesProtectedPath(targetPath, rule)) {
+      if (mutatesRule(targetPath, rule)) {
         return {
           block: true,
           targetPath,
