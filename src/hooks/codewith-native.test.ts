@@ -29,6 +29,12 @@ async function runHook(
   return { stdout, stderr, exitCode, json };
 }
 
+function initGitRepo(path: string): void {
+  mkdirSync(path, { recursive: true });
+  const init = Bun.spawnSync(["git", "init"], { cwd: path, stdout: "pipe", stderr: "pipe" });
+  expect(init.exitCode).toBe(0);
+}
+
 describe("Codewith-native hooks", () => {
   let tmp: string;
 
@@ -292,6 +298,7 @@ describe("Codewith-native hooks", () => {
   test("pre-bash blocks rsync delete against protected roots but allows managed worktree child cleanup", async () => {
     const worktreeRoot = join(tmp, ".hasna", "repos", "worktrees");
     const managed = join(worktreeRoot, "station01", "open-hooks-a55c105a", "wt_2ab04216a30ef5ece642792e");
+    initGitRepo(managed);
 
     const blocked = await runHook("pre-bash", {
       hook_event_name: "PreToolUse",
@@ -309,7 +316,7 @@ describe("Codewith-native hooks", () => {
     const allowed = await runHook("pre-bash", {
       hook_event_name: "PreToolUse",
       session_id: "sess-rsync-managed",
-      cwd: tmp,
+      cwd: managed,
       model: "gpt-test",
       permission_mode: "default",
       tool_name: "Bash",
@@ -317,7 +324,7 @@ describe("Codewith-native hooks", () => {
       tool_use_id: "tool-rsync-managed",
       transcript_path: null,
       turn_id: "turn-rsync-managed",
-    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreeRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreeRoot, HASNA_HOOKS_CACHE_DIR: tmp }, cwd: managed });
 
     expect(blocked.exitCode).toBe(0);
     expect(blocked.json.decision).toBe("block");
@@ -330,6 +337,7 @@ describe("Codewith-native hooks", () => {
   test("pre-bash blocks destructive find against protected roots but allows managed worktree child cleanup", async () => {
     const worktreeRoot = join(tmp, ".hasna", "repos", "worktrees");
     const managed = join(worktreeRoot, "station01", "open-hooks-a55c105a", "wt_2ab04216a30ef5ece642792e");
+    initGitRepo(managed);
 
     const deleteBlocked = await runHook("pre-bash", {
       hook_event_name: "PreToolUse",
@@ -360,7 +368,7 @@ describe("Codewith-native hooks", () => {
     const allowed = await runHook("pre-bash", {
       hook_event_name: "PreToolUse",
       session_id: "sess-find-managed",
-      cwd: tmp,
+      cwd: managed,
       model: "gpt-test",
       permission_mode: "default",
       tool_name: "Bash",
@@ -368,7 +376,7 @@ describe("Codewith-native hooks", () => {
       tool_use_id: "tool-find-managed",
       transcript_path: null,
       turn_id: "turn-find-managed",
-    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreeRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreeRoot, HASNA_HOOKS_CACHE_DIR: tmp }, cwd: managed });
 
     expect(deleteBlocked.exitCode).toBe(0);
     expect(deleteBlocked.json.decision).toBe("block");
@@ -384,8 +392,7 @@ describe("Codewith-native hooks", () => {
   test("pre-bash blocks deleting the active repo root but allows child cleanup", async () => {
     const repo = join(tmp, "repo");
     mkdirSync(join(repo, "dist"), { recursive: true });
-    const init = Bun.spawnSync(["git", "init"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
-    expect(init.exitCode).toBe(0);
+    initGitRepo(repo);
 
     const blocked = await runHook("pre-bash", {
       hook_event_name: "PreToolUse",
@@ -421,11 +428,80 @@ describe("Codewith-native hooks", () => {
     expect(allowed.json.decision).toBeUndefined();
   });
 
+  test("pre-bash allows child cleanup inside managed worktree repos under ~/.hasna", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const managedRepos = [
+      join(worktreesRoot, "station01", "open-hooks-a55c105a", "wt_2ab04216a30ef5ece642792e"),
+      join(worktreesRoot, "447614a0-1639-44e1-87a4-f396f8502a96", "guardrail-publish-20260713", "hooks"),
+      join(worktreesRoot, "447614a0-1639-44e1-87a4-f396f8502a96", "hooks-bb544906", "wt_20260713T1015"),
+    ];
+
+    for (const repo of managedRepos) {
+      mkdirSync(join(repo, "dist"), { recursive: true });
+      initGitRepo(repo);
+
+      const result = await runHook("pre-bash", {
+        hook_event_name: "PreToolUse",
+        session_id: `sess-managed-dist-${managedRepos.indexOf(repo)}`,
+        cwd: repo,
+        model: "gpt-test",
+        permission_mode: "default",
+        tool_name: "Bash",
+        tool_input: { command: "rm -rf dist" },
+        tool_use_id: `tool-managed-dist-${managedRepos.indexOf(repo)}`,
+        transcript_path: null,
+        turn_id: `turn-managed-dist-${managedRepos.indexOf(repo)}`,
+      }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.json.continue).toBe(true);
+      expect(result.json.decision).toBeUndefined();
+    }
+  });
+
+  test("pre-bash blocks deleting managed worktree repo roots and managed worktrees root", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const managed = join(worktreesRoot, "447614a0-1639-44e1-87a4-f396f8502a96", "guardrail-publish-20260713", "hooks");
+    initGitRepo(managed);
+
+    const repoRoot = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-managed-root",
+      cwd: managed,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "rm -rf ." },
+      tool_use_id: "tool-managed-root",
+      transcript_path: null,
+      turn_id: "turn-managed-root",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    const allWorktrees = await runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-managed-worktrees-root",
+      cwd: managed,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: `rm -rf ${worktreesRoot}` },
+      tool_use_id: "tool-managed-worktrees-root",
+      transcript_path: null,
+      turn_id: "turn-managed-worktrees-root",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(repoRoot.exitCode).toBe(0);
+    expect(repoRoot.json.decision).toBe("block");
+    expect(repoRoot.json.reason).toContain("active repository root");
+    expect(allWorktrees.exitCode).toBe(0);
+    expect(allWorktrees.json.decision).toBe("block");
+    expect(allWorktrees.json.reason).toContain("Hasna state root ~/.hasna");
+  });
+
   test("pre-bash blocks protected-root content globs but allows nested cleanup globs", async () => {
     const repo = join(tmp, "repo");
     mkdirSync(join(repo, "dist"), { recursive: true });
-    const init = Bun.spawnSync(["git", "init"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
-    expect(init.exitCode).toBe(0);
+    initGitRepo(repo);
 
     const repoGlob = await runHook("pre-bash", {
       hook_event_name: "PreToolUse",
@@ -483,8 +559,7 @@ describe("Codewith-native hooks", () => {
   test("pre-bash blocks destructive git cleanup at active repo root but allows pathspec cleanup", async () => {
     const repo = join(tmp, "repo");
     mkdirSync(join(repo, "dist"), { recursive: true });
-    const init = Bun.spawnSync(["git", "init"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
-    expect(init.exitCode).toBe(0);
+    initGitRepo(repo);
 
     const cleanBlocked = await runHook("pre-bash", {
       hook_event_name: "PreToolUse",
@@ -633,11 +708,33 @@ describe("Codewith-native hooks", () => {
     expect(result.json.reason).toContain("apply_patch file mutation");
   });
 
+  test("worktree-guard allows apply_patch file edits inside fallback-shaped managed worktree repos", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const managed = join(worktreesRoot, "447614a0-1639-44e1-87a4-f396f8502a96", "guardrail-publish-20260713", "hooks");
+    initGitRepo(managed);
+    writeFileSync(join(managed, "README.md"), "before\n");
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-managed-apply-patch",
+      cwd: managed,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { command: "*** Begin Patch\n*** Update File: README.md\n@@\n-before\n+after\n*** End Patch\n" },
+      tool_use_id: "tool-managed-apply-patch",
+      transcript_path: null,
+      turn_id: "turn-managed-apply-patch",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.continue).toBe(true);
+    expect(result.json.decision).toBeUndefined();
+  });
+
   test("worktree-guard blocks git commit from a shared checkout", async () => {
     const repo = join(tmp, "repo");
-    mkdirSync(repo, { recursive: true });
-    const init = Bun.spawnSync(["git", "init"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
-    expect(init.exitCode).toBe(0);
+    initGitRepo(repo);
 
     const result = await runHook("worktree-guard", {
       hook_event_name: "PreToolUse",
@@ -661,10 +758,8 @@ describe("Codewith-native hooks", () => {
   test("worktree-guard blocks git -C commit targeting a shared checkout even from a managed cwd", async () => {
     const repo = join(tmp, "shared-repo");
     const managed = join(tmp, "worktrees", "station01", "open-hooks-a55c105a", "wt_2ab04216a30ef5ece642792e", "repo");
-    mkdirSync(repo, { recursive: true });
     mkdirSync(managed, { recursive: true });
-    const init = Bun.spawnSync(["git", "init"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
-    expect(init.exitCode).toBe(0);
+    initGitRepo(repo);
 
     const result = await runHook("worktree-guard", {
       hook_event_name: "PreToolUse",
@@ -686,9 +781,7 @@ describe("Codewith-native hooks", () => {
 
   test("worktree-guard blocks git -c and --git-dir/--work-tree commit or push forms outside managed roots", async () => {
     const repo = join(tmp, "shared-repo");
-    mkdirSync(repo, { recursive: true });
-    const init = Bun.spawnSync(["git", "init"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
-    expect(init.exitCode).toBe(0);
+    initGitRepo(repo);
 
     for (const command of [
       "git -c user.name=test push origin feature",
