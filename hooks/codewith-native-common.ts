@@ -795,7 +795,7 @@ function extractFileToolPaths(input: CodewithHookInput): Array<{ path: string; o
     addPathFields(toolInput, `${toolName} file mutation`);
   }
 
-  const patch = toolInput.patch ?? toolInput.input ?? toolInput.content;
+  const patch = toolInput.patch ?? toolInput.input ?? toolInput.content ?? toolInput.command;
   if (isApplyPatchTool(toolName) && typeof patch === "string") {
     for (const line of patch.split(/\r?\n/)) {
       const match = line.match(/^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$/);

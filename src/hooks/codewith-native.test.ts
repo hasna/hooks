@@ -595,6 +595,25 @@ describe("Codewith-native hooks", () => {
     }
   });
 
+  test("worktree-guard blocks canonical Codewith apply_patch command payloads", async () => {
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-apply-patch-command-state",
+      cwd: tmp,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { command: "*** Begin Patch\n*** Delete File: .hasna/projects/projects.db\n*** End Patch\n" },
+      tool_use_id: "tool-apply-patch-command-state",
+      transcript_path: null,
+      turn_id: "turn-apply-patch-command-state",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: join(tmp, "worktrees") } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("apply_patch file mutation");
+  });
+
   test("worktree-guard blocks apply_patch moves into ~/.hasna", async () => {
     const result = await runHook("worktree-guard", {
       hook_event_name: "PreToolUse",
