@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
-import { join } from "path";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
+import { dirname, join } from "path";
 import { tmpdir } from "os";
 
 const HOOKS_DIR = join(import.meta.dir, "..", "..", "hooks");
@@ -33,6 +33,22 @@ function initGitRepo(path: string): void {
   mkdirSync(path, { recursive: true });
   const init = Bun.spawnSync(["git", "init"], { cwd: path, stdout: "pipe", stderr: "pipe" });
   expect(init.exitCode).toBe(0);
+}
+
+function addGitWorktree(repo: string, worktree: string): void {
+  writeFileSync(join(repo, "README.md"), "fixture\n");
+  const add = Bun.spawnSync(["git", "add", "README.md"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+  expect(add.exitCode).toBe(0);
+  const commit = Bun.spawnSync([
+    "git",
+    "-c", "user.name=Hooks Tests",
+    "-c", "user.email=hooks-tests@example.invalid",
+    "commit", "-m", "fixture",
+  ], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+  expect(commit.exitCode).toBe(0);
+  mkdirSync(dirname(worktree), { recursive: true });
+  const create = Bun.spawnSync(["git", "worktree", "add", "--detach", worktree], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+  expect(create.exitCode).toBe(0);
 }
 
 describe("Codewith-native hooks", () => {
@@ -708,28 +724,608 @@ describe("Codewith-native hooks", () => {
     expect(result.json.reason).toContain("apply_patch file mutation");
   });
 
-  test("worktree-guard allows apply_patch file edits inside fallback-shaped managed worktree repos", async () => {
+  test("worktree-guard blocks relative Write and apply_patch from malformed current-cwd Git repos", async () => {
     const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
-    const managed = join(worktreesRoot, "447614a0-1639-44e1-87a4-f396f8502a96", "guardrail-publish-20260713", "hooks");
-    initGitRepo(managed);
+    const malformed = join(worktreesRoot, "447614a0-1639-44e1-87a4-f396f8502a96", "guardrail-publish-20260713", "hooks");
+    initGitRepo(malformed);
+    writeFileSync(join(malformed, "README.md"), "before\n");
+
+    const inputs = [
+      {
+        tool_name: "Write",
+        tool_input: { file_path: "new-file.ts", content: "unsafe\n" },
+      },
+      {
+        tool_name: "apply_patch",
+        tool_input: { patch: "*** Begin Patch\n*** Update File: README.md\n@@\n-before\n+after\n*** End Patch\n" },
+      },
+    ];
+    for (const [index, tool] of inputs.entries()) {
+      const result = await runHook("worktree-guard", {
+        hook_event_name: "PreToolUse",
+        session_id: `sess-malformed-current-cwd-${index}`,
+        cwd: malformed,
+        model: "gpt-test",
+        permission_mode: "default",
+        ...tool,
+        tool_use_id: `tool-malformed-current-cwd-${index}`,
+        transcript_path: null,
+        turn_id: `turn-malformed-current-cwd-${index}`,
+      }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.json.decision).toBe("block");
+      expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+    }
+  });
+
+  test("worktree-guard allows relative apply_patch Add and Update from a verified linked-worktree cwd", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const managed = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_3dd5ec7eb90a8cd3d592");
+    initGitRepo(shared);
+    addGitWorktree(shared, managed);
     writeFileSync(join(managed, "README.md"), "before\n");
 
     const result = await runHook("worktree-guard", {
       hook_event_name: "PreToolUse",
-      session_id: "sess-managed-apply-patch",
+      session_id: "sess-linked-current-cwd-apply-patch",
       cwd: managed,
       model: "gpt-test",
       permission_mode: "default",
       tool_name: "apply_patch",
-      tool_input: { command: "*** Begin Patch\n*** Update File: README.md\n@@\n-before\n+after\n*** End Patch\n" },
-      tool_use_id: "tool-managed-apply-patch",
+      tool_input: {
+        patch: "*** Begin Patch\n*** Update File: README.md\n@@\n-before\n+after\n*** Add File: src/new-file.ts\n+export const guarded = true;\n*** End Patch\n",
+      },
+      tool_use_id: "tool-linked-current-cwd-apply-patch",
       transcript_path: null,
-      turn_id: "turn-managed-apply-patch",
+      turn_id: "turn-linked-current-cwd-apply-patch",
     }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
 
     expect(result.exitCode).toBe(0);
     expect(result.json.continue).toBe(true);
     expect(result.json.decision).toBeUndefined();
+  });
+
+  test("worktree-guard allows absolute apply_patch targets inside a different managed Git worktree", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const managed = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_3dd5ec7eb90a8cd3d592");
+    const target = join(managed, "src", "guard.ts");
+    initGitRepo(shared);
+    addGitWorktree(shared, managed);
+    mkdirSync(join(managed, "src"), { recursive: true });
+    writeFileSync(target, "before\n");
+
+    const update = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-cross-managed-apply-patch",
+      cwd: shared,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { patch: `*** Begin Patch\n*** Update File: ${target}\n@@\n-before\n+after\n*** End Patch\n` },
+      tool_use_id: "tool-cross-managed-apply-patch",
+      transcript_path: null,
+      turn_id: "turn-cross-managed-apply-patch",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    const addedTarget = join(managed, "generated", "nested", "new-guard.ts");
+    const add = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-cross-managed-apply-patch-add",
+      cwd: shared,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { patch: `*** Begin Patch\n*** Add File: ${addedTarget}\n+export const guarded = true;\n*** End Patch\n` },
+      tool_use_id: "tool-cross-managed-apply-patch-add",
+      transcript_path: null,
+      turn_id: "turn-cross-managed-apply-patch-add",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    for (const result of [update, add]) {
+      expect(result.exitCode).toBe(0);
+      expect(result.json.continue).toBe(true);
+      expect(result.json.decision).toBeUndefined();
+    }
+  });
+
+  test("worktree-guard blocks apply_patch targets in Git metadata outside the managed worktree", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, ".hasna", "repos", "shared-checkout");
+    const managed = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_3dd5ec7eb90a8cd3d592");
+    initGitRepo(shared);
+    addGitWorktree(shared, managed);
+    const gitDir = Bun.spawnSync(["git", "rev-parse", "--git-dir"], { cwd: managed, stdout: "pipe", stderr: "pipe" });
+    expect(gitDir.exitCode).toBe(0);
+    const metadataTarget = join(gitDir.stdout.toString().trim(), "HEAD");
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-managed-external-metadata-apply-patch",
+      cwd: shared,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { patch: `*** Begin Patch\n*** Update File: ${metadataTarget}\n@@\n-old\n+new\n*** End Patch\n` },
+      tool_use_id: "tool-managed-external-metadata-apply-patch",
+      transcript_path: null,
+      turn_id: "turn-managed-external-metadata-apply-patch",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+  });
+
+  test("worktree-guard blocks absolute apply_patch targets in fake managed-worktree paths", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const fakeTarget = join(worktreesRoot, "station01", "hooks-deadbee", "wt_0123456789abcdef", "src", "guard.ts");
+    initGitRepo(shared);
+    mkdirSync(join(worktreesRoot, "station01", "hooks-deadbee", "wt_0123456789abcdef", "src"), { recursive: true });
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-fake-managed-apply-patch",
+      cwd: shared,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { patch: `*** Begin Patch\n*** Add File: ${fakeTarget}\n+unsafe\n*** End Patch\n` },
+      tool_use_id: "tool-fake-managed-apply-patch",
+      transcript_path: null,
+      turn_id: "turn-fake-managed-apply-patch",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+  });
+
+  test("worktree-guard blocks managed-worktree symlink targets that escape into Hasna state", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const managed = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_3dd5ec7eb90a8cd3d592");
+    const stateTarget = join(tmp, ".hasna", "projects", "projects.db");
+    const linkedTarget = join(managed, "projects.db");
+    initGitRepo(shared);
+    initGitRepo(managed);
+    mkdirSync(dirname(stateTarget), { recursive: true });
+    writeFileSync(stateTarget, "protected\n");
+    symlinkSync(stateTarget, linkedTarget);
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-managed-symlink-apply-patch",
+      cwd: shared,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { patch: `*** Begin Patch\n*** Update File: ${linkedTarget}\n@@\n-protected\n+unsafe\n*** End Patch\n` },
+      tool_use_id: "tool-managed-symlink-apply-patch",
+      transcript_path: null,
+      turn_id: "turn-managed-symlink-apply-patch",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+  });
+
+  test("worktree-guard blocks Add File below a symlinked ancestor that escapes into Hasna state", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const managed = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_3dd5ec7eb90a8cd3d592");
+    const stateDir = join(tmp, ".hasna", "projects");
+    const linkedDir = join(managed, "state-link");
+    const target = join(linkedDir, "new-project.db");
+    initGitRepo(shared);
+    initGitRepo(managed);
+    mkdirSync(stateDir, { recursive: true });
+    symlinkSync(stateDir, linkedDir);
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-managed-symlink-add-file",
+      cwd: shared,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { patch: `*** Begin Patch\n*** Add File: ${target}\n+unsafe\n*** End Patch\n` },
+      tool_use_id: "tool-managed-symlink-add-file",
+      transcript_path: null,
+      turn_id: "turn-managed-symlink-add-file",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+  });
+
+  test("worktree-guard blocks managed-worktree hardlinks to Hasna state", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const managed = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_3dd5ec7eb90a8cd3d592");
+    const stateTarget = join(tmp, ".hasna", "projects", "projects.db");
+    const linkedTarget = join(managed, "projects.db");
+    initGitRepo(shared);
+    addGitWorktree(shared, managed);
+    mkdirSync(dirname(stateTarget), { recursive: true });
+    writeFileSync(stateTarget, "protected\n");
+    linkSync(stateTarget, linkedTarget);
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-managed-hardlink-apply-patch",
+      cwd: shared,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { patch: `*** Begin Patch\n*** Update File: ${linkedTarget}\n@@\n-protected\n+unsafe\n*** End Patch\n` },
+      tool_use_id: "tool-managed-hardlink-apply-patch",
+      transcript_path: null,
+      turn_id: "turn-managed-hardlink-apply-patch",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+  });
+
+  test("worktree-guard blocks dangling symlink targets for Add File and Write", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const managed = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_3dd5ec7eb90a8cd3d592");
+    const stateTarget = join(tmp, ".hasna", "projects", "new-project.db");
+    const linkedTarget = join(managed, "new-project.db");
+    initGitRepo(shared);
+    initGitRepo(managed);
+    mkdirSync(dirname(stateTarget), { recursive: true });
+    symlinkSync(stateTarget, linkedTarget);
+
+    const inputs = [
+      {
+        tool_name: "apply_patch",
+        tool_input: { patch: `*** Begin Patch\n*** Add File: ${linkedTarget}\n+unsafe\n*** End Patch\n` },
+      },
+      {
+        tool_name: "Write",
+        tool_input: { file_path: linkedTarget, content: "unsafe\n" },
+      },
+    ];
+    for (const [index, tool] of inputs.entries()) {
+      const result = await runHook("worktree-guard", {
+        hook_event_name: "PreToolUse",
+        session_id: `sess-managed-dangling-target-${index}`,
+        cwd: shared,
+        model: "gpt-test",
+        permission_mode: "default",
+        ...tool,
+        tool_use_id: `tool-managed-dangling-target-${index}`,
+        transcript_path: null,
+        turn_id: `turn-managed-dangling-target-${index}`,
+      }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.json.decision).toBe("block");
+      expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+    }
+  });
+
+  test("worktree-guard blocks relative dangling symlink targets from a linked managed cwd", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const managed = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_3dd5ec7eb90a8cd3d592");
+    const stateTarget = join(tmp, ".hasna", "projects", "new-project.db");
+    initGitRepo(shared);
+    addGitWorktree(shared, managed);
+    mkdirSync(dirname(stateTarget), { recursive: true });
+    symlinkSync(stateTarget, join(managed, "new-project.db"));
+
+    const inputs = [
+      {
+        tool_name: "apply_patch",
+        tool_input: { patch: "*** Begin Patch\n*** Add File: new-project.db\n+unsafe\n*** End Patch\n" },
+      },
+      {
+        tool_name: "Write",
+        tool_input: { file_path: "new-project.db", content: "unsafe\n" },
+      },
+    ];
+    for (const [index, tool] of inputs.entries()) {
+      const result = await runHook("worktree-guard", {
+        hook_event_name: "PreToolUse",
+        session_id: `sess-relative-dangling-target-${index}`,
+        cwd: managed,
+        model: "gpt-test",
+        permission_mode: "default",
+        ...tool,
+        tool_use_id: `tool-relative-dangling-target-${index}`,
+        transcript_path: null,
+        turn_id: `turn-relative-dangling-target-${index}`,
+      }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.json.decision).toBe("block");
+      expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+    }
+  });
+
+  test("worktree-guard blocks Add File below a dangling symlink ancestor", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const managed = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_3dd5ec7eb90a8cd3d592");
+    const stateDir = join(tmp, ".hasna", "projects", "missing-directory");
+    const linkedDir = join(managed, "state-link");
+    const target = join(linkedDir, "new-project.db");
+    initGitRepo(shared);
+    initGitRepo(managed);
+    mkdirSync(dirname(stateDir), { recursive: true });
+    symlinkSync(stateDir, linkedDir);
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-managed-dangling-ancestor",
+      cwd: shared,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { patch: `*** Begin Patch\n*** Add File: ${target}\n+unsafe\n*** End Patch\n` },
+      tool_use_id: "tool-managed-dangling-ancestor",
+      transcript_path: null,
+      turn_id: "turn-managed-dangling-ancestor",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+  });
+
+  test("worktree-guard blocks cross-cwd targets in malformed Git repos under the worktrees root", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const malformed = join(worktreesRoot, "station01", "hooks-nohash", "not-a-lease");
+    const target = join(malformed, "src", "guard.ts");
+    initGitRepo(shared);
+    initGitRepo(malformed);
+    mkdirSync(dirname(target), { recursive: true });
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-malformed-managed-repo",
+      cwd: shared,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { patch: `*** Begin Patch\n*** Add File: ${target}\n+unsafe\n*** End Patch\n` },
+      tool_use_id: "tool-malformed-managed-repo",
+      transcript_path: null,
+      turn_id: "turn-malformed-managed-repo",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+  });
+
+  test("worktree-guard blocks cross-cwd targets in valid-shaped standalone Git repos", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const standalone = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_0123456789abcdef");
+    const target = join(standalone, "src", "guard.ts");
+    initGitRepo(shared);
+    initGitRepo(standalone);
+    mkdirSync(dirname(target), { recursive: true });
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-standalone-managed-repo",
+      cwd: shared,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { patch: `*** Begin Patch\n*** Add File: ${target}\n+unsafe\n*** End Patch\n` },
+      tool_use_id: "tool-standalone-managed-repo",
+      transcript_path: null,
+      turn_id: "turn-standalone-managed-repo",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+  });
+
+  test("worktree-guard blocks relative writes from valid-shaped standalone Git repos", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const standalone = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_0123456789abcdef");
+    initGitRepo(standalone);
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-current-standalone-managed-repo",
+      cwd: standalone,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Write",
+      tool_input: { file_path: "new-file.ts", content: "unsafe\n" },
+      tool_use_id: "tool-current-standalone-managed-repo",
+      transcript_path: null,
+      turn_id: "turn-current-standalone-managed-repo",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+  });
+
+  test("worktree-guard blocks valid-shaped repos with forged separate Git metadata", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const standalone = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_0123456789abcdef");
+    const separateGitDir = join(tmp, "separate-git-dir");
+    const target = join(standalone, "src", "guard.ts");
+    initGitRepo(shared);
+    mkdirSync(standalone, { recursive: true });
+    const init = Bun.spawnSync(["git", "init", "--separate-git-dir", separateGitDir, standalone], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(init.exitCode).toBe(0);
+    mkdirSync(dirname(target), { recursive: true });
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-separate-git-dir-managed-repo",
+      cwd: shared,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { patch: `*** Begin Patch\n*** Add File: ${target}\n+unsafe\n*** End Patch\n` },
+      tool_use_id: "tool-separate-git-dir-managed-repo",
+      transcript_path: null,
+      turn_id: "turn-separate-git-dir-managed-repo",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+  });
+
+  test("worktree-guard blocks linked-worktree .git and nested .git targets", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const linked = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_3dd5ec7eb90a8cd3d592");
+    const standalone = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_0123456789abcdef");
+    initGitRepo(shared);
+    addGitWorktree(shared, linked);
+    initGitRepo(standalone);
+
+    const targets = [join(linked, ".git"), join(standalone, ".git", "config")];
+    for (const [index, target] of targets.entries()) {
+      const result = await runHook("worktree-guard", {
+        hook_event_name: "PreToolUse",
+        session_id: `sess-managed-git-component-${index}`,
+        cwd: shared,
+        model: "gpt-test",
+        permission_mode: "default",
+        tool_name: "apply_patch",
+        tool_input: { patch: `*** Begin Patch\n*** Update File: ${target}\n@@\n-old\n+new\n*** End Patch\n` },
+        tool_use_id: `tool-managed-git-component-${index}`,
+        transcript_path: null,
+        turn_id: `turn-managed-git-component-${index}`,
+      }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.json.decision).toBe("block");
+      expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+    }
+  });
+
+  test("worktree-guard blocks relative .git targets from a linked managed cwd", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const managed = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_3dd5ec7eb90a8cd3d592");
+    initGitRepo(shared);
+    addGitWorktree(shared, managed);
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-relative-git-component",
+      cwd: managed,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { patch: "*** Begin Patch\n*** Update File: .git\n@@\n-old\n+new\n*** End Patch\n" },
+      tool_use_id: "tool-relative-git-component",
+      transcript_path: null,
+      turn_id: "turn-relative-git-component",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("Hasna state root ~/.hasna");
+  });
+
+  test("worktree-guard deduplicates managed repo discovery across multi-file patches", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const managed = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_3dd5ec7eb90a8cd3d592");
+    const bin = join(tmp, "bin");
+    const queryLog = join(tmp, "git-query.log");
+    const realGit = Bun.which("git");
+    expect(realGit).not.toBeNull();
+    initGitRepo(shared);
+    addGitWorktree(shared, managed);
+    const targetDirs = Array.from({ length: 8 }, (_, index) => join(managed, "src", `dir-${index}`));
+    for (const targetDir of targetDirs) mkdirSync(targetDir, { recursive: true });
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "git"), [
+      "#!/bin/sh",
+      'if [ "$1" = "rev-parse" ] && [ "$2" = "--show-toplevel" ]; then',
+      '  printf "%s\\n" "$PWD" >> "$GIT_QUERY_LOG"',
+      "fi",
+      `exec "${realGit}" "$@"`,
+      "",
+    ].join("\n"));
+    chmodSync(join(bin, "git"), 0o755);
+    const patch = [
+      "*** Begin Patch",
+      ...targetDirs.map((targetDir, index) => `*** Add File: ${join(targetDir, `file-${index}.ts`)}\n+export const value${index} = ${index};`),
+      "*** End Patch",
+      "",
+    ].join("\n");
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-managed-query-dedup",
+      cwd: shared,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { patch },
+      tool_use_id: "tool-managed-query-dedup",
+      transcript_path: null,
+      turn_id: "turn-managed-query-dedup",
+    }, { env: {
+      HOME: tmp,
+      PATH: `${bin}:${process.env.PATH || ""}`,
+      GIT_QUERY_LOG: queryLog,
+      HASNA_REPOS_WORKTREES_ROOT: worktreesRoot,
+      HASNA_HOOKS_CACHE_DIR: tmp,
+    } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.continue).toBe(true);
+    expect(result.json.decision).toBeUndefined();
+    const managedQueries = readFileSync(queryLog, "utf-8").trim().split("\n").filter((path) => path.startsWith(worktreesRoot));
+    expect(managedQueries).toHaveLength(1);
+  });
+
+  test("worktree-guard blocks apply_patch targets at managed repo roots", async () => {
+    const worktreesRoot = join(tmp, ".hasna", "repos", "worktrees");
+    const shared = join(tmp, "shared-checkout");
+    const managed = join(worktreesRoot, "station01", "hooks-42bbcc3e", "wt_3dd5ec7eb90a8cd3d592");
+    initGitRepo(shared);
+    initGitRepo(managed);
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-managed-root-apply-patch",
+      cwd: shared,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "apply_patch",
+      tool_input: { file_path: managed },
+      tool_use_id: "tool-managed-root-apply-patch",
+      transcript_path: null,
+      turn_id: "turn-managed-root-apply-patch",
+    }, { env: { HOME: tmp, HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_HOOKS_CACHE_DIR: tmp } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain("Hasna state root ~/.hasna");
   });
 
   test("worktree-guard blocks git commit from a shared checkout", async () => {
