@@ -232,6 +232,11 @@ describe("CLI", () => {
       expect(typeof data.project).toBe("boolean");
     });
 
+    test("announce-start remains default-deny", async () => {
+      const data = await runJson("info", "announce-start");
+      expect(data.network).toBeUndefined();
+    });
+
     test("--json returns error for unknown hook", async () => {
       const data = await runJson("info", "nonexistent");
       expect(data.error).toContain("not found");

@@ -67,6 +67,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Bash",
     tags: ["git", "safety", "destructive", "guard"],
+    dryRun: true,
   },
   {
     name: "branchprotect",
@@ -77,6 +78,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Write|Edit|NotebookEdit",
     tags: ["git", "branch", "protection", "main"],
+    dryRun: true,
   },
   {
     name: "checkpoint",
@@ -98,6 +100,7 @@ export const HOOKS: HookMeta[] = [
     matcher: "^(Bash|Write|Edit|MultiEdit|NotebookEdit|apply_patch|ApplyPatch|functions\\.apply_patch|mcp__.*)$",
     tags: ["git", "worktree", "repos", "multi-agent", "safety", "dangerous-ops"],
     network: "deny",
+    dryRun: true,
   },
 
   // Code Quality
@@ -183,6 +186,7 @@ export const HOOKS: HookMeta[] = [
     matcher: "Bash",
     tags: ["npm", "packages", "typosquatting", "supply-chain"],
     network: "allow",
+    dryRun: true,
   },
   {
     name: "pre-bash",
@@ -194,6 +198,7 @@ export const HOOKS: HookMeta[] = [
     matcher: "Bash",
     tags: ["codewith", "bash", "secrets", "gitleaks", "risky-ops"],
     network: "deny",
+    dryRun: true,
   },
 
   // Notifications
@@ -284,6 +289,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Edit|Write",
     tags: ["tdd", "tests", "red-green-refactor", "enforcement"],
+    dryRun: true,
   },
 
   // Environment
@@ -296,6 +302,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Bash",
     tags: ["nvm", "virtualenv", "asdf", "rbenv", "environment", "python", "node"],
+    dryRun: true,
   },
 
   // Permissions
@@ -308,6 +315,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Bash",
     tags: ["permission", "allowlist", "blocklist", "safety", "auto-approve"],
+    dryRun: true,
   },
   {
     name: "protectfiles",
@@ -318,6 +326,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Edit|Write|Read|Bash",
     tags: ["security", "env", "secrets", "keys", "lock-files", "protect"],
+    dryRun: true,
   },
   {
     name: "promptguard",
@@ -328,6 +337,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "",
     tags: ["prompt", "injection", "security", "validation", "guard"],
+    dryRun: true,
   },
   {
     name: "prompt-guard",
@@ -425,6 +435,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Write|Edit",
     tags: ["design", "styles", "frontend", "css", "tailwind", "design-system", "anti-patterns"],
+    dryRun: true,
   },
 
   // Agent Teams
@@ -495,6 +506,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Edit|Write",
     tags: ["git", "conflicts", "merge", "safety"],
+    dryRun: true,
   },
 
   // Workflow Automation (new)
@@ -529,7 +541,6 @@ export const HOOKS: HookMeta[] = [
     event: "SessionStart",
     matcher: "",
     tags: ["announcement", "start", "register", "messages", "agent-teams"],
-    network: "allow",
   },
   {
     name: "announce-stop",

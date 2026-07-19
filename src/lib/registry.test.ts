@@ -68,6 +68,30 @@ describe("registry", () => {
           .some((hook) => hook.envAllowlist?.includes("CLAUDE_ENV_FILE")),
       ).toBe(false);
     });
+
+    test("keeps MCP preview limited to audited read-only PreToolUse hooks", () => {
+      const preToolUseHooks = HOOKS.filter((hook) => hook.event === "PreToolUse");
+
+      expect(preToolUseHooks.filter((hook) => hook.dryRun).map((hook) => hook.name)).toEqual([
+        "gitguard",
+        "branchprotect",
+        "worktree-guard",
+        "packageage",
+        "pre-bash",
+        "tddguard",
+        "envsetup",
+        "permissionguard",
+        "protectfiles",
+        "promptguard",
+        "stylescheck",
+        "conflict-detect",
+      ]);
+      expect(preToolUseHooks.filter((hook) => !hook.dryRun).map((hook) => hook.name)).toEqual([
+        "checkpoint",
+        "filelock",
+        "fleet-blockers-gate",
+      ]);
+    });
   });
 
   describe("CATEGORIES", () => {
@@ -337,6 +361,7 @@ describe("registry", () => {
       const hook = getHook("announce-start")!;
       expect(hook.event).toBe("SessionStart");
       expect(hook.version).toBe("0.2.0");
+      expect(hook.network).toBeUndefined();
     });
 
     test("session-start fires on SessionStart", () => {

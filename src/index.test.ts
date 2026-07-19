@@ -131,7 +131,6 @@ describe("library exports", () => {
       "slacknotify",
       "session-start",
       "stop-sync",
-      "announce-start",
       "fleet-catchup",
       "fleet-blockers-gate",
     ]);
@@ -140,6 +139,7 @@ describe("library exports", () => {
     expect(getHook("gitguard")?.network).toBeUndefined();
     expect(getHook("agentmessages")?.network).toBeUndefined();
     expect(getHook("knowledge-context")?.network).toBeUndefined();
+    expect(resolveHookNetworkAccess(getHook("announce-start")!)).toBe("deny");
     expect(getHook("agent-rules-version-check")?.network).toBeUndefined();
     for (const shellInterpolatingHook of ["failure-to-task", "announce-stop", "dm-inject"]) {
       expect(getHook(shellInterpolatingHook)?.network).toBeUndefined();
