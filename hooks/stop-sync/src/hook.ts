@@ -19,19 +19,19 @@ async function heartbeat(input: CodewithHookInput, cwd: string): Promise<string[
     return notes;
   }
   if (commandExists("conversations")) {
-    await runCommand(["conversations", "agents", "heartbeat", "--from", agentName, "--status", "online"], { cwd, timeoutMs: 2000 });
+    await runCommand(["conversations", "agents", "heartbeat", "--from", agentName, "--status", "online"], { cwd, timeoutMs: 2000, network: "allow" });
     notes.push("conversations heartbeat attempted.");
   } else {
     notes.push("conversations CLI unavailable; skipped heartbeat.");
   }
   if (commandExists("todos")) {
-    await runCommand(["todos", "heartbeat", agentName], { cwd, timeoutMs: 2000 });
+    await runCommand(["todos", "heartbeat", agentName], { cwd, timeoutMs: 2000, network: "allow" });
     notes.push("todos heartbeat attempted.");
   } else {
     notes.push("todos CLI unavailable; skipped heartbeat.");
   }
   if (commandExists("mementos")) {
-    await runCommand(["mementos", "heartbeat", agentName], { cwd, timeoutMs: 2000 });
+    await runCommand(["mementos", "heartbeat", agentName], { cwd, timeoutMs: 2000, network: "allow" });
     notes.push("mementos heartbeat attempted.");
   } else {
     notes.push("mementos CLI unavailable; skipped heartbeat.");
@@ -45,13 +45,18 @@ async function maybeTaskComment(input: CodewithHookInput, cwd: string): Promise<
   if (!taskId) return "Task comment skipped: no task id env/input.";
   if (!commandExists("todos")) return "Task comment skipped: todos CLI unavailable.";
   const text = `Codewith Stop hook ran at turn end for session ${(input.session_id || "unknown").slice(0, 12)}; Stop is turn-end, not process exit.`;
-  await runCommand(["todos", "comment", taskId, text], { cwd, timeoutMs: 3000 });
+  await runCommand(["todos", "comment", taskId, text], { cwd, timeoutMs: 3000, network: "allow" });
   return "Task evidence comment attempted.";
 }
 
 export async function run(): Promise<void> {
   const input = readInput();
   const cwd = input.cwd || process.cwd();
+  if (input.dry_run === true) {
+    warn("stop-sync dry run: skipped heartbeats and task comments");
+    respond({ continue: true, suppressOutput: true });
+    return;
+  }
   try {
     const notes = await heartbeat(input, cwd);
     const comment = await maybeTaskComment(input, cwd);

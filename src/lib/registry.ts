@@ -33,6 +33,10 @@ export interface HookMeta {
   events?: HookEvent[];
   matcher: string;
   tags: string[];
+  /** Standalone network policy. Omitted and detached/orphan-style hooks fail closed with network denied. */
+  network?: "deny" | "allow";
+  /** The hook guarantees that `dry_run: true` performs no mutations. */
+  dryRun?: boolean;
 }
 
 export const CATEGORIES = [
@@ -91,6 +95,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "^(Bash|Write|Edit|MultiEdit|NotebookEdit|apply_patch|ApplyPatch|functions\\.apply_patch|mcp__.*)$",
     tags: ["git", "worktree", "repos", "multi-agent", "safety", "dangerous-ops"],
+    network: "deny",
   },
 
   // Code Quality
@@ -175,6 +180,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Bash",
     tags: ["npm", "packages", "typosquatting", "supply-chain"],
+    network: "allow",
   },
   {
     name: "pre-bash",
@@ -185,6 +191,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Bash",
     tags: ["codewith", "bash", "secrets", "gitleaks", "risky-ops"],
+    network: "deny",
   },
 
   // Notifications
@@ -197,6 +204,7 @@ export const HOOKS: HookMeta[] = [
     event: "Stop",
     matcher: "",
     tags: ["notification", "phone", "push", "ntfy"],
+    network: "allow",
   },
   {
     name: "agentmessages",
@@ -349,6 +357,7 @@ export const HOOKS: HookMeta[] = [
     event: "Stop",
     matcher: "",
     tags: ["notification", "slack", "webhook", "team"],
+    network: "allow",
   },
   {
     name: "soundnotify",
@@ -435,6 +444,8 @@ export const HOOKS: HookMeta[] = [
     event: "SessionStart",
     matcher: "",
     tags: ["codewith", "session", "context", "conversations", "heartbeat"],
+    network: "allow",
+    dryRun: true,
   },
   {
     name: "stop-sync",
@@ -445,6 +456,8 @@ export const HOOKS: HookMeta[] = [
     event: "Stop",
     matcher: "",
     tags: ["codewith", "stop", "heartbeat", "todos", "turn-end"],
+    network: "allow",
+    dryRun: true,
   },
 
   // Code Quality (new)
@@ -513,6 +526,7 @@ export const HOOKS: HookMeta[] = [
     event: "SessionStart",
     matcher: "",
     tags: ["announcement", "start", "register", "messages", "agent-teams"],
+    network: "allow",
   },
   {
     name: "announce-stop",
@@ -546,6 +560,7 @@ export const HOOKS: HookMeta[] = [
     event: "SessionStart",
     matcher: "",
     tags: ["fleet", "catchup", "blockers", "announcements", "context", "agent-teams"],
+    network: "allow",
   },
   {
     name: "agent-rules-version-check",
@@ -568,6 +583,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "",
     tags: ["fleet", "freeze", "blockers", "gate", "safety", "agent-teams"],
+    network: "allow",
   },
 ];
 
@@ -592,4 +608,16 @@ export function searchHooks(query: string): HookMeta[] {
 
 export function getHook(name: string): HookMeta | undefined {
   return HOOKS.find((h) => h.name === name);
+}
+
+export function resolveHookNetworkAccess(
+  hook: HookMeta,
+  requested?: "deny" | "allow",
+): "deny" | "allow" {
+  const declared = hook.network ?? "deny";
+  if (requested === "allow" && declared !== "allow") {
+    throw new Error(`Hook '${hook.name}' declares local-only network access and cannot be elevated`);
+  }
+  if (requested === "deny") return "deny";
+  return declared;
 }

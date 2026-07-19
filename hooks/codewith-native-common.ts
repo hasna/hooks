@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
 import { homedir, tmpdir } from "os";
+import { runBoundedProcess, type HookNetworkAccess } from "./bounded-process.js";
 
 export interface CodewithHookInput {
   session_id?: string;
@@ -17,6 +18,7 @@ export interface CodewithHookInput {
   turn_id?: string;
   last_assistant_message?: string | null;
   stop_hook_active?: boolean;
+  dry_run?: boolean;
   agent_id?: string;
   agent_type?: string;
   agent?: unknown;
@@ -44,6 +46,7 @@ export interface CommandResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  error: string | null;
 }
 
 export function readInput(): CodewithHookInput {
@@ -80,34 +83,32 @@ export function commandExists(command: string, env: NodeJS.ProcessEnv = process.
 
 export async function runCommand(
   argv: string[],
-  options: { cwd?: string; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}
+  options: {
+    cwd?: string;
+    timeoutMs?: number;
+    env?: NodeJS.ProcessEnv;
+    envAllowlist?: readonly string[];
+    maxStdoutBytes?: number;
+    maxStderrBytes?: number;
+    network?: HookNetworkAccess;
+  } = {}
 ): Promise<CommandResult> {
-  const timeoutMs = options.timeoutMs ?? 5000;
-  const env = options.env ?? process.env;
-  let proc: ReturnType<typeof Bun.spawn> | null = null;
-  let timedOut = false;
-  try {
-    proc = Bun.spawn(argv, {
-      cwd: options.cwd,
-      env,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try { proc?.kill(); } catch {}
-    }, timeoutMs);
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited.catch(() => null),
-    ]);
-    clearTimeout(timer);
-    return { exitCode, stdout, stderr, timedOut };
-  } catch (error) {
-    return { exitCode: null, stdout: "", stderr: error instanceof Error ? error.message : String(error), timedOut };
-  }
+  const result = await runBoundedProcess(argv, {
+    cwd: options.cwd,
+    timeoutMs: options.timeoutMs ?? 5000,
+    env: options.env,
+    envAllowlist: options.envAllowlist,
+    maxStdoutBytes: options.maxStdoutBytes,
+    maxStderrBytes: options.maxStderrBytes,
+    network: options.network ?? "deny",
+  });
+  return {
+    exitCode: result.error ? null : result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    timedOut: result.timedOut,
+    error: result.error,
+  };
 }
 
 export function getCommand(input: CodewithHookInput): string {

@@ -24,29 +24,35 @@ export interface CreateProfileInput {
   name?: string;
 }
 
-function resolveProfilesDir(): string {
-  const newDir = join(homedir(), ".hasna", "hooks", "profiles");
-  const oldDir = join(homedir(), ".hooks", "profiles");
+const PROFILES_DIR = join(homedir(), ".hasna", "hooks", "profiles");
+const LEGACY_PROFILES_DIR = join(homedir(), ".hooks", "profiles");
 
-  // Auto-migrate: copy old profiles to new location if needed
-  if (!existsSync(newDir) && existsSync(oldDir)) {
+function migrateProfilesIfNeeded(): void {
+  // Migration is a mutation and therefore happens only on an explicitly
+  // mutating profile operation, never merely because the module was imported.
+  if (!existsSync(PROFILES_DIR) && existsSync(LEGACY_PROFILES_DIR)) {
     mkdirSync(join(homedir(), ".hasna", "hooks"), { recursive: true });
-    cpSync(oldDir, newDir, { recursive: true });
+    cpSync(LEGACY_PROFILES_DIR, PROFILES_DIR, { recursive: true });
   }
-
-  return newDir;
 }
 
-const PROFILES_DIR = resolveProfilesDir();
-
 function ensureProfilesDir(): void {
+  migrateProfilesIfNeeded();
   if (!existsSync(PROFILES_DIR)) {
     mkdirSync(PROFILES_DIR, { recursive: true });
   }
 }
 
-function profilePath(id: string): string {
+function profilePath(id: string, readOnly = false): string {
+  if (readOnly && !existsSync(PROFILES_DIR) && existsSync(LEGACY_PROFILES_DIR)) {
+    return join(LEGACY_PROFILES_DIR, `${id}.json`);
+  }
   return join(PROFILES_DIR, `${id}.json`);
+}
+
+function readableProfilesDir(): string {
+  if (existsSync(PROFILES_DIR)) return PROFILES_DIR;
+  return LEGACY_PROFILES_DIR;
 }
 
 function shortUuid(): string {
@@ -80,7 +86,7 @@ export function createProfile(input: CreateProfileInput): AgentProfile {
 }
 
 export function getProfile(id: string): AgentProfile | null {
-  const path = profilePath(id);
+  const path = profilePath(id, true);
   try {
     if (!existsSync(path)) return null;
     return JSON.parse(readFileSync(path, "utf-8"));
@@ -90,15 +96,16 @@ export function getProfile(id: string): AgentProfile | null {
 }
 
 export function listProfiles(): AgentProfile[] {
-  if (!existsSync(PROFILES_DIR)) return [];
+  const profilesDir = readableProfilesDir();
+  if (!existsSync(profilesDir)) return [];
 
   try {
-    const files = readdirSync(PROFILES_DIR).filter((f) => f.endsWith(".json"));
+    const files = readdirSync(profilesDir).filter((f) => f.endsWith(".json"));
     const profiles: AgentProfile[] = [];
 
     for (const file of files) {
       try {
-        const content = readFileSync(join(PROFILES_DIR, file), "utf-8");
+        const content = readFileSync(join(profilesDir, file), "utf-8");
         profiles.push(JSON.parse(content));
       } catch {
         // Skip corrupt files
@@ -117,6 +124,7 @@ export function updateProfile(
   id: string,
   data: Partial<Pick<AgentProfile, "name" | "preferences">>
 ): AgentProfile | null {
+  migrateProfilesIfNeeded();
   const profile = getProfile(id);
   if (!profile) return null;
 
@@ -128,6 +136,7 @@ export function updateProfile(
 }
 
 export function deleteProfile(id: string): boolean {
+  migrateProfilesIfNeeded();
   const path = profilePath(id);
   if (!existsSync(path)) return false;
 
@@ -140,6 +149,7 @@ export function deleteProfile(id: string): boolean {
 }
 
 export function touchProfile(id: string): void {
+  migrateProfilesIfNeeded();
   const profile = getProfile(id);
   if (!profile) return;
 

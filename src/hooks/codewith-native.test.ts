@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
 
@@ -844,5 +844,61 @@ describe("Codewith-native hooks", () => {
     expect(result.exitCode).toBe(0);
     expect(result.json.continue).toBe(true);
     expect(result.stderr).toContain("turn-end");
+  });
+
+  test("session-start dry-run skips identity mutation and cache writes", async () => {
+    const bin = join(tmp, "bin");
+    const mutationLog = join(tmp, "mutations.log");
+    const cache = join(tmp, "cache");
+    mkdirSync(bin, { recursive: true });
+    const fake = `#!/bin/sh\ncase "$*" in\n  "agents register"*|"agents heartbeat"*|"init "*|"heartbeat "*|"register-agent"*) printf '%s\\n' "$0 $*" >> ${JSON.stringify(mutationLog)} ;;\nesac\nprintf '{}\\n'\n`;
+    for (const name of ["conversations", "todos", "mementos"]) {
+      const path = join(bin, name);
+      writeFileSync(path, fake);
+      chmodSync(path, 0o755);
+    }
+
+    const result = await runHook("session-start", {
+      hook_event_name: "SessionStart",
+      session_id: "sess-dry-run",
+      cwd: tmp,
+      dry_run: true,
+      agent: { name: "synthetic-agent" },
+    }, { env: { PATH: bin, HASNA_HOOKS_CACHE_DIR: cache } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.continue).toBe(true);
+    expect(existsSync(mutationLog)).toBe(false);
+    expect(existsSync(cache)).toBe(false);
+  });
+
+  test("stop-sync dry-run skips heartbeats and task comments", async () => {
+    const bin = join(tmp, "bin");
+    const mutationLog = join(tmp, "mutations.log");
+    mkdirSync(bin, { recursive: true });
+    const fake = `#!/bin/sh\nprintf '%s\\n' "$0 $*" >> ${JSON.stringify(mutationLog)}\nprintf '{}\\n'\n`;
+    for (const name of ["conversations", "todos", "mementos"]) {
+      const path = join(bin, name);
+      writeFileSync(path, fake);
+      chmodSync(path, 0o755);
+    }
+
+    const result = await runHook("stop-sync", {
+      hook_event_name: "Stop",
+      session_id: "sess-stop-dry-run",
+      cwd: tmp,
+      dry_run: true,
+      task_id: "synthetic-task",
+      agent: { name: "synthetic-agent" },
+    }, {
+      env: {
+        PATH: bin,
+        HASNA_HOOKS_STOP_SYNC_TASK_COMMENT: "1",
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.continue).toBe(true);
+    expect(existsSync(mutationLog)).toBe(false);
   });
 });
