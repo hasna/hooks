@@ -423,6 +423,59 @@ describe("bounded MCP hook execution", () => {
     }
   });
 
+  test("hooks_preview keeps malformed, ambiguous, and signaled guards indeterminate", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hooks-mcp-preview-hostile-output-"));
+    roots.push(root);
+    const paths = new Map([
+      ["malformed", fixtureHook(root, "malformed", 'console.log("not-json")')],
+      ["empty", fixtureHook(root, "empty", "")],
+      ["nondecision", fixtureHook(root, "nondecision", "console.log(JSON.stringify({ dry_run: true }))")],
+      ["ambiguous", fixtureHook(root, "ambiguous", `
+        console.log(JSON.stringify({
+          continue: true,
+          hookSpecificOutput: { permissionDecision: "ask" },
+        }));
+      `)],
+      ["signaled", fixtureHook(root, "signaled", 'process.kill(process.pid, "SIGTERM")')],
+    ]);
+    const { client } = await withServer([
+      meta("malformed", { network: "allow", dryRun: true }),
+      meta("empty", { network: "allow", dryRun: true }),
+      meta("nondecision", { network: "allow", dryRun: true }),
+      meta("ambiguous", { network: "allow", dryRun: true }),
+      meta("signaled", { network: "allow", dryRun: true }),
+    ], paths);
+    try {
+      const data = parse(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "echo safe" } },
+      }));
+
+      expect(data.results.map((result: any) => result.decision)).toEqual([
+        "indeterminate",
+        "indeterminate",
+        "indeterminate",
+        "indeterminate",
+        "indeterminate",
+      ]);
+      expect(data.results.find((result: any) => result.name === "ambiguous").error).toContain("ambiguous");
+      const signaled = data.results.find((result: any) => result.name === "signaled");
+      expect(signaled.decision).toBe("indeterminate");
+      expect(signaled.exitCode).not.toBe(0);
+      expect(signaled.error).toMatch(/signal|exited with code/);
+      expect(data.decision).toBe("indeterminate");
+      expect(data.indeterminate_by).toEqual([
+        "malformed",
+        "empty",
+        "nondecision",
+        "ambiguous",
+        "signaled",
+      ]);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("MCP execution exposes CLAUDE_ENV_FILE only to its declared hook capability", async () => {
     const root = mkdtempSync(join(tmpdir(), "hooks-mcp-env-"));
     roots.push(root);

@@ -166,6 +166,23 @@ function classifyPreviewOutput(name: string, output: any): PreviewHookResult {
   if (output?.decision === "block" || output?.continue === false || permissionDecision === "deny") {
     return { name, decision: "block", reason, raw: output };
   }
+
+  const hasAmbiguousDecision = output !== null
+    && typeof output === "object"
+    && (
+      ("decision" in output && output.decision !== "approve" && output.decision !== "block")
+      || ("continue" in output && typeof output.continue !== "boolean")
+      || (permissionDecision !== undefined && permissionDecision !== "allow" && permissionDecision !== "deny")
+    );
+  if (hasAmbiguousDecision) {
+    return {
+      name,
+      decision: "indeterminate",
+      error: "hook output contained an ambiguous decision",
+      raw: output,
+    };
+  }
+
   if (output?.decision === "approve" || output?.continue === true || permissionDecision === "allow") {
     return { name, decision: "approve", reason, raw: output };
   }
