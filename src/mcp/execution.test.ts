@@ -317,6 +317,118 @@ describe("bounded MCP hook execution", () => {
     }
   });
 
+  test("hooks_preview retains missing metadata and invalid matchers as indeterminate", async () => {
+    const invalid = meta("invalid", { matcher: "[" });
+    const { client } = await withServer([invalid], new Map(), {
+      getRegisteredHooks: () => ["ghost", "invalid"],
+    });
+    try {
+      const data = parse(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "echo safe" } },
+      }));
+
+      expect(data.decision).toBe("indeterminate");
+      expect(data.result).not.toBe("no_hooks_match");
+      expect(data.matching_hooks).toEqual([]);
+      expect(data.results).toHaveLength(2);
+      expect(data.results.find((result: any) => result.name === "ghost")).toMatchObject({
+        decision: "indeterminate",
+      });
+      expect(data.results.find((result: any) => result.name === "ghost").error).toContain("metadata");
+      expect(data.results.find((result: any) => result.name === "invalid")).toMatchObject({
+        decision: "indeterminate",
+      });
+      expect(data.results.find((result: any) => result.name === "invalid").error).toContain("matcher");
+      expect(data.indeterminate_by).toEqual(["ghost", "invalid"]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("hooks_preview distinguishes valid event and tool nonmatches from corrupt registration", async () => {
+    const { client } = await withServer([
+      meta("different-tool", { matcher: "Write" }),
+      meta("different-event", { event: "PostToolUse", matcher: "Bash" }),
+    ], new Map());
+    try {
+      const data = parse(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "echo safe" } },
+      }));
+
+      expect(data).toEqual({
+        tool_name: "Bash",
+        matching_hooks: [],
+        result: "no_hooks_match",
+        decision: "approve",
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("hooks_preview keeps block precedence while retaining an invalid matcher", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hooks-mcp-preview-invalid-block-"));
+    roots.push(root);
+    const paths = new Map([
+      ["blocker", fixtureHook(root, "blocker", 'console.log(JSON.stringify({ decision: "block", reason: "dangerous" }))')],
+    ]);
+    const { client } = await withServer([
+      meta("blocker", { network: "allow", dryRun: true }),
+      meta("invalid", { matcher: "[" }),
+    ], paths);
+    try {
+      const data = parse(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "echo safe" } },
+      }));
+
+      expect(data.decision).toBe("block");
+      expect(data.blocked_by).toBe("blocker");
+      expect(data.matching_hooks).toEqual(["blocker"]);
+      expect(data.results.find((result: any) => result.name === "blocker")).toMatchObject({
+        decision: "block",
+      });
+      expect(data.results.find((result: any) => result.name === "invalid")).toMatchObject({
+        decision: "indeterminate",
+      });
+      expect(data.indeterminate_by).toEqual(["invalid"]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("hooks_preview keeps approval indeterminate when a registered matcher is invalid", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hooks-mcp-preview-invalid-approve-"));
+    roots.push(root);
+    const paths = new Map([
+      ["explicit", fixtureHook(root, "explicit", 'console.log(JSON.stringify({ decision: "approve" }))')],
+    ]);
+    const { client } = await withServer([
+      meta("explicit", { network: "allow", dryRun: true }),
+      meta("invalid", { matcher: "[" }),
+    ], paths);
+    try {
+      const data = parse(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "echo safe" } },
+      }));
+
+      expect(data.decision).toBe("indeterminate");
+      expect(data.matching_hooks).toEqual(["explicit"]);
+      expect(data.results.find((result: any) => result.name === "explicit")).toMatchObject({
+        decision: "approve",
+      });
+      expect(data.results.find((result: any) => result.name === "invalid")).toMatchObject({
+        decision: "indeterminate",
+      });
+      expect(data.indeterminate_by).toEqual(["invalid"]);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("hooks_preview reports missing scripts and containment failures as indeterminate", async () => {
     const root = mkdtempSync(join(tmpdir(), "hooks-mcp-preview-failures-"));
     roots.push(root);

@@ -157,6 +157,10 @@ interface PreviewHookResult {
   raw?: unknown;
 }
 
+type PreviewHookCandidate =
+  | { kind: "match"; name: string; meta: HookMeta }
+  | { kind: "error"; name: string; result: PreviewHookResult };
+
 function classifyPreviewOutput(name: string, output: any): PreviewHookResult {
   const permissionDecision = output?.hookSpecificOutput?.permissionDecision;
   const reason = output?.reason
@@ -631,20 +635,54 @@ export function createHooksServer(options: HooksServerOptions = {}): McpServer {
     },
     async ({ tool_name, tool_input, scope, timeout_ms, network }) => {
       const registered = executionGetRegisteredHooks(scope);
-      const matchingHooks = registered.filter((name) => {
+      const candidates: PreviewHookCandidate[] = [];
+      for (const name of registered) {
         const meta = executionGetHook(name);
-        if (!meta || meta.event !== "PreToolUse") return false;
-        if (!meta.matcher) return true;
-        try { return new RegExp(meta.matcher).test(tool_name); } catch { return false; }
-      });
+        if (!meta) {
+          candidates.push({
+            kind: "error",
+            name,
+            result: {
+              name,
+              decision: "indeterminate",
+              error: "registered hook metadata not found",
+            },
+          });
+          continue;
+        }
+        if (meta.event !== "PreToolUse") continue;
+        if (meta.matcher) {
+          let matches: boolean;
+          try {
+            matches = new RegExp(meta.matcher).test(tool_name);
+          } catch {
+            candidates.push({
+              kind: "error",
+              name,
+              result: {
+                name,
+                decision: "indeterminate",
+                error: "registered hook matcher is invalid",
+              },
+            });
+            continue;
+          }
+          if (!matches) continue;
+        }
+        candidates.push({ kind: "match", name, meta });
+      }
+      const matchingHooks = candidates
+        .filter((candidate) => candidate.kind === "match")
+        .map((candidate) => candidate.name);
 
-      if (matchingHooks.length === 0) {
+      if (candidates.length === 0) {
         return { content: [{ type: "text", text: JSON.stringify({ tool_name, matching_hooks: [], result: "no_hooks_match", decision: "approve" }) }] };
       }
 
       const input = { hook_event_name: "PreToolUse", tool_name, tool_input };
-      const results: PreviewHookResult[] = await Promise.all(matchingHooks.map(async (name) => {
-        const meta = executionGetHook(name)!;
+      const results: PreviewHookResult[] = await Promise.all(candidates.map(async (candidate) => {
+        if (candidate.kind === "error") return candidate.result;
+        const { name, meta } = candidate;
         if (meta.dryRun !== true) {
           return {
             name,
