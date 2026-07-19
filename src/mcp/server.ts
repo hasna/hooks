@@ -30,6 +30,7 @@ import {
   getHooksByCategory,
   searchHooks,
   getHook,
+  getHookEvents,
   resolveHookEnvironmentAllowlist,
   resolveHookNetworkAccess,
   type HookMeta,
@@ -650,7 +651,7 @@ export function createHooksServer(options: HooksServerOptions = {}): McpServer {
           });
           continue;
         }
-        if (meta.event !== "PreToolUse") continue;
+        if (!getHookEvents(meta).includes("PreToolUse")) continue;
         if (meta.matcher) {
           let matches: boolean;
           try {

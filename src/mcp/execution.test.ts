@@ -368,6 +368,152 @@ describe("bounded MCP hook execution", () => {
     }
   });
 
+  test("hooks_preview treats multi-event PreToolUse matcher errors as indeterminate", async () => {
+    const { client } = await withServer([
+      meta("multi-invalid", {
+        event: "PostToolUse",
+        events: ["PostToolUse", "PreToolUse"],
+        matcher: "[",
+      }),
+    ], new Map());
+    try {
+      const data = parse(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "echo safe" } },
+      }));
+
+      expect(data.decision).toBe("indeterminate");
+      expect(data.result).not.toBe("no_hooks_match");
+      expect(data.matching_hooks).toEqual([]);
+      expect(data.results).toHaveLength(1);
+      expect(data.results[0]).toMatchObject({
+        name: "multi-invalid",
+        decision: "indeterminate",
+      });
+      expect(data.results[0].error).toContain("matcher");
+      expect(data.indeterminate_by).toEqual(["multi-invalid"]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("hooks_preview executes a valid blocking hook that includes PreToolUse in events", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hooks-mcp-preview-multi-block-"));
+    roots.push(root);
+    const paths = new Map([
+      ["multi-blocker", fixtureHook(root, "multi-blocker", 'console.log(JSON.stringify({ decision: "block", reason: "dangerous" }))')],
+    ]);
+    const { client } = await withServer([
+      meta("multi-blocker", {
+        event: "PostToolUse",
+        events: ["PostToolUse", "PreToolUse"],
+        matcher: "Bash",
+        network: "allow",
+        dryRun: true,
+      }),
+    ], paths);
+    try {
+      const data = parse(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "echo safe" } },
+      }));
+
+      expect(data.matching_hooks).toEqual(["multi-blocker"]);
+      expect(data.results).toHaveLength(1);
+      expect(data.results[0]).toMatchObject({
+        name: "multi-blocker",
+        decision: "block",
+        reason: "dangerous",
+      });
+      expect(data.decision).toBe("block");
+      expect(data.blocked_by).toBe("multi-blocker");
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("hooks_preview ignores a valid multi-event hook whose matcher does not match the tool", async () => {
+    const { client } = await withServer([
+      meta("multi-nonmatch", {
+        event: "PostToolUse",
+        events: ["PostToolUse", "PreToolUse"],
+        matcher: "Write",
+        dryRun: true,
+      }),
+    ], new Map());
+    try {
+      const data = parse(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "echo safe" } },
+      }));
+
+      expect(data).toEqual({
+        tool_name: "Bash",
+        matching_hooks: [],
+        result: "no_hooks_match",
+        decision: "approve",
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("hooks_preview treats nonempty events as authoritative before matcher validation", async () => {
+    const { client } = await withServer([
+      meta("events-exclude-pre", {
+        event: "PreToolUse",
+        events: ["PostToolUse"],
+        matcher: "[",
+      }),
+      meta("single-post", {
+        event: "PostToolUse",
+        matcher: "[",
+      }),
+    ], new Map());
+    try {
+      const data = parse(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "echo safe" } },
+      }));
+
+      expect(data).toEqual({
+        tool_name: "Bash",
+        matching_hooks: [],
+        result: "no_hooks_match",
+        decision: "approve",
+      });
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("hooks_preview falls back to the legacy event for empty and absent events arrays", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hooks-mcp-preview-legacy-event-"));
+    roots.push(root);
+    const approve = 'console.log(JSON.stringify({ decision: "approve" }))';
+    const paths = new Map([
+      ["empty-events", fixtureHook(root, "empty-events", approve)],
+      ["legacy-event", fixtureHook(root, "legacy-event", approve)],
+    ]);
+    const { client } = await withServer([
+      meta("empty-events", { events: [], network: "allow", dryRun: true }),
+      meta("legacy-event", { network: "allow", dryRun: true }),
+    ], paths);
+    try {
+      const data = parse(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "echo safe" } },
+      }));
+
+      expect(data.matching_hooks).toEqual(["empty-events", "legacy-event"]);
+      expect(data.results.map((result: any) => result.decision)).toEqual(["approve", "approve"]);
+      expect(data.decision).toBe("approve");
+      expect(data.indeterminate_by).toEqual([]);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("hooks_preview keeps block precedence while retaining an invalid matcher", async () => {
     const root = mkdtempSync(join(tmpdir(), "hooks-mcp-preview-invalid-block-"));
     roots.push(root);
