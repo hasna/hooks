@@ -140,6 +140,45 @@ describe("bounded MCP hook execution", () => {
     }
   });
 
+  test("hooks_run defaults to the event timeout and accepts an explicit override", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hooks-mcp-event-timeout-"));
+    roots.push(root);
+    const paths = new Map([
+      ["event-timeout", fixtureHook(root, "event-timeout", `
+        await Bun.sleep(1_200);
+        console.log(JSON.stringify({ completed: true }));
+      `)],
+    ]);
+    const hook = meta("event-timeout", {
+      event: "Stop",
+      matcher: "",
+      network: "allow",
+      executions: [{ event: "Stop", entrypoint: "src/hook.ts", timeout: 1 }],
+    });
+    const { client } = await withServer([hook], paths);
+    try {
+      const defaulted = parse(await client.callTool({
+        name: "hooks_run",
+        arguments: { name: "event-timeout", input: { hook_event_name: "Stop" } },
+      }));
+      expect(defaulted.timedOut).toBe(true);
+      expect(defaulted.timeout_ms).toBe(1_000);
+
+      const overridden = parse(await client.callTool({
+        name: "hooks_run",
+        arguments: {
+          name: "event-timeout",
+          input: { hook_event_name: "Stop" },
+          timeout_ms: 2_000,
+        },
+      }));
+      expect(overridden.error).toBeUndefined();
+      expect(overridden.output).toEqual({ completed: true });
+    } finally {
+      await client.close();
+    }
+  });
+
   test("hooks_run applies declared deny and allow network policies", async () => {
     const root = mkdtempSync(join(tmpdir(), "hooks-mcp-network-"));
     roots.push(root);
@@ -760,6 +799,121 @@ describe("bounded MCP hook execution", () => {
       }));
       expect(capable.output.value).toBe(envFile);
       expect(ordinary.output.value).toBe("unset");
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("MCP execution routes agentmessages by event and isolates event capabilities", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hooks-mcp-event-entrypoints-"));
+    roots.push(root);
+    const agentmessagesDir = join(root, "agentmessages");
+    mkdirSync(join(agentmessagesDir, "src"), { recursive: true });
+    writeFileSync(join(agentmessagesDir, "src", "session-start.ts"), `
+      console.log(JSON.stringify({
+        entrypoint: "session-start",
+        claudeEnvFile: process.env.CLAUDE_ENV_FILE ?? "unset",
+        agentId: process.env.SMSG_AGENT_ID ?? "unset",
+        projectId: process.env.SMSG_PROJECT_ID ?? "unset",
+      }));
+    `);
+    writeFileSync(join(agentmessagesDir, "src", "check-messages.ts"), `
+      console.log(JSON.stringify({
+        entrypoint: "check-messages",
+        claudeEnvFile: process.env.CLAUDE_ENV_FILE ?? "unset",
+        agentId: process.env.SMSG_AGENT_ID ?? "unset",
+        projectId: process.env.SMSG_PROJECT_ID ?? "unset",
+      }));
+    `);
+    const ordinarySource = `
+      console.log(JSON.stringify({
+        claudeEnvFile: process.env.CLAUDE_ENV_FILE ?? "unset",
+        agentId: process.env.SMSG_AGENT_ID ?? "unset",
+        projectId: process.env.SMSG_PROJECT_ID ?? "unset",
+      }));
+    `;
+    const paths = new Map([
+      ["agentmessages", agentmessagesDir],
+      ["ordinary", fixtureHook(root, "ordinary", ordinarySource)],
+    ]);
+    const agentmessages = meta("agentmessages", {
+      event: "Stop",
+      events: ["SessionStart", "Stop"],
+      envAllowlist: undefined,
+      executions: [
+        {
+          event: "SessionStart",
+          entrypoint: "src/session-start.ts",
+          envAllowlist: ["CLAUDE_ENV_FILE"],
+        },
+        {
+          event: "Stop",
+          entrypoint: "src/check-messages.ts",
+          envAllowlist: ["SMSG_AGENT_ID", "SMSG_PROJECT_ID"],
+        },
+      ],
+    } as Partial<HookMeta> & Record<string, unknown>);
+    const envFile = join(root, "claude-env");
+    const { client } = await withServer([
+      agentmessages,
+      meta("ordinary"),
+    ], paths, {
+      env: {
+        PATH: process.env.PATH ?? "",
+        CLAUDE_ENV_FILE: envFile,
+        SMSG_AGENT_ID: "synthetic-agent",
+        SMSG_PROJECT_ID: "synthetic-project",
+      },
+    });
+
+    try {
+      const missingEvent = parse(await client.callTool({
+        name: "hooks_run",
+        arguments: {
+          name: "agentmessages",
+          input: {},
+        },
+      }));
+      const sessionStart = parse(await client.callTool({
+        name: "hooks_run",
+        arguments: {
+          name: "agentmessages",
+          input: { hook_event_name: "SessionStart" },
+        },
+      }));
+      const stop = parse(await client.callTool({
+        name: "hooks_run",
+        arguments: {
+          name: "agentmessages",
+          input: { hook_event_name: "Stop" },
+        },
+      }));
+      const ordinary = parse(await client.callTool({
+        name: "hooks_run",
+        arguments: {
+          name: "ordinary",
+          input: { hook_event_name: "PreToolUse" },
+        },
+      }));
+
+      expect(missingEvent.error).toContain("requires hook_event_name");
+      expect(sessionStart.output).toEqual({
+        entrypoint: "session-start",
+        claudeEnvFile: envFile,
+        agentId: "unset",
+        projectId: "unset",
+      });
+      expect(stop.output).toEqual({
+        entrypoint: "check-messages",
+        claudeEnvFile: "unset",
+        agentId: "synthetic-agent",
+        projectId: "synthetic-project",
+      });
+      expect(ordinary.output).toEqual({
+        claudeEnvFile: "unset",
+        agentId: "unset",
+        projectId: "unset",
+      });
     } finally {
       await client.close();
     }

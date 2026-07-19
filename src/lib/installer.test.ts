@@ -15,7 +15,7 @@ import {
   buildCodewithTomlFragment,
   isEventSupported,
 } from "./installer.js";
-import { HOOKS, getHookEvents } from "./registry.js";
+import { HOOKS, getHookEvents, getHookExecutions } from "./registry.js";
 
 const GLOBAL_SETTINGS = join(homedir(), ".claude", "settings.json");
 
@@ -299,6 +299,82 @@ describe("installer", () => {
       expect(found).toBe(true);
     });
 
+    test("agentmessages preserves one generic command across both event registrations", () => {
+      const result = installHook("agentmessages");
+      expect(result.success).toBe(true);
+
+      const settings = JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"));
+      for (const [event, timeout] of [["SessionStart", 10], ["Stop", 5]] as const) {
+        const matches = (settings.hooks[event] || []).filter((entry: any) =>
+          entry.hooks?.some((hook: any) => hook.command === "hooks run agentmessages")
+        );
+        expect(matches).toHaveLength(1);
+        expect(matches[0].hooks).toEqual([{
+          type: "command",
+          command: "hooks run agentmessages",
+          timeout,
+        }]);
+      }
+    });
+
+    test("agentmessages overwrite deduplicates generic and package-specific registrations", () => {
+      const hookDir = getHookPath("agentmessages");
+      const settings = existsSync(GLOBAL_SETTINGS)
+        ? JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"))
+        : {};
+      settings.hooks ??= {};
+      settings.hooks.SessionStart = [
+        ...(settings.hooks.SessionStart ?? []),
+        { hooks: [{ type: "command", command: `bun ${join(hookDir, "src", "session-start.ts")}`, timeout: 10 }] },
+        { hooks: [{ type: "command", command: "hooks run agentmessages" }] },
+      ];
+      settings.hooks.Stop = [
+        ...(settings.hooks.Stop ?? []),
+        { hooks: [{ type: "command", command: `bun ${join(hookDir, "src", "check-messages.ts")}`, timeout: 5 }] },
+        { hooks: [{ type: "command", command: "hooks run agentmessages --profile synthetic-profile" }] },
+      ];
+      writeFileSync(GLOBAL_SETTINGS, JSON.stringify(settings, null, 2) + "\n");
+
+      expect(getRegisteredHooks()).toContain("agentmessages");
+      const result = installHook("agentmessages", { overwrite: true });
+      expect(result.success).toBe(true);
+
+      const after = JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"));
+      const commands = Object.values(after.hooks).flatMap((entries: any) =>
+        entries.flatMap((entry: any) => entry.hooks?.map((hook: any) => hook.command) ?? [])
+      );
+      expect(commands.filter((command) => command === "hooks run agentmessages")).toHaveLength(2);
+      expect(commands.some((command) => command.includes("hook-agentmessages/src/session-start.ts"))).toBe(false);
+      expect(commands.some((command) => command.includes("hook-agentmessages/src/check-messages.ts"))).toBe(false);
+      expect(commands.some((command) => command.includes("--profile synthetic-profile"))).toBe(false);
+    });
+
+    test("agentmessages overwrite preserves unrelated commands co-located with a direct registration", () => {
+      const hookDir = getHookPath("agentmessages");
+      const settings = existsSync(GLOBAL_SETTINGS)
+        ? JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"))
+        : {};
+      settings.hooks ??= {};
+      settings.hooks.SessionStart = [{
+        matcher: "synthetic-shared-entry",
+        hooks: [
+          { type: "command", command: `bun ${join(hookDir, "src", "session-start.ts")}`, timeout: 10 },
+          { type: "command", command: "hooks run gitguard" },
+        ],
+      }];
+      writeFileSync(GLOBAL_SETTINGS, JSON.stringify(settings, null, 2) + "\n");
+
+      const result = installHook("agentmessages", { overwrite: true });
+      expect(result.success).toBe(true);
+
+      const after = JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"));
+      const shared = after.hooks.SessionStart.find((entry: any) => entry.matcher === "synthetic-shared-entry");
+      expect(shared?.hooks).toEqual([{ type: "command", command: "hooks run gitguard" }]);
+      expect(after.hooks.SessionStart.flatMap((entry: any) => entry.hooks).filter(
+        (hook: any) => hook.command === "hooks run agentmessages"
+      )).toHaveLength(1);
+    });
+
     test("Notification hook registers under Notification", () => {
       installHook("contextrefresh"); // Notification
       const settings = JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"));
@@ -525,11 +601,12 @@ describe("installer", () => {
     const HOOK_SOURCE_NAMES = HOOKS.map((hook) => hook.name);
     const CATALOG_ONLY_HOOKS = new Set(["knowledge-context"]);
 
-    test("every hook has src/hook.ts in package (except agentmessages)", () => {
+    test("every hook execution entrypoint exists in its package", () => {
       for (const name of HOOK_SOURCE_NAMES) {
-        if (name === "agentmessages") continue; // uses different file structure
-        const hookScript = join(getHookPath(name), "src", "hook.ts");
-        expect(existsSync(hookScript)).toBe(true);
+        const meta = HOOKS.find((hook) => hook.name === name)!;
+        for (const execution of getHookExecutions(meta)) {
+          expect(existsSync(join(getHookPath(name), execution.entrypoint))).toBe(true);
+        }
       }
     });
 
@@ -589,6 +666,21 @@ describe("installer", () => {
       const result = installHook("fleet-catchup", { target: "gemini", overwrite: true });
       expect(result.success).toBe(false);
       expect(result.error).toContain("not supported by target 'gemini'");
+    });
+
+    test("gemini rejects all of agentmessages instead of partially installing Stop", () => {
+      const settingsPath = getSettingsPath("global", "gemini");
+      const before = existsSync(settingsPath) ? readFileSync(settingsPath, "utf-8") : null;
+      try {
+        const result = installHook("agentmessages", { target: "gemini", overwrite: true });
+        expect(result.success).toBe(false);
+        expect(result.error).toContain("SessionStart");
+        const after = existsSync(settingsPath) ? readFileSync(settingsPath, "utf-8") : null;
+        expect(after).toBe(before);
+      } finally {
+        if (before === null) rmSync(settingsPath, { force: true });
+        else writeFileSync(settingsPath, before);
+      }
     });
 
     test("hyphenated hook names round-trip install → list → remove (regression)", () => {
@@ -661,6 +753,15 @@ describe("installer", () => {
       expect(fragment.match(/command = "hooks run knowledge-context"/g)).toHaveLength(3);
       expect(fragment).toContain('timeout = 6');
       expect(fragment).toContain('statusMessage = "Loading Knowledge context"');
+    });
+
+    test("agentmessages Codewith fragments preserve event timeout parity", () => {
+      const fragment = buildCodewithTomlFragment("agentmessages");
+      expect(fragment).toContain("[[hooks.SessionStart]]");
+      expect(fragment).toContain("[[hooks.Stop]]");
+      expect(fragment.match(/command = "hooks run agentmessages"/g)).toHaveLength(2);
+      expect(fragment.match(/timeout = 10/g)).toHaveLength(1);
+      expect(fragment.match(/timeout = 5/g)).toHaveLength(1);
     });
 
     test("worktree-guard Codewith matcher covers file tool aliases", () => {

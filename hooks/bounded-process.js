@@ -89,8 +89,6 @@ const SAFE_ENV_NAMES = Object.freeze([
   "HOOKS_SOUND_FILE",
   "HOOKS_SPACE",
   "RUN_ID",
-  "SMSG_AGENT_ID",
-  "SMSG_PROJECT_ID",
   "TASK_ID",
   "VIRTUAL_ENV",
   "NVM_DIR",

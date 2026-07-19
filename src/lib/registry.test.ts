@@ -7,6 +7,9 @@ import {
   searchHooks,
   getHook,
   getHookEvents,
+  getHookExecutions,
+  resolveHookExecution,
+  resolveHookExecutionTimeoutMs,
   type HookMeta,
   type Category,
 } from "./registry.js";
@@ -61,12 +64,77 @@ describe("registry", () => {
       }
     });
 
-    test("scopes CLAUDE_ENV_FILE to the source-proven agentmessages hook", () => {
-      expect(getHook("agentmessages")?.envAllowlist).toEqual(["CLAUDE_ENV_FILE"]);
-      expect(
-        HOOKS.filter((hook) => hook.name !== "agentmessages")
-          .some((hook) => hook.envAllowlist?.includes("CLAUDE_ENV_FILE")),
-      ).toBe(false);
+    test("declares event-specific agentmessages entrypoints and capabilities", () => {
+      const hook = getHook("agentmessages")! as HookMeta & {
+        executions?: Array<{
+          event: string;
+          entrypoint: string;
+          timeout?: number;
+          envAllowlist?: readonly string[];
+        }>;
+      };
+
+      expect(getHookEvents(hook)).toEqual(["SessionStart", "Stop"]);
+      expect(hook.executions).toEqual([
+        {
+          event: "SessionStart",
+          entrypoint: "src/session-start.ts",
+          timeout: 10,
+          envAllowlist: ["CLAUDE_ENV_FILE"],
+        },
+        {
+          event: "Stop",
+          entrypoint: "src/check-messages.ts",
+          timeout: 5,
+          envAllowlist: ["SMSG_AGENT_ID", "SMSG_PROJECT_ID"],
+        },
+      ]);
+      expect(hook.envAllowlist).toBeUndefined();
+    });
+
+    test("validates execution metadata and requires an explicit event for multi-entrypoint hooks", () => {
+      const agentmessages = getHook("agentmessages")!;
+      expect(resolveHookExecution(agentmessages, "SessionStart").entrypoint).toBe("src/session-start.ts");
+      expect(resolveHookExecution(agentmessages, "Stop").entrypoint).toBe("src/check-messages.ts");
+      expect(resolveHookExecutionTimeoutMs(resolveHookExecution(agentmessages, "SessionStart"))).toBe(10_000);
+      expect(resolveHookExecutionTimeoutMs(resolveHookExecution(agentmessages, "Stop"))).toBe(5_000);
+      expect(resolveHookExecutionTimeoutMs(resolveHookExecution(agentmessages, "Stop"), 1_234)).toBe(1_234);
+      expect(() => resolveHookExecution(agentmessages)).toThrow("requires hook_event_name");
+
+      const legacy = getHook("gitguard")!;
+      expect(getHookExecutions(legacy)).toEqual([{
+        event: "PreToolUse",
+        entrypoint: "src/hook.ts",
+      }]);
+
+      const malformed = (executions: any[], events?: any[]) => ({
+        ...agentmessages,
+        name: "malformed",
+        ...(events ? { events } : { events: undefined }),
+        executions,
+      }) as HookMeta;
+      expect(() => getHookExecutions(malformed([]))).toThrow("empty executions contract");
+      expect(() => getHookExecutions(malformed([
+        { event: "Stop", entrypoint: "src/a.ts" },
+        { event: "Stop", entrypoint: "src/b.ts" },
+      ]))).toThrow("duplicate execution event");
+      expect(() => getHookExecutions(malformed([
+        { event: "Stop", entrypoint: "../outside.ts" },
+      ]))).toThrow("invalid execution entrypoint");
+      expect(() => getHookExecutions(malformed([
+        { event: "Unsupported", entrypoint: "src/hook.ts" },
+      ]))).toThrow("unsupported execution event");
+      expect(() => getHookExecutions(malformed([
+        { event: "Stop", entrypoint: "src/hook.ts", timeout: 0 },
+      ]))).toThrow("invalid execution timeout");
+      expect(() => getHookExecutions(malformed([
+        { event: "SessionStart", entrypoint: "src/start.ts" },
+        { event: "Stop", entrypoint: "src/stop.ts" },
+      ], ["Stop", "SessionStart"]))).toThrow("must exactly match");
+      expect(() => getHookExecutions(malformed([
+        { event: "SessionStart", entrypoint: "src/start.ts" },
+        { event: "Stop", entrypoint: "src/stop.ts" },
+      ], []))).toThrow("must exactly match");
     });
 
     test("keeps MCP preview limited to audited read-only PreToolUse hooks", () => {

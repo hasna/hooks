@@ -355,6 +355,35 @@ describe("CLI", () => {
       expect(Array.isArray(data.healthy_hooks)).toBe(true);
       expect(Array.isArray(data.issues)).toBe(true);
     });
+
+    test("validates all agentmessages entrypoints, events, and timeouts", async () => {
+      backupSettings();
+      try {
+        const installed = await runJson("install", "agentmessages", "--overwrite");
+        expect(installed.installed).toContain("agentmessages");
+
+        const healthy = await runJson("doctor");
+        expect(healthy.healthy_hooks).toContain("agentmessages");
+        expect(healthy.issues.filter((issue: any) => issue.hook === "agentmessages")).toEqual([]);
+
+        const settings = JSON.parse(readFileSync(SETTINGS_PATH, "utf-8"));
+        const stopCommand = settings.hooks.Stop
+          .flatMap((entry: any) => entry.hooks ?? [])
+          .find((hook: any) => hook.command === "hooks run agentmessages");
+        stopCommand.timeout = 10;
+        writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + "\n");
+
+        const unhealthy = await runJson("doctor");
+        expect(unhealthy.healthy_hooks).not.toContain("agentmessages");
+        expect(unhealthy.issues).toContainEqual({
+          hook: "agentmessages",
+          issue: "Incorrect timeout under Stop (expected 5s)",
+          severity: "error",
+        });
+      } finally {
+        restoreSettings();
+      }
+    });
   });
 
   describe("hooks update", () => {
@@ -462,6 +491,66 @@ describe("CLI", () => {
       expect(stdout).toContain("Execute a hook");
       expect(stdout).toContain("--deny-network");
       expect(stdout).not.toContain("--allow-network");
+    });
+
+    test("agentmessages requires an event and routes both event-specific entrypoints", async () => {
+      const home = mkdtempSync(join(tmpdir(), "hooks-cli-agentmessages-"));
+      const serviceDir = join(home, ".service", "service-message");
+      const envFile = join(home, "claude-env");
+      try {
+        const missingEvent = await runWithInputAndEnv("{}", { HOME: home }, "run", "agentmessages");
+        expect(missingEvent.exitCode).not.toBe(0);
+        expect(missingEvent.stderr).toContain("requires hook_event_name");
+
+        mkdirSync(join(serviceDir, "agents"), { recursive: true });
+        writeFileSync(join(serviceDir, "config.json"), JSON.stringify({ agentId: "synthetic-agent" }));
+        writeFileSync(join(serviceDir, "agents", "synthetic-agent.json"), JSON.stringify({
+          id: "synthetic-agent",
+          name: "Synthetic Agent",
+          createdAt: 1,
+        }));
+        const sessionStart = await runWithInputAndEnv(
+          JSON.stringify({ hook_event_name: "SessionStart", session_id: "synthetic-session", cwd: home }),
+          {
+            HOME: home,
+            CLAUDE_ENV_FILE: envFile,
+            SMSG_AGENT_ID: "must-not-route-session-start",
+            SMSG_PROJECT_ID: "must-not-route-session-start",
+          },
+          "run", "agentmessages",
+        );
+        expect(sessionStart.exitCode).toBe(0);
+        expect(JSON.parse(sessionStart.stdout).continue).toBe(true);
+        expect(readFileSync(envFile, "utf-8")).toContain('export SMSG_AGENT_ID="synthetic-agent"');
+
+        const projectId = home.split("/").pop()!.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+        const inbox = join(serviceDir, "messages", projectId, "inbox", "synthetic-agent");
+        mkdirSync(inbox, { recursive: true });
+        writeFileSync(join(inbox, "message-1.json"), JSON.stringify({
+          id: "message-1",
+          timestamp: 1,
+          from: "sender",
+          to: "synthetic-agent",
+          project: projectId,
+          subject: "Synthetic message",
+          body: "Event-specific Stop entrypoint",
+          read: false,
+        }));
+        const stop = await runWithInputAndEnv(
+          JSON.stringify({ hook_event_name: "Stop", session_id: "synthetic-session", cwd: home }),
+          {
+            HOME: home,
+            CLAUDE_ENV_FILE: join(home, "must-not-route-stop"),
+            SMSG_AGENT_ID: "synthetic-agent",
+            SMSG_PROJECT_ID: projectId,
+          },
+          "run", "agentmessages",
+        );
+        expect(stop.exitCode).toBe(0);
+        expect(JSON.parse(stop.stdout).stopReason).toContain("Synthetic message");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
     });
 
     test("declared remote hook keeps network by default and accepts explicit denial", async () => {

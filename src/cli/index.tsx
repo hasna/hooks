@@ -23,8 +23,12 @@ import {
   getHooksByCategory,
   searchHooks,
   getHook,
+  getHookExecutions,
+  resolveHookExecution,
+  resolveHookExecutionTimeoutMs,
   resolveHookNetworkAccess,
   resolveHookEnvironmentAllowlist,
+  type HookExecutionMeta,
 } from "../lib/registry.js";
 import {
   installHook,
@@ -167,31 +171,17 @@ program
   .option("--profile <id>", "Agent profile ID")
   .option("--dry-run", "Run only hooks with native no-write dry-run support", false)
   .option("--deny-network", "Further restrict an allow-declared hook to local-only access", false)
-  .option("--timeout-ms <ms>", "Maximum hook runtime in milliseconds", "10000")
+  .option("--timeout-ms <ms>", "Maximum hook runtime in milliseconds (defaults to the event contract)")
   .description("Execute a hook (called by AI coding agents)")
-  .action(async (hook: string, options: { profile?: string; dryRun: boolean; denyNetwork: boolean; timeoutMs: string }) => {
+  .action(async (hook: string, options: { profile?: string; dryRun: boolean; denyNetwork: boolean; timeoutMs?: string }) => {
     const meta = getHook(hook);
     if (!meta) {
       console.error(JSON.stringify({ error: `Hook '${hook}' not found` }));
       process.exit(1);
     }
 
-    const hookDir = getHookPath(hook);
-    const hookScript = join(hookDir, "src", "hook.ts");
-
-    if (!existsSync(hookScript)) {
-      console.error(JSON.stringify({ error: `Hook script not found: ${hookScript}` }));
-      process.exit(1);
-    }
-
     if (options.dryRun && meta.dryRun !== true) {
       console.error(JSON.stringify({ error: `Hook '${hook}' does not declare native dry-run support` }));
-      process.exit(1);
-    }
-
-    const timeoutMs = Number(options.timeoutMs);
-    if (!Number.isInteger(timeoutMs) || timeoutMs <= 0) {
-      console.error(JSON.stringify({ error: "--timeout-ms must be a positive integer" }));
       process.exit(1);
     }
 
@@ -201,6 +191,41 @@ program
       stdin = readBoundedStdin();
     } catch (error) {
       console.error(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+      process.exit(1);
+    }
+
+    let routingInput: Record<string, unknown> | undefined;
+    try {
+      const parsed = JSON.parse(stdin);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        routingInput = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Legacy single-entrypoint hooks continue to receive non-JSON stdin verbatim.
+    }
+
+    let execution;
+    try {
+      execution = resolveHookExecution(meta, routingInput?.hook_event_name);
+    } catch (error) {
+      console.error(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+      process.exit(1);
+    }
+
+    let requestedTimeoutMs: number | undefined;
+    if (options.timeoutMs !== undefined) {
+      requestedTimeoutMs = Number(options.timeoutMs);
+      if (!Number.isInteger(requestedTimeoutMs) || requestedTimeoutMs <= 0) {
+        console.error(JSON.stringify({ error: "--timeout-ms must be a positive integer" }));
+        process.exit(1);
+      }
+    }
+    const timeoutMs = resolveHookExecutionTimeoutMs(execution, requestedTimeoutMs);
+
+    const hookDir = getHookPath(hook);
+    const hookScript = join(hookDir, execution.entrypoint);
+    if (!existsSync(hookScript)) {
+      console.error(JSON.stringify({ error: `Hook script not found: ${hookScript}` }));
       process.exit(1);
     }
 
@@ -239,7 +264,7 @@ program
       timeoutMs,
       network: resolveHookNetworkAccess(meta, options.denyNetwork ? "deny" : undefined),
       env: process.env,
-      envAllowlist: resolveHookEnvironmentAllowlist(meta),
+      envAllowlist: resolveHookEnvironmentAllowlist(meta, [], execution.event),
     });
 
     if (result.stdout) process.stdout.write(result.stdout);
@@ -644,28 +669,52 @@ program
         continue;
       }
 
-      // Check hook has source
       const hookDir = getHookPath(name);
-      const hookScript = join(hookDir, "src", "hook.ts");
-      if (!existsSync(hookScript)) {
-        issues.push({ hook: name, issue: "Missing src/hook.ts in package", severity: "error" });
+      let executions: HookExecutionMeta[];
+      try {
+        executions = meta ? getHookExecutions(meta) : [];
+        for (const execution of executions) {
+          if (!existsSync(join(hookDir, execution.entrypoint))) {
+            issues.push({ hook: name, issue: `Missing ${execution.entrypoint} in package`, severity: "error" });
+            hookHealthy = false;
+          }
+        }
+      } catch (error) {
+        issues.push({
+          hook: name,
+          issue: error instanceof Error ? error.message : String(error),
+          severity: "error",
+        });
         hookHealthy = false;
+        executions = [];
       }
 
       // Verify correct event registration
       if (meta && settingsExist) {
         try {
           const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-          const eventHooks = settings.hooks?.[meta.event] || [];
-          const found = eventHooks.some((entry: any) =>
-            entry.hooks?.some((h: any) => {
-              const match = h.command?.match(/^hooks run ([\w-]+)/);
-              return match && match[1] === name;
-            })
-          );
-          if (!found) {
-            issues.push({ hook: name, issue: `Not registered under correct event (${meta.event})`, severity: "error" });
-            hookHealthy = false;
+          for (const execution of executions) {
+            const eventHooks = settings.hooks?.[execution.event] || [];
+            const registeredCommands = eventHooks.flatMap((entry: any) =>
+              (entry.hooks ?? []).filter((h: any) => {
+                const match = h.command?.match(/^hooks run ([\w-]+)/);
+                return match && match[1] === name;
+              })
+            );
+            if (registeredCommands.length === 0) {
+              issues.push({ hook: name, issue: `Not registered under correct event (${execution.event})`, severity: "error" });
+              hookHealthy = false;
+            } else if (
+              execution.timeout !== undefined
+              && !registeredCommands.every((command: any) => command.timeout === execution.timeout)
+            ) {
+              issues.push({
+                hook: name,
+                issue: `Incorrect timeout under ${execution.event} (expected ${execution.timeout}s)`,
+                severity: "error",
+              });
+              hookHealthy = false;
+            }
           }
         } catch {}
       }

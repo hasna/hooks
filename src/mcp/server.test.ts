@@ -321,6 +321,31 @@ describe("MCP server", () => {
       restoreSettings();
     });
 
+    test("hooks_doctor validates agentmessages event timeout parity", async () => {
+      await client.callTool({
+        name: "hooks_install",
+        arguments: { hooks: ["agentmessages"], overwrite: true },
+      });
+      const healthy = parseResult(await client.callTool({ name: "hooks_doctor", arguments: {} }));
+      expect(healthy.healthy_hooks).toContain("agentmessages");
+      expect(healthy.issues.filter((issue: any) => issue.hook === "agentmessages")).toEqual([]);
+
+      const settings = JSON.parse(readFileSync(SETTINGS_PATH, "utf-8"));
+      const startCommand = settings.hooks.SessionStart
+        .flatMap((entry: any) => entry.hooks ?? [])
+        .find((hook: any) => hook.command === "hooks run agentmessages");
+      delete startCommand.timeout;
+      writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + "\n");
+
+      const unhealthy = parseResult(await client.callTool({ name: "hooks_doctor", arguments: {} }));
+      expect(unhealthy.healthy_hooks).not.toContain("agentmessages");
+      expect(unhealthy.issues).toContainEqual({
+        hook: "agentmessages",
+        issue: "Incorrect timeout under SessionStart (expected 10s)",
+        severity: "error",
+      });
+    });
+
     // --- hooks_categories ---
 
     test("hooks_categories returns all 5", async () => {

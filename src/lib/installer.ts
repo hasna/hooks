@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
 import { fileURLToPath } from "url";
-import { getHook, getHookEvents, type HookEvent } from "./registry.js";
+import { getHook, getHookEvents, getHookExecutions, type HookEvent } from "./registry.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HOOKS_DIR = existsSync(join(__dirname, "..", "..", "hooks", "hook-gitguard"))
@@ -36,14 +36,27 @@ function shortHookName(name: string): string {
   return name.startsWith("hook-") ? name.slice("hook-".length) : name;
 }
 
+function hookNameFromCommand(command: unknown): string | undefined {
+  if (typeof command !== "string") return undefined;
+  const genericMatch = command.match(/^hooks run ([\w-]+)(?:\s+--profile\s+[\w-]+)?$/);
+  if (genericMatch) return genericMatch[1];
+  const legacyMatch = command.match(/^hook-([\w-]+)$/);
+  if (legacyMatch) return legacyMatch[1];
+  if (
+    /^(?:bun|\/[\w./-]+\/bun) \/[^\s]+\/hook-agentmessages\/src\/(?:session-start|check-messages)\.ts$/.test(command)
+  ) {
+    return "agentmessages";
+  }
+  return undefined;
+}
+
 function removeHookEntriesByName(entries: any[], hookName: string): any[] {
-  return entries.filter(
-    (entry: any) => !entry.hooks?.some((h: any) => {
-      // [\w-]+ — hook names may contain hyphens (announce-start, fleet-catchup, …)
-      const match = h.command?.match(/^hooks run ([\w-]+)/);
-      return match && match[1] === hookName;
-    })
-  );
+  return entries.flatMap((entry: any) => {
+    if (!Array.isArray(entry?.hooks)) return [entry];
+    const hooks = entry.hooks.filter((hook: any) => hookNameFromCommand(hook.command) !== hookName);
+    if (hooks.length === entry.hooks.length) return [entry];
+    return hooks.length > 0 ? [{ ...entry, hooks }] : [];
+  });
 }
 
 /**
@@ -230,10 +243,10 @@ export function buildCodewithTomlFragment(name: string, profile?: string): strin
   const matcher = codewithMatcher(meta.matcher);
   const fragments: string[] = [];
 
-  for (const event of getHookEvents(meta)) {
-    const eventKey = getTargetEventName(event, "codewith");
+  for (const execution of getHookExecutions(meta)) {
+    const eventKey = getTargetEventName(execution.event, "codewith");
     if (!eventKey) {
-      throw new Error(`Hook '${shortName}' uses event '${event}', which is not supported by the Codewith target`);
+      throw new Error(`Hook '${shortName}' uses event '${execution.event}', which is not supported by the Codewith target`);
     }
 
     const lines: string[] = [
@@ -245,7 +258,7 @@ export function buildCodewithTomlFragment(name: string, profile?: string): strin
       `[[hooks.${eventKey}.hooks]]`,
       `type = "command"`,
       `command = ${tomlString(command)}`,
-      `timeout = ${codewithTimeout(shortName)}`,
+      `timeout = ${execution.timeout ?? codewithTimeout(shortName)}`,
       `statusMessage = ${tomlString(codewithStatusMessage(shortName))}`,
     );
     fragments.push(lines.join("\n"));
@@ -429,16 +442,18 @@ function registerHook(name: string, scope: Scope = "global", target: WritableJso
   const meta = getHook(name);
   if (!meta) return;
 
-  const eventKeys = getHookEvents(meta).map((event) => {
-    const eventKey = getTargetEventName(event, target);
+  const registrations = getHookExecutions(meta).map((execution) => {
+    const eventKey = getTargetEventName(execution.event, target);
     if (eventKey === null) {
-      throw new Error(`Event '${event}' is not supported by target '${target}'`);
+      throw new Error(`Event '${execution.event}' is not supported by target '${target}'`);
     }
-    return eventKey;
+    return { eventKey, execution };
   });
-  const uniqueEventKeys = [...new Set(eventKeys)];
-  if (uniqueEventKeys.length === 0) {
+  if (registrations.length === 0) {
     throw new Error(`Hook '${name}' has no installable events for target '${target}'`);
+  }
+  if (new Set(registrations.map(({ eventKey }) => eventKey)).size !== registrations.length) {
+    throw new Error(`Hook '${name}' maps multiple executions to the same '${target}' event`);
   }
 
   const settings = readSettings(scope, target);
@@ -453,11 +468,15 @@ function registerHook(name: string, scope: Scope = "global", target: WritableJso
     ? `hooks run ${name} --profile ${profile}`
     : `hooks run ${name}`;
 
-  for (const eventKey of uniqueEventKeys) {
+  for (const { eventKey, execution } of registrations) {
     if (!settings.hooks[eventKey]) settings.hooks[eventKey] = [];
 
     const entry: Record<string, any> = {
-      hooks: [{ type: "command", command: hookCommand }],
+      hooks: [{
+        type: "command",
+        command: hookCommand,
+        ...(execution.timeout ? { timeout: execution.timeout } : {}),
+      }],
     };
     if (meta.matcher) {
       entry.matcher = meta.matcher;
@@ -519,12 +538,8 @@ export function getRegisteredHooksForTarget(scope: Scope = "global", target: Sin
   for (const eventKey of Object.keys(settings.hooks)) {
     for (const entry of settings.hooks[eventKey]) {
       for (const hook of entry.hooks || []) {
-        const newMatch = hook.command?.match(/^hooks run ([\w-]+)(?:\s+--profile\s+[\w-]+)?$/);
-        const oldMatch = hook.command?.match(/^hook-([\w-]+)$/);
-        const match = newMatch || oldMatch;
-        if (match) {
-          registered.push(match[1]);
-        }
+        const name = hookNameFromCommand(hook.command);
+        if (name) registered.push(name);
       }
     }
   }

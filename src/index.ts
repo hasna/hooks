@@ -14,11 +14,15 @@ export {
   CATEGORIES,
   getHook,
   getHookEvents,
+  getHookExecutions,
   getHooksByCategory,
   searchHooks,
+  resolveHookExecution,
+  resolveHookExecutionTimeoutMs,
   resolveHookNetworkAccess,
   resolveHookEnvironmentAllowlist,
   type HookMeta,
+  type HookExecutionMeta,
   type HookEvent,
   type Category,
 } from "./lib/registry.js";
@@ -109,6 +113,8 @@ export function removeProjectHook(name: string): boolean {
 // ── runHook — programmatic hook execution ─────────────────────────────────────
 
 import { getHook as _getHook } from "./lib/registry.js";
+import { resolveHookExecution as _resolveHookExecution } from "./lib/registry.js";
+import { resolveHookExecutionTimeoutMs as _resolveHookExecutionTimeoutMs } from "./lib/registry.js";
 import { resolveHookNetworkAccess as _resolveHookNetworkAccess } from "./lib/registry.js";
 import { resolveHookEnvironmentAllowlist as _resolveHookEnvironmentAllowlist } from "./lib/registry.js";
 import { getHookPath as _getHookPath, hookExists as _hookExists } from "./lib/installer.js";
@@ -119,7 +125,7 @@ import { runBoundedProcess, type HookNetworkAccess } from "../hooks/bounded-proc
 export interface RunHookOptions {
   /** Agent profile ID to inject into hook input */
   profile?: string;
-  /** Timeout in milliseconds (default: 10000) */
+  /** Timeout override in milliseconds (defaults to the selected event contract, otherwise 10000) */
   timeout?: number;
   /** Propagate a no-write dry-run marker. Unsupported hooks are rejected. */
   dryRun?: boolean;
@@ -144,7 +150,7 @@ export interface RunHookResult {
 
 /**
  * Programmatically execute a hook with the given input.
- * Spawns the hook's src/hook.ts via bun, passes input as stdin JSON,
+ * Spawns the entrypoint declared for the input event via bun, passes input as stdin JSON,
  * and returns the parsed stdout JSON.
  */
 export async function runHook(name: string, input: HookInput, options: RunHookOptions = {}): Promise<RunHookResult> {
@@ -156,8 +162,9 @@ export async function runHook(name: string, input: HookInput, options: RunHookOp
     throw new Error(`Hook '${name}' does not declare native dry-run support`);
   }
 
+  const execution = _resolveHookExecution(meta, input.hook_event_name);
   const hookDir = _getHookPath(name);
-  const hookScript = join(hookDir, "src", "hook.ts");
+  const hookScript = join(hookDir, execution.entrypoint);
   if (!existsSync(hookScript)) throw new Error(`Hook script not found: ${hookScript}`);
 
   let hookInput: HookInput = { ...input, ...(dryRun ? { dry_run: true } : {}) };
@@ -176,10 +183,10 @@ export async function runHook(name: string, input: HookInput, options: RunHookOp
 
   const result = await runBoundedProcess([process.execPath, "run", hookScript], {
     input: JSON.stringify(hookInput),
-    timeoutMs: options.timeout,
+    timeoutMs: _resolveHookExecutionTimeoutMs(execution, options.timeout),
     network: _resolveHookNetworkAccess(meta, options.network),
     env: options.env ?? process.env,
-    envAllowlist: _resolveHookEnvironmentAllowlist(meta, options.envAllowlist),
+    envAllowlist: _resolveHookEnvironmentAllowlist(meta, options.envAllowlist, execution.event),
     maxInputBytes: options.maxInputBytes,
     maxStdoutBytes: options.maxStdoutBytes,
     maxStderrBytes: options.maxStderrBytes,

@@ -11,8 +11,11 @@ import {
   HOOKS,
   CATEGORIES,
   getHook,
+  getHookExecutions,
   getHooksByCategory,
   searchHooks,
+  resolveHookExecution,
+  resolveHookExecutionTimeoutMs,
   resolveHookNetworkAccess,
   resolveHookEnvironmentAllowlist,
   installHook,
@@ -55,6 +58,12 @@ describe("library exports", () => {
   test("getHook is a function", () => {
     expect(typeof getHook).toBe("function");
     expect(getHook("gitguard")?.name).toBe("gitguard");
+  });
+
+  test("event-specific execution helpers are exported", () => {
+    expect(typeof getHookExecutions).toBe("function");
+    expect(typeof resolveHookExecution).toBe("function");
+    expect(typeof resolveHookExecutionTimeoutMs).toBe("function");
   });
 
   test("getHooksByCategory is a function", () => {
@@ -164,11 +173,39 @@ describe("library exports", () => {
   });
 
   test("runHook environment capabilities cannot be elevated across hooks", () => {
-    expect(resolveHookEnvironmentAllowlist(getHook("agentmessages")!)).toEqual(["CLAUDE_ENV_FILE"]);
+    const agentmessages = getHook("agentmessages")!;
+    expect(resolveHookEnvironmentAllowlist(agentmessages, [], "SessionStart")).toEqual(["CLAUDE_ENV_FILE"]);
+    expect(resolveHookEnvironmentAllowlist(agentmessages, [], "Stop")).toEqual([
+      "SMSG_AGENT_ID",
+      "SMSG_PROJECT_ID",
+    ]);
+    expect(() => resolveHookEnvironmentAllowlist(agentmessages)).toThrow("requires hook_event_name");
     expect(() => resolveHookEnvironmentAllowlist(
-      getHook("gitguard")!,
-      ["CLAUDE_ENV_FILE"],
+      agentmessages,
+      ["SMSG_AGENT_ID"],
+      "SessionStart",
     )).toThrow("does not declare environment capability");
+    expect(() => resolveHookEnvironmentAllowlist(
+      agentmessages,
+      ["CLAUDE_ENV_FILE"],
+      "Stop",
+    )).toThrow("does not declare environment capability");
+    for (const capability of ["CLAUDE_ENV_FILE", "SMSG_AGENT_ID", "SMSG_PROJECT_ID"]) {
+      expect(() => resolveHookEnvironmentAllowlist(
+        getHook("gitguard")!,
+        [capability],
+      )).toThrow("does not declare environment capability");
+    }
+  });
+
+  test("runHook requires an explicit event for event-specific hooks", async () => {
+    let message = "";
+    try {
+      await runHook("agentmessages", {});
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("requires hook_event_name");
   });
 
   test("runHook preserves network access only for a declared remote hook", async () => {
