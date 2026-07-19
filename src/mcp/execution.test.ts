@@ -4,7 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { Client } from "@modelcontextprotocol/sdk/client";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import type { HookMeta } from "../lib/registry.js";
+import { getHook, type HookMeta } from "../lib/registry.js";
 import { createHooksServer } from "./server.js";
 
 type ExecutionOverrides = {
@@ -278,11 +278,146 @@ describe("bounded MCP hook execution", () => {
         arguments: { tool_name: "Bash", tool_input: { command: "echo safe" } },
       }));
       expect(data.results.find((result: any) => result.name === "unsafe")).toMatchObject({
-        decision: "approve",
+        decision: "indeterminate",
         skipped: true,
       });
       expect(data.results.find((result: any) => result.name === "safe").raw.dry_run).toBe(true);
+      expect(data.decision).toBe("indeterminate");
+      expect(data.indeterminate_by).toEqual(["unsafe"]);
       expect(existsSync(sentinel)).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("hooks_preview sends the PreToolUse event to real dangerous-command guards", async () => {
+    const preBash = getHook("pre-bash")!;
+    const worktreeGuard = getHook("worktree-guard")!;
+    const paths = new Map([
+      ["pre-bash", join(import.meta.dir, "..", "..", "hooks", "pre-bash")],
+      ["worktree-guard", join(import.meta.dir, "..", "..", "hooks", "worktree-guard")],
+    ]);
+    const { client } = await withServer([preBash, worktreeGuard], paths);
+    try {
+      const data = parse(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "rm -rf /" } },
+      }));
+
+      expect(data.results.find((result: any) => result.name === "pre-bash")).toMatchObject({
+        decision: "block",
+      });
+      expect(data.results.find((result: any) => result.name === "worktree-guard")).toMatchObject({
+        decision: "block",
+      });
+      expect(data.decision).toBe("block");
+      expect(data.blocked_by).toBe("pre-bash");
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("hooks_preview reports missing scripts and containment failures as indeterminate", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hooks-mcp-preview-failures-"));
+    roots.push(root);
+    const sentinel = join(root, "executed");
+    const paths = new Map([
+      ["contained", fixtureHook(root, "contained", `
+        await Bun.write(${JSON.stringify(sentinel)}, "executed");
+        console.log(JSON.stringify({ decision: "approve" }));
+      `)],
+    ]);
+    const { client } = await withServer([
+      meta("missing", { dryRun: true }),
+      meta("contained", { dryRun: true }),
+    ], paths, {
+      containmentExecutable: join(root, "missing-bwrap"),
+    });
+    try {
+      const data = parse(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "echo safe" } },
+      }));
+
+      expect(data.results.find((result: any) => result.name === "missing")).toMatchObject({
+        decision: "indeterminate",
+        error: "script not found",
+      });
+      expect(data.results.find((result: any) => result.name === "contained")).toMatchObject({
+        decision: "indeterminate",
+      });
+      expect(data.results.find((result: any) => result.name === "contained").error).toContain("requires bubblewrap");
+      expect(data.decision).toBe("indeterminate");
+      expect(data.indeterminate_by).toEqual(["missing", "contained"]);
+      expect(existsSync(sentinel)).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("hooks_preview keeps block precedence over nonzero and timeout failures", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hooks-mcp-preview-precedence-"));
+    roots.push(root);
+    const paths = new Map([
+      ["nonzero", fixtureHook(root, "nonzero", "process.exit(7)")],
+      ["timeout", fixtureHook(root, "timeout", "await new Promise(() => {})")],
+      ["blocker", fixtureHook(root, "blocker", 'console.log(JSON.stringify({ decision: "block", reason: "dangerous" }))')],
+    ]);
+    const { client } = await withServer([
+      meta("nonzero", { network: "allow", dryRun: true }),
+      meta("timeout", { network: "allow", dryRun: true }),
+      meta("blocker", { network: "allow", dryRun: true }),
+    ], paths);
+    try {
+      const data = parse(await client.callTool({
+        name: "hooks_preview",
+        arguments: {
+          tool_name: "Bash",
+          tool_input: { command: "echo safe" },
+          timeout_ms: 100,
+        },
+      }));
+
+      expect(data.results.find((result: any) => result.name === "nonzero")).toMatchObject({
+        decision: "indeterminate",
+        exitCode: 7,
+      });
+      expect(data.results.find((result: any) => result.name === "timeout")).toMatchObject({
+        decision: "indeterminate",
+        timedOut: true,
+      });
+      expect(data.results.find((result: any) => result.name === "blocker")).toMatchObject({
+        decision: "block",
+        reason: "dangerous",
+      });
+      expect(data.decision).toBe("block");
+      expect(data.blocked_by).toBe("blocker");
+      expect(data.indeterminate_by).toEqual(["nonzero", "timeout"]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("hooks_preview approves when every matching guard completes and approves", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hooks-mcp-preview-approve-"));
+    roots.push(root);
+    const paths = new Map([
+      ["explicit", fixtureHook(root, "explicit", 'console.log(JSON.stringify({ decision: "approve" }))')],
+      ["continuing", fixtureHook(root, "continuing", "console.log(JSON.stringify({ continue: true }))")],
+    ]);
+    const { client } = await withServer([
+      meta("explicit", { network: "allow", dryRun: true }),
+      meta("continuing", { network: "allow", dryRun: true }),
+    ], paths);
+    try {
+      const data = parse(await client.callTool({
+        name: "hooks_preview",
+        arguments: { tool_name: "Bash", tool_input: { command: "echo safe" } },
+      }));
+
+      expect(data.results.map((result: any) => result.decision)).toEqual(["approve", "approve"]);
+      expect(data.decision).toBe("approve");
+      expect(data.indeterminate_by).toEqual([]);
     } finally {
       await client.close();
     }

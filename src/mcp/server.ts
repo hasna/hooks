@@ -144,6 +144,39 @@ function parseHookOutput(stdout: string): any {
   }
 }
 
+type PreviewDecision = "approve" | "block" | "indeterminate";
+
+interface PreviewHookResult {
+  name: string;
+  decision: PreviewDecision;
+  skipped?: boolean;
+  error?: string;
+  timedOut?: boolean;
+  exitCode?: number | null;
+  reason?: string;
+  raw?: unknown;
+}
+
+function classifyPreviewOutput(name: string, output: any): PreviewHookResult {
+  const permissionDecision = output?.hookSpecificOutput?.permissionDecision;
+  const reason = output?.reason
+    ?? output?.stopReason
+    ?? output?.hookSpecificOutput?.permissionDecisionReason;
+
+  if (output?.decision === "block" || output?.continue === false || permissionDecision === "deny") {
+    return { name, decision: "block", reason, raw: output };
+  }
+  if (output?.decision === "approve" || output?.continue === true || permissionDecision === "allow") {
+    return { name, decision: "approve", reason, raw: output };
+  }
+  return {
+    name,
+    decision: "indeterminate",
+    error: "hook output did not contain an approval or block decision",
+    raw: output,
+  };
+}
+
 function formatInstallResults(results: InstallResult[], extra?: Record<string, any>) {
   const installed = results.filter((r) => r.success).map((r) => r.hook);
   const failed = results.filter((r) => !r.success).map((r) => ({ hook: r.hook, error: r.error }));
@@ -592,13 +625,13 @@ export function createHooksServer(options: HooksServerOptions = {}): McpServer {
         return { content: [{ type: "text", text: JSON.stringify({ tool_name, matching_hooks: [], result: "no_hooks_match", decision: "approve" }) }] };
       }
 
-      const input = { tool_name, tool_input };
-      const results = await Promise.all(matchingHooks.map(async (name) => {
+      const input = { hook_event_name: "PreToolUse", tool_name, tool_input };
+      const results: PreviewHookResult[] = await Promise.all(matchingHooks.map(async (name) => {
         const meta = executionGetHook(name)!;
         if (meta.dryRun !== true) {
           return {
             name,
-            decision: "approve" as const,
+            decision: "indeterminate" as const,
             skipped: true,
             error: `Hook '${name}' does not declare native dry-run support`,
           };
@@ -606,7 +639,7 @@ export function createHooksServer(options: HooksServerOptions = {}): McpServer {
 
         const hookDir = executionGetHookPath(name);
         const hookScript = join(hookDir, "src", "hook.ts");
-        if (!existsSync(hookScript)) return { name, decision: "approve", error: "script not found" };
+        if (!existsSync(hookScript)) return { name, decision: "indeterminate", error: "script not found" };
 
         const result = await execute(meta, hookScript, input, {
           dryRun: true,
@@ -614,20 +647,30 @@ export function createHooksServer(options: HooksServerOptions = {}): McpServer {
           requestedNetwork: network,
         });
 
-        if (result.error) {
+        if (result.error || result.timedOut || result.exitCode !== 0) {
+          const error = result.error
+            ?? (result.exitCode === null
+              ? (result.signal ? `hook terminated by signal ${result.signal}` : "hook did not complete successfully")
+              : `hook exited with code ${result.exitCode}`);
           return {
             name,
-            decision: "approve" as const,
+            decision: "indeterminate" as const,
             ...(result.timedOut ? { timedOut: true } : {}),
-            error: result.error,
+            error,
             exitCode: result.exitCode,
           };
         }
         const output = parseHookOutput(result.stdout);
-        return { name, decision: output.decision ?? "approve", reason: output.reason, raw: output };
+        return classifyPreviewOutput(name, output);
       }));
 
       const blocked = results.find((r) => r.decision === "block");
+      const indeterminate = results.filter((r) => r.decision === "indeterminate");
+      const decision: PreviewDecision = blocked
+        ? "block"
+        : indeterminate.length > 0
+          ? "indeterminate"
+          : "approve";
       return {
         content: [{
           type: "text" as const,
@@ -635,9 +678,10 @@ export function createHooksServer(options: HooksServerOptions = {}): McpServer {
             tool_name,
             matching_hooks: matchingHooks,
             results,
-            decision: blocked ? "block" : "approve",
+            decision,
             blocked_by: blocked?.name ?? null,
             blocked_reason: blocked?.reason ?? null,
+            indeterminate_by: indeterminate.map((result) => result.name),
           }),
         }],
       };
