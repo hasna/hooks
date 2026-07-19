@@ -60,6 +60,14 @@ describe("registry", () => {
         expect(CATEGORIES as readonly string[]).toContain(hook.category);
       }
     });
+
+    test("scopes CLAUDE_ENV_FILE to the source-proven agentmessages hook", () => {
+      expect(getHook("agentmessages")?.envAllowlist).toEqual(["CLAUDE_ENV_FILE"]);
+      expect(
+        HOOKS.filter((hook) => hook.name !== "agentmessages")
+          .some((hook) => hook.envAllowlist?.includes("CLAUDE_ENV_FILE")),
+      ).toBe(false);
+    });
   });
 
   describe("CATEGORIES", () => {

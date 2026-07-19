@@ -37,6 +37,8 @@ export interface HookMeta {
   network?: "deny" | "allow";
   /** The hook guarantees that `dry_run: true` performs no mutations. */
   dryRun?: boolean;
+  /** Extra non-sensitive environment names this hook is explicitly allowed to receive. */
+  envAllowlist?: readonly string[];
 }
 
 export const CATEGORIES = [
@@ -215,6 +217,7 @@ export const HOOKS: HookMeta[] = [
     event: "Stop",
     matcher: "",
     tags: ["messaging", "agents", "inter-agent"],
+    envAllowlist: ["CLAUDE_ENV_FILE"],
   },
 
   // Context Management
@@ -620,4 +623,20 @@ export function resolveHookNetworkAccess(
   }
   if (requested === "deny") return "deny";
   return declared;
+}
+
+const HOOK_SCOPED_ENV_CAPABILITIES = new Set(["CLAUDE_ENV_FILE"]);
+
+export function resolveHookEnvironmentAllowlist(
+  hook: HookMeta,
+  requested: readonly string[] = [],
+): readonly string[] {
+  const declared = new Set(hook.envAllowlist ?? []);
+  for (const name of requested) {
+    if (HOOK_SCOPED_ENV_CAPABILITIES.has(name) && !declared.has(name)) {
+      throw new Error(`Hook '${hook.name}' does not declare environment capability '${name}'`);
+    }
+    declared.add(name);
+  }
+  return [...declared];
 }

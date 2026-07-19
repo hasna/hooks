@@ -24,6 +24,7 @@ import {
   searchHooks,
   getHook,
   resolveHookNetworkAccess,
+  resolveHookEnvironmentAllowlist,
 } from "../lib/registry.js";
 import {
   installHook,
@@ -238,6 +239,7 @@ program
       timeoutMs,
       network: resolveHookNetworkAccess(meta, options.denyNetwork ? "deny" : undefined),
       env: process.env,
+      envAllowlist: resolveHookEnvironmentAllowlist(meta),
     });
 
     if (result.stdout) process.stdout.write(result.stdout);

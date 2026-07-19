@@ -17,6 +17,7 @@ export {
   getHooksByCategory,
   searchHooks,
   resolveHookNetworkAccess,
+  resolveHookEnvironmentAllowlist,
   type HookMeta,
   type HookEvent,
   type Category,
@@ -109,6 +110,7 @@ export function removeProjectHook(name: string): boolean {
 
 import { getHook as _getHook } from "./lib/registry.js";
 import { resolveHookNetworkAccess as _resolveHookNetworkAccess } from "./lib/registry.js";
+import { resolveHookEnvironmentAllowlist as _resolveHookEnvironmentAllowlist } from "./lib/registry.js";
 import { getHookPath as _getHookPath, hookExists as _hookExists } from "./lib/installer.js";
 import { join } from "path";
 import { existsSync } from "fs";
@@ -177,7 +179,7 @@ export async function runHook(name: string, input: HookInput, options: RunHookOp
     timeoutMs: options.timeout,
     network: _resolveHookNetworkAccess(meta, options.network),
     env: options.env ?? process.env,
-    envAllowlist: options.envAllowlist,
+    envAllowlist: _resolveHookEnvironmentAllowlist(meta, options.envAllowlist),
     maxInputBytes: options.maxInputBytes,
     maxStdoutBytes: options.maxStdoutBytes,
     maxStderrBytes: options.maxStderrBytes,

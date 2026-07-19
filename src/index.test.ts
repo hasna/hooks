@@ -14,6 +14,7 @@ import {
   getHooksByCategory,
   searchHooks,
   resolveHookNetworkAccess,
+  resolveHookEnvironmentAllowlist,
   installHook,
   installHooks,
   getInstalledHooks,
@@ -160,6 +161,14 @@ describe("library exports", () => {
       message = error instanceof Error ? error.message : String(error);
     }
     expect(message).toContain("cannot be elevated");
+  });
+
+  test("runHook environment capabilities cannot be elevated across hooks", () => {
+    expect(resolveHookEnvironmentAllowlist(getHook("agentmessages")!)).toEqual(["CLAUDE_ENV_FILE"]);
+    expect(() => resolveHookEnvironmentAllowlist(
+      getHook("gitguard")!,
+      ["CLAUDE_ENV_FILE"],
+    )).toThrow("does not declare environment capability");
   });
 
   test("runHook preserves network access only for a declared remote hook", async () => {

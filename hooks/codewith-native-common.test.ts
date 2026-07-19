@@ -176,6 +176,28 @@ describe("codewith native common helpers", () => {
     }
   });
 
+  test("runBoundedProcess does not forward CLAUDE_ENV_FILE without an explicit capability", async () => {
+    const env = {
+      PATH: process.env.PATH ?? "",
+      CLAUDE_ENV_FILE: "/tmp/synthetic-claude-env-file",
+    };
+    const script = 'process.stdout.write(process.env.CLAUDE_ENV_FILE ?? "unset")';
+
+    const ordinary = await runBoundedProcess(
+      [process.execPath, "-e", script],
+      { env, network: "allow" },
+    );
+    expect(ordinary.exitCode).toBe(0);
+    expect(ordinary.stdout).toBe("unset");
+
+    const capable = await runBoundedProcess(
+      [process.execPath, "-e", script],
+      { env, envAllowlist: ["CLAUDE_ENV_FILE"], network: "allow" },
+    );
+    expect(capable.exitCode).toBe(0);
+    expect(capable.stdout).toBe("/tmp/synthetic-claude-env-file");
+  });
+
   test("runBoundedProcess timeout includes queue wait", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "hooks-command-queue-"));
     const sentinel = join(tmp, "queued-command-executed");
