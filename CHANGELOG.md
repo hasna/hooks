@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.11] - 2026-07-20
+
+### Fixed
+
+- `fleet-blockers-gate`: made the brake owner-scoped and reliable. It now denies mutating tools on a real code-flagged blocker (`blocking=1`) returned by `conversations blockers` — the correctly-retrieved, tamper-resistant signal — instead of scanning message text for `[FREEZE]`. Freeze TEXT in channels is now informational and never stops work, killing the phantom-freeze bug where any `[FREEZE]` string from any author wedged the fleet; and a real `blocking=1` blocker that lacked `[FREEZE]` text is no longer ignored.
+- Author (`from_agent`) is unauthenticated, so it is treated as advisory context in the deny reason only and is never used as a security gate (avoids false assurance from a spoofable field).
+- Raised the per-check exec timeout default from 500ms to 1500ms: the `conversations` CLI has a ~0.5s cold start, so the old budget flaked and the gate silently failed open.
+- Hardened the CLI invocation (`execFileSync` with an argument array plus a leading-dash/shell-metacharacter guard) and made the freeze state engage fast while disengaging slowly via an asymmetric TTL cache.
+
 ## [0.3.10] - 2026-07-13
 
 ### Fixed
