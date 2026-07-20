@@ -1,7 +1,7 @@
 {
   "name": "@hasna/hook-fleet-blockers-gate",
-  "version": "0.1.0",
-  "description": "Claude Code PreToolUse hook that blocks mutating tools while an unread [FREEZE] blocker is active (TTL-cached, fail-open under 500ms)",
+  "version": "0.1.1",
+  "description": "Claude Code PreToolUse hook that blocks mutating tools while an unread blocking=1 blocker is active (TTL-cached, fail-open)",
   "type": "module",
   "main": "./dist/hook.js",
   "exports": {
