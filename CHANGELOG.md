@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-24
+
+### Added
+
+- Gradual-disclosure output flags on the CLI: `--limit`, `--all`, `--verbose` (alongside existing `--json`), plus `hooks info <name>` and `hooks docs <name> --verbose` for full detail on demand (#2).
+
+### Changed
+
+- Compact output by default across noisy surfaces: `hooks list`, `hooks search`, `hooks docs`, and log list/search/tail/errors now render capped, scannable summaries with hints to the detail paths. MCP list/search/docs/registered/profile/log/agent tools are also compact by default, with explicit `compact:false` / `verbose:true` escape hatches. Machine-readable `--json` paths remain full detail, and the legacy 50-row default for full MCP log rows is preserved (#2).
+
+### Fixed
+
+- Cross-cwd managed worktree patches: recognize absolute file-tool targets inside a different verified linked managed worktree, while failing closed for malformed/standalone repos, Git metadata, roots, symlink/hardlink escapes, and forged worktree provenance; managed-root discovery is cached across multi-file patches (#7).
+
 ## [0.3.11] - 2026-07-20
 
 ### Fixed
