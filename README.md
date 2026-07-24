@@ -26,6 +26,28 @@ hooks --help
 - `hooks doctor`
 - `hooks run`
 
+## Compact Output
+
+CLI commands default to compact, agent-friendly output. List and search commands
+show essential fields, cap terminal rows, and print hints for deeper inspection.
+Use detail flags when you need more context:
+
+```bash
+hooks list                  # compact, capped list
+hooks list --all            # show all rows
+hooks list --verbose        # include descriptions
+hooks search git --limit 5  # cap result rows
+hooks info gitguard         # full metadata for one hook
+hooks docs gitguard         # README preview
+hooks docs gitguard --verbose
+hooks list --json           # stable machine-readable full data
+```
+
+MCP tools follow the same gradual disclosure pattern: list/search/log/profile
+tools return compact summaries by default, while explicit flags such as
+`compact:false`, `verbose:true`, or a detail tool like `hooks_info` return full
+records.
+
 ## Codewith-native hooks
 
 @hasna/hooks includes unprefixed Codewith-native hook names:

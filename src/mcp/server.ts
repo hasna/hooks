@@ -31,6 +31,7 @@ import {
   searchHooks,
   getHook,
   type Category,
+  type HookMeta,
 } from "../lib/registry.js";
 import {
   installHook,
@@ -70,6 +71,52 @@ function formatInstallResults(results: InstallResult[], extra?: Record<string, a
   };
 }
 
+function truncateText(value: unknown, max = 160): string {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 3))}...`;
+}
+
+function boundedLimit(value: number | undefined, fallback: number, max: number): number {
+  if (!Number.isFinite(value) || !value || value <= 0) return fallback;
+  return Math.min(Math.floor(value), max);
+}
+
+function compactHook(hook: HookMeta) {
+  return {
+    name: hook.name,
+    event: hook.event,
+    matcher: hook.matcher,
+    category: hook.category,
+  };
+}
+
+function compactHookResult(hooks: HookMeta[], limit: number, detail: string) {
+  const visible = hooks.slice(0, limit).map(compactHook);
+  const omitted = Math.max(0, hooks.length - visible.length);
+  return {
+    hooks: visible,
+    count: visible.length,
+    total: hooks.length,
+    omitted,
+    hint: omitted > 0
+      ? `Use limit, compact:false, or ${detail} for more detail.`
+      : `Use compact:false or ${detail} for full details.`,
+  };
+}
+
+function compactEvent(row: any) {
+  return {
+    id: row.id,
+    timestamp: row.timestamp,
+    hook_name: row.hook_name,
+    tool_name: row.tool_name ?? undefined,
+    session_id: row.session_id ? String(row.session_id).slice(0, 12) : undefined,
+    error: row.error ? truncateText(row.error, 180) : undefined,
+    tool_input_preview: row.tool_input ? truncateText(row.tool_input, 180) : undefined,
+  };
+}
+
 // --- in-memory agent registry ---
 interface _HooksAgent { id: string; name: string; session_id?: string; last_seen_at: string; project_id?: string; }
 const _hooksAgents = new Map<string, _HooksAgent>();
@@ -79,51 +126,57 @@ export function createHooksServer(): McpServer {
     name: "@hasna/hooks",
     version: pkg.version,
   });
+  const defineTool = (
+    name: string,
+    description: string,
+    schema: Record<string, any>,
+    handler: (params: any) => any,
+  ) => (server.tool as any)(name, description, schema, handler);
 
   // --- Tools ---
 
-  server.tool(
+  defineTool(
     "hooks_list",
-    "List all available hooks, optionally filtered by category. Use compact:true to get minimal output (name+event+matcher only) — saves tokens.",
+    "List available hooks. Compact by default; pass compact:false for full HookMeta objects.",
     {
       category: z.string().optional().describe("Filter by category name (e.g. 'Git Safety', 'Code Quality', 'Security')"),
-      compact: z.boolean().default(false).describe("Return minimal fields only: name, event, matcher. Reduces token usage."),
+      compact: z.boolean().default(true).describe("Return compact summaries by default. Set false for full fields."),
+      limit: z.number().default(25).describe("Max compact rows to return"),
     },
-    async ({ category, compact }) => {
-      const slim = (hooks: typeof HOOKS) => compact ? hooks.map((h) => ({ name: h.name, event: h.event, matcher: h.matcher })) : hooks;
+    async ({ category, compact, limit }) => {
+      const maxRows = boundedLimit(limit, 25, 100);
       if (category) {
         const cat = CATEGORIES.find((c) => c.toLowerCase() === category.toLowerCase());
         if (!cat) {
           return { content: [{ type: "text", text: JSON.stringify({ error: `Unknown category: ${category}`, available: [...CATEGORIES] }) }] };
         }
-        return { content: [{ type: "text", text: JSON.stringify(slim(getHooksByCategory(cat))) }] };
-      }
-      if (compact) {
-        return { content: [{ type: "text", text: JSON.stringify(slim(HOOKS)) }] };
+        const hooks = getHooksByCategory(cat);
+        return { content: [{ type: "text", text: JSON.stringify(compact ? compactHookResult(hooks, maxRows, "hooks_info") : hooks) }] };
       }
       const result: Record<string, any> = {};
       for (const cat of CATEGORIES) {
         result[cat] = getHooksByCategory(cat);
       }
-      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      return { content: [{ type: "text", text: JSON.stringify(compact ? compactHookResult(HOOKS, maxRows, "hooks_info") : result) }] };
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_search",
-    "Search for hooks by name, description, or tags. Use compact:true for minimal output to save tokens.",
+    "Search hooks. Compact by default; pass compact:false for full HookMeta objects.",
     {
       query: z.string().describe("Search query"),
-      compact: z.boolean().default(false).describe("Return minimal fields only: name, event, matcher."),
+      compact: z.boolean().default(true).describe("Return compact summaries by default. Set false for full fields."),
+      limit: z.number().default(10).describe("Max compact rows to return"),
     },
-    async ({ query, compact }) => {
+    async ({ query, compact, limit }) => {
       const results = searchHooks(query);
-      const out = compact ? results.map((h) => ({ name: h.name, event: h.event, matcher: h.matcher })) : results;
+      const out = compact ? compactHookResult(results, boundedLimit(limit, 10, 100), "hooks_info") : results;
       return { content: [{ type: "text", text: JSON.stringify(out) }] };
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_info",
     "Get detailed information about a specific hook including install status",
     { name: z.string().describe("Hook name (e.g. 'gitguard', 'checkpoint')") },
@@ -138,7 +191,7 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_install",
     "Install one or more hooks by registering them in agent settings",
     {
@@ -147,13 +200,13 @@ export function createHooksServer(): McpServer {
       overwrite: z.boolean().default(false).describe("Overwrite if already installed"),
       profile: z.string().optional().describe("Agent profile ID to scope hooks to"),
     },
-    async ({ hooks, scope, overwrite, profile }) => {
+    async ({ hooks, scope, overwrite, profile }: { hooks: string[]; scope: Scope; overwrite: boolean; profile?: string }) => {
       const results = hooks.map((name) => installHook(name, { scope, overwrite, profile }));
       return formatInstallResults(results, { scope, profile });
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_install_category",
     "Install all hooks in a category",
     {
@@ -172,7 +225,7 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_install_all",
     "Install all available hooks",
     {
@@ -185,7 +238,7 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_remove",
     "Remove (unregister) a hook from agent settings",
     {
@@ -198,7 +251,7 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_doctor",
     "Check health of installed hooks — verifies hook source exists, settings are correct",
     {
@@ -254,7 +307,7 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_categories",
     "List all hook categories with counts",
     {},
@@ -267,11 +320,14 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_docs",
-    "Get documentation — general overview or README for a specific hook",
-    { name: z.string().optional().describe("Hook name for specific docs, omit for general docs") },
-    async ({ name }) => {
+    "Get documentation. Hook README content is summarized by default; pass verbose:true for the full README.",
+    {
+      name: z.string().optional().describe("Hook name for specific docs, omit for general docs"),
+      verbose: z.boolean().default(false).describe("Return full hook README when true"),
+    },
+    async ({ name, verbose }) => {
       if (name) {
         const meta = getHook(name);
         if (!meta) {
@@ -283,7 +339,23 @@ export function createHooksServer(): McpServer {
         if (existsSync(readmePath)) {
           readme = readFileSync(readmePath, "utf-8");
         }
-        return { content: [{ type: "text", text: JSON.stringify({ ...meta, readme }) }] };
+        if (verbose) {
+          return { content: [{ type: "text", text: JSON.stringify({ ...meta, readme }) }] };
+        }
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              ...compactHook(meta),
+              displayName: meta.displayName,
+              version: meta.version,
+              description: truncateText(meta.description, 220),
+              readme_preview: truncateText(readme, 500),
+              readme_lines: readme ? readme.split("\n").length : 0,
+              hint: "Call hooks_docs with verbose:true for the full README or hooks_info for metadata.",
+            }),
+          }],
+        };
       }
 
       return {
@@ -314,23 +386,44 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_registered",
-    "Get list of currently registered hooks for a scope",
+    "Get currently registered hooks for a scope. Compact by default.",
     {
       scope: z.enum(["global", "project"]).default("global").describe("Scope to check"),
+      compact: z.boolean().default(true).describe("Return compact summaries by default. Set false for descriptions."),
+      limit: z.number().default(25).describe("Max compact rows to return"),
     },
-    async ({ scope }) => {
+    async ({ scope, compact, limit }) => {
       const registered = getRegisteredHooks(scope);
       const result = registered.map((name) => {
         const meta = getHook(name);
         return { name, event: meta?.event, matcher: meta?.matcher ?? "", version: meta?.version, description: meta?.description };
       });
-      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      if (!compact) return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      const maxRows = boundedLimit(limit, 25, 100);
+      const visible = result.slice(0, maxRows).map((hook) => ({
+        name: hook.name,
+        event: hook.event,
+        matcher: hook.matcher,
+        version: hook.version,
+      }));
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            hooks: visible,
+            count: visible.length,
+            total: result.length,
+            omitted: Math.max(0, result.length - visible.length),
+            hint: "Use compact:false for descriptions or hooks_info for one hook.",
+          }),
+        }],
+      };
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_run",
     "Execute a hook programmatically with the given input and return its output",
     {
@@ -400,14 +493,14 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_update",
     "Re-register installed hooks to pick up new package version (reinstalls with overwrite)",
     {
       hooks: z.array(z.string()).optional().describe("Hook names to update (omit to update all installed hooks)"),
       scope: z.enum(["global", "project"]).default("global").describe("Scope to update"),
     },
-    async ({ hooks, scope }) => {
+    async ({ hooks, scope }: { hooks?: string[]; scope: Scope }) => {
       const installed = getRegisteredHooks(scope);
       const toUpdate = hooks && hooks.length > 0 ? hooks : installed;
 
@@ -428,14 +521,15 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_context",
-    "Get full agent context in one call: installed hooks (with event+matcher), active profile, settings path, and doctor status. Call this once at session start instead of making 4 separate calls.",
+    "Get compact agent context in one call: installed hooks, active profile summary, settings path, and doctor status.",
     {
       scope: z.enum(["global", "project"]).default("global").describe("Scope to inspect"),
       profile: z.string().optional().describe("Agent profile ID to include in context"),
+      verbose: z.boolean().default(false).describe("Include full profile preferences/details when true"),
     },
-    async ({ scope, profile }) => {
+    async ({ scope, profile, verbose }) => {
       const settingsPath = getSettingsPath(scope);
       const registered = getRegisteredHooks(scope);
       const hooks = registered.map((name) => {
@@ -465,14 +559,17 @@ export function createHooksServer(): McpServer {
 
       if (profile) {
         const p = getProfile(profile);
-        ctx.profile = p ?? null;
+        ctx.profile = p && !verbose
+          ? { agent_id: p.agent_id, agent_type: p.agent_type, name: p.name }
+          : p ?? null;
+        if (p && !verbose) ctx.profile_hint = "Use verbose:true for profile preferences.";
       }
 
       return { content: [{ type: "text", text: JSON.stringify(ctx) }] };
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_preview",
     "Simulate which installed PreToolUse hooks would fire for a given tool call and what decision each returns. Use this to understand your hook environment before taking an action.",
     {
@@ -534,7 +631,7 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_setup",
     "Single-shot agent onboarding: create an agent profile + install recommended hooks in one call. Ideal for agents setting up hooks at session start.",
     {
@@ -543,7 +640,7 @@ export function createHooksServer(): McpServer {
       hooks: z.array(z.string()).optional().describe("Hook names to install (omit for sensible defaults: gitguard, checkpoint, checktests, protectfiles)"),
       scope: z.enum(["global", "project"]).default("global").describe("Install scope"),
     },
-    async ({ agent_type, name, hooks, scope }) => {
+    async ({ agent_type, name, hooks, scope }: { agent_type: "claude" | "gemini" | "custom"; name?: string; hooks?: string[]; scope: Scope }) => {
       const profile = createProfile({ agent_type, name });
       const toInstall = hooks && hooks.length > 0
         ? hooks
@@ -560,7 +657,7 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_batch_run",
     "Run multiple hooks in parallel in a single call. Returns all results at once — more efficient than N separate hooks_run calls.",
     {
@@ -570,7 +667,7 @@ export function createHooksServer(): McpServer {
       })).describe("List of hooks to run with their inputs"),
       timeout_ms: z.number().default(10000).describe("Per-hook timeout in milliseconds"),
     },
-    async ({ hooks, timeout_ms }) => {
+    async ({ hooks, timeout_ms }: { hooks: Array<{ name: string; input: Record<string, unknown> }>; timeout_ms: number }) => {
       const results = await Promise.all(hooks.map(async ({ name, input }) => {
         const meta = getHook(name);
         if (!meta) return { name, error: `Hook '${name}' not found` };
@@ -597,7 +694,7 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_disable",
     "Temporarily disable a registered hook without removing it. Stores disabled list in settings under hooks.__disabled.",
     {
@@ -620,7 +717,7 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_enable",
     "Re-enable a previously disabled hook.",
     {
@@ -641,7 +738,7 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_init",
     "Register a new agent profile — returns a unique agent_id for use with hook installation and execution",
     {
@@ -654,30 +751,54 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_profiles",
-    "List all registered agent profiles",
-    {},
-    async () => {
+    "List registered agent profiles. Compact by default.",
+    {
+      compact: z.boolean().default(true).describe("Return compact summaries by default. Set false for full profiles."),
+      limit: z.number().default(25).describe("Max compact rows to return"),
+    },
+    async ({ compact, limit }) => {
       const profiles = listProfiles();
-      return { content: [{ type: "text", text: JSON.stringify(profiles) }] };
+      if (!compact) return { content: [{ type: "text", text: JSON.stringify(profiles) }] };
+      const maxRows = boundedLimit(limit, 25, 100);
+      const visible = profiles.slice(0, maxRows).map((profile) => ({
+        agent_id: profile.agent_id,
+        agent_type: profile.agent_type,
+        name: profile.name,
+        last_seen_at: profile.last_seen_at,
+      }));
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            profiles: visible,
+            count: visible.length,
+            total: profiles.length,
+            omitted: Math.max(0, profiles.length - visible.length),
+            hint: "Use compact:false for full profile preferences.",
+          }),
+        }],
+      };
     }
   );
 
   // --- Log query tools ---
 
-  server.tool(
+  defineTool(
     "hooks_log_list",
-    "List hook events from SQLite (~/.hasna/hooks/hooks.db). Filter by hook name, session ID, or time range.",
+    "List hook events from SQLite. Compact summaries by default; set compact:false for full event rows.",
     {
       hook_name: z.string().optional().describe("Filter by hook name (e.g. 'sessionlog', 'costwatch')"),
       session_id: z.string().optional().describe("Filter by session ID prefix"),
-      limit: z.number().default(50).describe("Max number of events to return"),
+      limit: z.number().optional().describe("Max number of events to return. Defaults to 20 compact rows or 50 full rows."),
       since: z.string().optional().describe("ISO timestamp or duration string (e.g. '1h', '30m', '7d') to filter from"),
+      compact: z.boolean().default(true).describe("Return compact event summaries by default. Set false for full rows."),
     },
-    async ({ hook_name, session_id, limit, since }) => {
+    async ({ hook_name, session_id, limit, since, compact }) => {
       const { getDb } = await import("../db/index.js");
       const db = getDb();
+      const maxRows = boundedLimit(limit, compact ? 20 : 50, compact ? 100 : 500);
 
       function parseDuration(s: string): string | null {
         const m = s.match(/^(\d+)(s|m|h|d)$/);
@@ -697,37 +818,61 @@ export function createHooksServer(): McpServer {
         if (ts) { sql += " AND timestamp >= ?"; params.push(ts); }
       }
       sql += " ORDER BY timestamp DESC LIMIT ?";
-      params.push(limit);
+      params.push(maxRows);
 
-      const rows = db.query(sql).all(...params);
-      return { content: [{ type: "text", text: JSON.stringify({ events: rows, count: (rows as any[]).length }) }] };
+      const rows = db.query(sql).all(...params) as any[];
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            events: compact ? rows.map(compactEvent) : rows,
+            count: rows.length,
+            compact,
+            hint: compact ? "Use compact:false for full tool_input/output fields." : undefined,
+          }),
+        }],
+      };
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_log_tail",
-    "Show the most recent hook events from SQLite.",
+    "Show recent hook events from SQLite. Compact summaries by default.",
     {
       n: z.number().default(20).describe("Number of most recent events to return"),
+      compact: z.boolean().default(true).describe("Return compact event summaries by default. Set false for full rows."),
     },
-    async ({ n }) => {
+    async ({ n, compact }) => {
       const { getDb } = await import("../db/index.js");
       const db = getDb();
-      const rows = db.query("SELECT * FROM hook_events ORDER BY timestamp DESC LIMIT ?").all(n);
-      return { content: [{ type: "text", text: JSON.stringify({ events: rows, count: (rows as any[]).length }) }] };
+      const maxRows = boundedLimit(n, 20, compact ? 100 : 500);
+      const rows = db.query("SELECT * FROM hook_events ORDER BY timestamp DESC LIMIT ?").all(maxRows) as any[];
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            events: compact ? rows.map(compactEvent) : rows,
+            count: rows.length,
+            compact,
+            hint: compact ? "Use compact:false for full tool_input/output fields." : undefined,
+          }),
+        }],
+      };
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_log_errors",
-    "Show hook events that contain errors, optionally filtered by time range.",
+    "Show hook events that contain errors. Compact summaries by default.",
     {
       since: z.string().default("24h").describe("Duration string (e.g. '1h', '30m', '7d') or ISO timestamp"),
-      limit: z.number().default(50).describe("Max number of error events to return"),
+      limit: z.number().optional().describe("Max number of error events to return. Defaults to 20 compact rows or 50 full rows."),
+      compact: z.boolean().default(true).describe("Return compact event summaries by default. Set false for full rows."),
     },
-    async ({ since, limit }) => {
+    async ({ since, limit, compact }) => {
       const { getDb } = await import("../db/index.js");
       const db = getDb();
+      const maxRows = boundedLimit(limit, compact ? 20 : 50, compact ? 100 : 500);
 
       function parseDuration(s: string): string {
         const m = s.match(/^(\d+)(s|m|h|d)$/);
@@ -740,12 +885,22 @@ export function createHooksServer(): McpServer {
       const ts = since.match(/^\d{4}/) ? since : parseDuration(since);
       const rows = db.query(
         "SELECT * FROM hook_events WHERE error IS NOT NULL AND timestamp >= ? ORDER BY timestamp DESC LIMIT ?"
-      ).all(ts, limit);
-      return { content: [{ type: "text", text: JSON.stringify({ events: rows, count: (rows as any[]).length }) }] };
+      ).all(ts, maxRows) as any[];
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            events: compact ? rows.map(compactEvent) : rows,
+            count: rows.length,
+            compact,
+            hint: compact ? "Use compact:false for full tool_input/output fields." : undefined,
+          }),
+        }],
+      };
     }
   );
 
-  server.tool(
+  defineTool(
     "hooks_log_summary",
     "Summarize hook execution: counts per hook, error rates, and recent activity.",
     {
@@ -792,35 +947,35 @@ export function createHooksServer(): McpServer {
     }
   );
 
-  server.tool(
+  defineTool(
     "storage_status",
     "Show hooks storage sync configuration and local sync history.",
     {},
     async () => ({ content: [{ type: "text" as const, text: JSON.stringify(getStorageStatus()) }] }),
   );
 
-  server.tool(
+  defineTool(
     "storage_push",
     "Push local hook data to storage PostgreSQL.",
     { tables: z.array(z.string()).optional() },
     async (params) => ({ content: [{ type: "text" as const, text: JSON.stringify(await storagePush(params.tables ? { tables: params.tables } : undefined)) }] }),
   );
 
-  server.tool(
+  defineTool(
     "storage_pull",
     "Pull hook data from storage PostgreSQL to local SQLite.",
     { tables: z.array(z.string()).optional() },
     async (params) => ({ content: [{ type: "text" as const, text: JSON.stringify(await storagePull(params.tables ? { tables: params.tables } : undefined)) }] }),
   );
 
-  server.tool(
+  defineTool(
     "storage_sync",
     "Bidirectional hooks storage sync: pull then push.",
     { tables: z.array(z.string()).optional() },
     async (params) => ({ content: [{ type: "text" as const, text: JSON.stringify(await storageSync(params.tables ? { tables: params.tables } : undefined)) }] }),
   );
 
-  server.tool(
+  defineTool(
     "send_feedback",
     "Send feedback about this service",
     {
@@ -844,7 +999,7 @@ export function createHooksServer(): McpServer {
 
   // --- Standard Agent Tools ---
 
-  server.tool("register_agent", "Register an agent session. Returns agent_id. Auto-triggers a heartbeat.", {
+  defineTool("register_agent", "Register an agent session. Returns agent_id. Auto-triggers a heartbeat.", {
     name: z.string(),
     session_id: z.string().optional(),
   }, async (params) => {
@@ -856,7 +1011,7 @@ export function createHooksServer(): McpServer {
     return { content: [{ type: "text" as const, text: JSON.stringify(ag) }] };
   });
 
-  server.tool("heartbeat", "Update last_seen_at to signal agent is active.", {
+  defineTool("heartbeat", "Update last_seen_at to signal agent is active.", {
     agent_id: z.string(),
   }, async (params) => {
     const ag = _hooksAgents.get(params.agent_id);
@@ -865,7 +1020,7 @@ export function createHooksServer(): McpServer {
     return { content: [{ type: "text" as const, text: JSON.stringify({ agent_id: ag.id, last_seen_at: ag.last_seen_at }) }] };
   });
 
-  server.tool("set_focus", "Set active project context for this agent session.", {
+  defineTool("set_focus", "Set active project context for this agent session.", {
     agent_id: z.string(),
     project_id: z.string().optional(),
   }, async (params) => {
@@ -875,8 +1030,31 @@ export function createHooksServer(): McpServer {
     return { content: [{ type: "text" as const, text: JSON.stringify({ agent_id: ag.id, project_id: ag.project_id ?? null }) }] };
   });
 
-  server.tool("list_agents", "List all registered agents.", {}, async () => {
-    return { content: [{ type: "text" as const, text: JSON.stringify([..._hooksAgents.values()]) }] };
+  defineTool("list_agents", "List registered agents. Compact by default.", {
+    compact: z.boolean().default(true).describe("Return compact agent summaries by default. Set false for full records."),
+    limit: z.number().default(25).describe("Max compact rows to return"),
+  }, async ({ compact, limit }) => {
+    const agents = [..._hooksAgents.values()];
+    if (!compact) return { content: [{ type: "text" as const, text: JSON.stringify(agents) }] };
+    const maxRows = boundedLimit(limit, 25, 100);
+    const visible = agents.slice(0, maxRows).map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      project_id: agent.project_id,
+      last_seen_at: agent.last_seen_at,
+    }));
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({
+          agents: visible,
+          count: visible.length,
+          total: agents.length,
+          omitted: Math.max(0, agents.length - visible.length),
+          hint: "Use compact:false for session_id and full records.",
+        }),
+      }],
+    };
   });
 
   return server;

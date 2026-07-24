@@ -22,6 +22,7 @@ import {
   getHooksByCategory,
   searchHooks,
   getHook,
+  type HookMeta,
 } from "../lib/registry.js";
 import {
   installHook,
@@ -78,6 +79,46 @@ function formatSettingsPath(scope: Scope, target: Target): string {
   }
   if (target === "gemini") return "~/.gemini/settings.json";
   return actual === getSettingsPath("global", "claude") ? "~/.claude/settings.json" : actual;
+}
+
+function parseLimit(value: string | undefined, fallback: number, max: number): number {
+  const parsed = value ? parseInt(value, 10) : fallback;
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(parsed, max);
+}
+
+function truncateText(value: string | undefined, max = 96): string {
+  const text = (value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= max) return text;
+  return `${text.slice(0, Math.max(0, max - 3))}...`;
+}
+
+function readmePreview(readme: string, max = 280): string | undefined {
+  const blocks = readme
+    .split(/\n\s*\n/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .filter((part) => !part.startsWith("#"))
+    .filter((part) => !part.startsWith("```"))
+    .filter((part) => !/^\[!\[/.test(part));
+  const preview = blocks[0]
+    ?? readme.split("\n").map((line) => line.trim()).find((line) => line && !line.startsWith("#"));
+  return preview ? truncateText(preview, max) : undefined;
+}
+
+function hookSummaryLine(hook: HookMeta, options: { verbose?: boolean } = {}): string {
+  const matcher = hook.matcher ? ` ${hook.matcher}` : "";
+  const description = options.verbose ? ` - ${truncateText(hook.description, 110)}` : "";
+  return `  ${chalk.cyan(hook.name.padEnd(17))} ${chalk.dim(`[${hook.event}${matcher}]`)} ${chalk.dim(hook.category)}${description}`;
+}
+
+function printDisclosureHint(hidden: number, detailCommand: string, options: { includeAll?: boolean } = {}): void {
+  const rowControls = options.includeAll ? "--limit, --all, --verbose" : "--limit, --verbose";
+  if (hidden > 0) {
+    console.log(chalk.dim(`\n  Showing a compact subset. ${hidden} more hidden; use ${rowControls}, or ${detailCommand}.`));
+  } else {
+    console.log(chalk.dim(`\n  Use --verbose or ${detailCommand} for details.`));
+  }
 }
 
 /** Levenshtein distance for did-you-mean suggestions */
@@ -370,10 +411,13 @@ program
   .option("-g, --global", "Check global settings", false)
   .option("-p, --project", "Check project settings", false)
   .option("-t, --target <target>", "Agent target: claude, gemini, codewith (default: claude)", "claude")
+  .option("-n, --limit <n>", "Max rows to show in compact output", "20")
+  .option("--verbose", "Show descriptions and full detail columns", false)
   .option("-j, --json", "Output as JSON", false)
   .description("List available or installed hooks")
   .action((options) => {
     const scope = resolveScope(options);
+    const limit = options.all ? Number.MAX_SAFE_INTEGER : parseLimit(options.limit, 20, 200);
 
     if (options.registered || options.installed) {
       const target = (options.target === "gemini" ? "gemini" : options.target === "codewith" ? "codewith" : "claude") as "claude" | "gemini" | "codewith";
@@ -389,13 +433,14 @@ program
         console.log(chalk.dim(`No hooks registered (${scope}, ${target})`));
         return;
       }
-      console.log(chalk.bold(`\nRegistered hooks — ${scope}/${target} (${registered.length}):\n`));
-      for (const name of registered) {
+      const visible = registered.slice(0, limit);
+      console.log(chalk.bold(`\nRegistered hooks — ${scope}/${target} (${registered.length}, showing ${visible.length}):\n`));
+      for (const name of visible) {
         const meta = getHook(name);
-        console.log(
-          `  ${chalk.cyan(name)} ${chalk.dim(`[${meta?.event || "unknown"}]`)} - ${meta?.description || ""}`
-        );
+        if (meta) console.log(hookSummaryLine(meta, { verbose: options.verbose }));
+        else console.log(`  ${chalk.cyan(name)} ${chalk.dim("[unknown]")}`);
       }
+      printDisclosureHint(registered.length - visible.length, "hooks info <name>", { includeAll: true });
       return;
     }
 
@@ -417,12 +462,10 @@ program
         console.log(JSON.stringify(hooks));
         return;
       }
-      console.log(chalk.bold(`\n${category} (${hooks.length}):\n`));
-      for (const h of hooks) {
-        console.log(
-          `  ${chalk.cyan(h.name)} ${chalk.dim(`[${h.event}]`)} - ${h.description}`
-        );
-      }
+      const visible = hooks.slice(0, limit);
+      console.log(chalk.bold(`\n${category} (${hooks.length}, showing ${visible.length}):\n`));
+      for (const h of visible) console.log(hookSummaryLine(h, { verbose: options.verbose }));
+      printDisclosureHint(hooks.length - visible.length, "hooks info <name>", { includeAll: true });
       return;
     }
 
@@ -436,26 +479,21 @@ program
       return;
     }
 
-    console.log(chalk.bold(`\nAvailable hooks (${HOOKS.length}):\n`));
-    for (const category of CATEGORIES) {
-      const hooks = getHooksByCategory(category);
-      console.log(chalk.bold(`${category} (${hooks.length}):`));
-      for (const h of hooks) {
-        console.log(
-          `  ${chalk.cyan(h.name)} ${chalk.dim(`[${h.event}]`)} - ${h.description}`
-        );
-      }
-      console.log();
-    }
+    const visible = HOOKS.slice(0, limit);
+    console.log(chalk.bold(`\nAvailable hooks (${HOOKS.length}, showing ${visible.length}):\n`));
+    for (const h of visible) console.log(hookSummaryLine(h, { verbose: options.verbose }));
+    printDisclosureHint(HOOKS.length - visible.length, "hooks info <name>", { includeAll: true });
   });
 
 // Search command
 program
   .command("search")
   .argument("<query>", "Search term")
+  .option("-n, --limit <n>", "Max rows to show in compact output", "10")
+  .option("--verbose", "Show descriptions for search results", false)
   .option("-j, --json", "Output as JSON", false)
   .description("Search for hooks")
-  .action((query: string, options: { json: boolean }) => {
+  .action((query: string, options: { limit: string; verbose: boolean; json: boolean }) => {
     const results = searchHooks(query);
     if (options.json) {
       console.log(JSON.stringify(results));
@@ -465,13 +503,11 @@ program
       console.log(chalk.dim(`No hooks found for "${query}"`));
       return;
     }
-    console.log(chalk.bold(`\nFound ${results.length} hook(s):\n`));
-    for (const h of results) {
-      console.log(
-        `  ${chalk.cyan(h.name)} ${chalk.dim(`[${h.event}] [${h.category}]`)}`
-      );
-      console.log(`    ${h.description}`);
-    }
+    const limit = parseLimit(options.limit, 10, 100);
+    const visible = results.slice(0, limit);
+    console.log(chalk.bold(`\nFound ${results.length} hook(s), showing ${visible.length}:\n`));
+    for (const h of visible) console.log(hookSummaryLine(h, { verbose: options.verbose }));
+    printDisclosureHint(results.length - visible.length, "hooks info <name>");
   });
 
 // Remove command
@@ -735,9 +771,10 @@ program
 program
   .command("docs")
   .argument("[hook]", "Hook name (shows general docs if omitted)")
+  .option("--verbose", "Print full hook README content", false)
   .option("-j, --json", "Output as JSON", false)
   .description("Show documentation for hooks")
-  .action((hook: string | undefined, options: { json: boolean }) => {
+  .action((hook: string | undefined, options: { verbose: boolean; json: boolean }) => {
     if (hook) {
       const meta = getHook(hook);
       if (!meta) {
@@ -773,11 +810,18 @@ program
       console.log(`    hooks install ${meta.name} --project   # project only`);
       console.log();
 
-      if (readme) {
+      if (readme && options.verbose) {
         console.log(chalk.bold("  README:\n"));
         for (const line of readme.split("\n")) {
           console.log(`    ${line}`);
         }
+      } else if (readme) {
+        const preview = readmePreview(readme);
+        if (preview) {
+          console.log(chalk.bold("  README Preview:\n"));
+          console.log(`    ${preview}\n`);
+        }
+        console.log(chalk.dim(`  README has ${readme.split("\n").length} lines. Use hooks docs ${meta.name} --verbose for the full README, or --json for machine-readable output.`));
       }
       return;
     }
@@ -851,8 +895,9 @@ program
     }
 
     console.log(chalk.bold("\n  Hook-Specific Docs\n"));
-    console.log(`    hooks docs <name>     View README for a specific hook`);
-    console.log(`    hooks docs --json     Machine-readable documentation`);
+    console.log(`    hooks docs <name>              Compact hook docs`);
+    console.log(`    hooks docs <name> --verbose    Full hook README`);
+    console.log(`    hooks docs --json              Machine-readable documentation`);
     console.log();
   });
 
@@ -1033,11 +1078,11 @@ logCmd
     console.log(chalk.bold(`\n  Hook Events (${rows.length})\n`));
     for (const row of rows) {
       const ts = row.timestamp.slice(0, 19).replace("T", " ");
-      const err = row.error ? chalk.red(` ERR: ${row.error.slice(0, 60)}`) : "";
+      const err = row.error ? chalk.red(` ERR: ${truncateText(row.error, 60)}`) : "";
       const tool = row.tool_name ? chalk.dim(` [${row.tool_name}]`) : "";
       console.log(`  ${chalk.dim(ts)}  ${chalk.cyan(row.hook_name.padEnd(14))}${tool}${err}`);
     }
-    console.log();
+    console.log(chalk.dim("\n  Compact rows shown. Use --json for full event records or --limit <n> to change row count."));
   });
 
 logCmd
@@ -1060,10 +1105,10 @@ logCmd
     console.log(chalk.bold(`\n  Search results for "${text}" (${rows.length})\n`));
     for (const row of rows) {
       const ts = row.timestamp.slice(0, 19).replace("T", " ");
-      const snippet = (row.tool_input || row.error || "").slice(0, 80);
+      const snippet = truncateText(row.tool_input || row.error || "", 80);
       console.log(`  ${chalk.dim(ts)}  ${chalk.cyan(row.hook_name.padEnd(14))}  ${chalk.dim(snippet)}`);
     }
-    console.log();
+    console.log(chalk.dim("\n  Compact rows shown. Use --json for full event records or --limit <n> to change row count."));
   });
 
 logCmd
@@ -1085,11 +1130,11 @@ logCmd
     console.log(chalk.bold(`\n  Last ${rows.length} events\n`));
     for (const row of rows) {
       const ts = row.timestamp.slice(0, 19).replace("T", " ");
-      const err = row.error ? chalk.red(` ✗ ${row.error.slice(0, 60)}`) : "";
+      const err = row.error ? chalk.red(` ✗ ${truncateText(row.error, 60)}`) : "";
       const tool = row.tool_name ? chalk.dim(` [${row.tool_name}]`) : "";
       console.log(`  ${chalk.dim(ts)}  ${chalk.cyan(row.hook_name.padEnd(14))}${tool}${err}`);
     }
-    console.log();
+    console.log(chalk.dim("\n  Compact rows shown. Use --json for full event records or -n <n> to change row count."));
   });
 
 logCmd
@@ -1128,9 +1173,9 @@ logCmd
     console.log(chalk.bold(`\n  Errors (last ${options.since}, ${rows.length} found)\n`));
     for (const row of rows) {
       const ts = row.timestamp.slice(0, 19).replace("T", " ");
-      console.log(`  ${chalk.dim(ts)}  ${chalk.cyan(row.hook_name.padEnd(14))}  ${chalk.red(row.error.slice(0, 100))}`);
+      console.log(`  ${chalk.dim(ts)}  ${chalk.cyan(row.hook_name.padEnd(14))}  ${chalk.red(truncateText(row.error, 100))}`);
     }
-    console.log();
+    console.log(chalk.dim("\n  Compact rows shown. Use --json for full event records or --limit <n> to change row count."));
   });
 
 logCmd
