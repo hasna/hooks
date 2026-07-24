@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "path";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "fs";
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "path";
 import { homedir, tmpdir } from "os";
 
 export interface CodewithHookInput {
@@ -485,6 +485,148 @@ function shouldSkipHasnaTreeRule(targetPath: string, rule: ProtectedPathRule, cu
   return isInsidePath(target, currentManagedRepoRoot);
 }
 
+function isMissingPathError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+function hasUnsafeTargetComponent(worktreesRoot: string, target: string): boolean {
+  const relativeTarget = relative(worktreesRoot, target);
+  const parts = relativeTarget.split(sep).filter(Boolean);
+  if (parts.some((part) => part.toLowerCase() === ".git")) return true;
+
+  const filesystemRoot = parse(target).root;
+  const absoluteParts = relative(filesystemRoot, target).split(sep).filter(Boolean);
+  let probe = filesystemRoot;
+  try {
+    if (lstatSync(probe).isSymbolicLink()) return true;
+  } catch {
+    return true;
+  }
+  for (const part of absoluteParts) {
+    probe = join(probe, part);
+    try {
+      const metadata = lstatSync(probe);
+      if (metadata.isSymbolicLink()) return true;
+      if (probe === target && metadata.isFile() && metadata.nlink > 1) return true;
+    } catch (error) {
+      if (isMissingPathError(error)) return false;
+      return true;
+    }
+  }
+  return false;
+}
+
+function managedLeaseRoot(worktreesRoot: string, target: string): string | null {
+  const relativeTarget = relative(worktreesRoot, target);
+  const parts = relativeTarget.split(sep).filter(Boolean);
+  if (parts.length < 3) return null;
+  const leaseRoot = resolve(worktreesRoot, ...parts.slice(0, 3));
+  return managedWorktreeInfo(leaseRoot).managed ? leaseRoot : null;
+}
+
+async function verifiedLinkedWorktreeRoot(leaseRoot: string): Promise<string | null> {
+  const controlFile = join(leaseRoot, ".git");
+  try {
+    const metadata = lstatSync(controlFile);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) return null;
+  } catch {
+    return null;
+  }
+
+  if (!commandExists("git")) return null;
+  const result = await runCommand([
+    "git",
+    "rev-parse",
+    "--show-toplevel",
+    "--absolute-git-dir",
+    "--git-common-dir",
+  ], { cwd: leaseRoot, timeoutMs: 2000 });
+  if (result.exitCode !== 0) return null;
+  const [repoRootRaw, gitDirRaw, commonDirRaw] = result.stdout.trim().split(/\r?\n/);
+  if (!repoRootRaw || !gitDirRaw || !commonDirRaw) return null;
+
+  const repoRoot = resolve(repoRootRaw);
+  const gitDir = resolveFrom(leaseRoot, gitDirRaw);
+  const commonDir = resolveFrom(leaseRoot, commonDirRaw);
+  if (repoRoot !== resolve(leaseRoot)) return null;
+  try {
+    const physicalGitDir = realpathSync(gitDir);
+    const physicalCommonDir = realpathSync(commonDir);
+    const physicalWorktreesDir = realpathSync(join(commonDir, "worktrees"));
+    if (physicalGitDir === physicalWorktreesDir || !isInsidePath(physicalGitDir, physicalWorktreesDir)) return null;
+    if (dirname(physicalWorktreesDir) !== physicalCommonDir) return null;
+
+    const commondirPointer = readFileSync(join(gitDir, "commondir"), "utf-8").trim();
+    const gitdirPointer = readFileSync(join(gitDir, "gitdir"), "utf-8").trim();
+    if (!commondirPointer || !gitdirPointer) return null;
+    if (realpathSync(resolveFrom(gitDir, commondirPointer)) !== physicalCommonDir) return null;
+    const expectedControlFile = resolve(controlFile);
+    const backPointer = resolveFrom(gitDir, gitdirPointer);
+    if (backPointer !== expectedControlFile) return null;
+    if (realpathSync(backPointer) !== realpathSync(expectedControlFile)) return null;
+  } catch {
+    return null;
+  }
+  return repoRoot;
+}
+
+async function managedRepoRootForAbsoluteTarget(
+  targetPath: string,
+  repoRootCache: Map<string, Promise<string | null>>,
+): Promise<string | null> {
+  if (!isAbsolute(targetPath)) return null;
+  const worktreesRoot = resolve(defaultWorktreesRoot());
+  const target = resolve(targetPath);
+  if (target === worktreesRoot || !isInsidePath(target, worktreesRoot)) return null;
+  if (hasUnsafeTargetComponent(worktreesRoot, target)) return null;
+
+  let physicalWorktreesRoot: string;
+  try {
+    physicalWorktreesRoot = realpathSync(worktreesRoot);
+  } catch {
+    return null;
+  }
+
+  const leaseRoot = managedLeaseRoot(worktreesRoot, target);
+  if (!leaseRoot) return null;
+  let repoRootPromise = repoRootCache.get(leaseRoot);
+  if (!repoRootPromise) {
+    repoRootPromise = verifiedLinkedWorktreeRoot(leaseRoot);
+    repoRootCache.set(leaseRoot, repoRootPromise);
+  }
+  const repoRoot = await repoRootPromise;
+  if (!repoRoot) return null;
+  const resolvedRepoRoot = resolve(repoRoot);
+  if (resolvedRepoRoot !== resolve(leaseRoot)) return null;
+  try {
+    const physicalRepoRoot = realpathSync(resolvedRepoRoot);
+    if (physicalRepoRoot === physicalWorktreesRoot || !isInsidePath(physicalRepoRoot, physicalWorktreesRoot)) return null;
+    const probe = dirname(target);
+    let existingProbe = probe;
+    while (true) {
+      try {
+        lstatSync(existingProbe);
+        break;
+      } catch (error) {
+        if (!isMissingPathError(error)) return null;
+      }
+      const parent = dirname(existingProbe);
+      if (parent === existingProbe || !isInsidePath(parent, resolvedRepoRoot)) return null;
+      existingProbe = parent;
+    }
+    const physicalProbe = realpathSync(existingProbe);
+    const missingSuffix = relative(existingProbe, target);
+    if (!missingSuffix || missingSuffix === ".." || missingSuffix.startsWith(`..${sep}`) || isAbsolute(missingSuffix)) return null;
+    const physicalTarget = existsSync(target)
+      ? realpathSync(target)
+      : resolve(physicalProbe, missingSuffix);
+    if (physicalTarget === physicalRepoRoot || !isInsidePath(physicalTarget, physicalRepoRoot)) return null;
+  } catch {
+    return null;
+  }
+  return resolvedRepoRoot;
+}
+
 function threatensRule(targetPath: string, rule: ProtectedPathRule, currentManagedRepoRoot: string | null): boolean {
   if (shouldSkipHasnaTreeRule(targetPath, rule, currentManagedRepoRoot)) return false;
   const contentBase = broadContentWipeBase(targetPath);
@@ -849,12 +991,22 @@ export async function classifyDangerousOperation(input: CodewithHookInput): Prom
     }
   }
 
+  const managedRepoRootCache = new Map<string, Promise<string | null>>();
+  const worktreesRoot = resolve(defaultWorktreesRoot());
   for (const candidate of extractFileToolPaths(input)) {
     const targetPath = resolveFrom(cwd, candidate.path);
+    const hasUnsafeManagedComponent = isInsidePath(targetPath, worktreesRoot)
+      && hasUnsafeTargetComponent(worktreesRoot, targetPath);
+    const targetManagedRepoRoot = hasUnsafeManagedComponent
+      ? null
+      : await managedRepoRootForAbsoluteTarget(targetPath, managedRepoRootCache);
+    const exemptManagedRepoRoot = hasUnsafeManagedComponent
+      ? null
+      : targetManagedRepoRoot;
     const extraRule = workspaceRoots.map((root) => hasnaDivisionRuleFor(targetPath, root)).find((rule): rule is ProtectedPathRule => Boolean(rule));
     const allRules = extraRule ? [...rules, extraRule] : rules;
     for (const rule of allRules) {
-      if (mutatesRule(targetPath, rule, currentManagedRepoRoot)) {
+      if (mutatesRule(targetPath, rule, exemptManagedRepoRoot)) {
         return {
           block: true,
           targetPath,
