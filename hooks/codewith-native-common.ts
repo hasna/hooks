@@ -312,7 +312,8 @@ function shellWordsPass(segment: string, atomicSubstitutions: boolean): { words:
   for (let i = 0; i < segment.length; i += 1) {
     const ch = segment[i];
     if (escaped) {
-      current += ch;
+      // A backslash before a glob metacharacter is part of the pattern, not shell quoting.
+      current += /[[\]*?]/.test(ch) ? `\\${ch}` : ch;
       escaped = false;
       continue;
     }
@@ -700,54 +701,191 @@ function mutatesProtectedPath(targetPath: string, rule: ProtectedPathRule): bool
 const CATCH_ALL_GLOB = /^(?:\*|\*\*|\.\*|\.\[!\.\]\*)$/;
 
 /**
- * Compile one glob path component to a regular expression.
+ * Match one glob path component against one literal name, without a regular expression.
  *
- * Bracket classes must be COMPILED, not escaped. Escaping them made `[e]tc` compile to the
- * literal `\[e\]tc`, which can never equal a real directory name - so `rm -rf /[e]tc`, which
- * bash expands to `/etc`, matched no protected root and was allowed. That one character
- * defeated every rule, every tool and every wrapper, including the realized incident shape
- * `rm -rf "$(bun pm cache)"/[a-z]*`.
+ * Written as a linear matcher on purpose, for two reasons that both bit this branch:
+ *
+ *  - Regex ESCAPING of `[`/`]` made `[e]tc` compile to a literal no directory can equal, so
+ *    `rm -rf /[e]tc` - which bash expands to `/etc` - matched no protected root.
+ *  - Regex COMPILATION of `*` as `[^/]*` backtracked exponentially: a ~70-character protected
+ *    root component with a dozen `*b` groups took over 45s against this hook's 20s timeout,
+ *    and a timed-out hook fails open. Two fail-opens in the same helper.
+ *
+ * A two-pointer wildcard match is O(pattern x name) worst case with no backtracking blowup,
+ * and bracket handling is explicit rather than delegated to regex syntax that does not mean
+ * the same thing. Unmatched constructs fall back to "matches", never to "does not match":
+ * an under-match is silent and fails open, which is exactly how `[e]tc` got through.
  */
-function globComponentToRegExp(component: string): RegExp {
-  let source = "";
-  for (let i = 0; i < component.length; i += 1) {
-    const ch = component[i];
+function bracketExpressionEnd(pattern: string, open: number): number {
+  let i = open + 1;
+  if (pattern[i] === "!" || pattern[i] === "^") i += 1;
+  // A `]` in first position is a literal member, not the terminator.
+  if (pattern[i] === "]") i += 1;
+  while (i < pattern.length) {
+    const ch = pattern[i];
+    if (ch === "\\") { i += 2; continue; }
+    // POSIX [:class:], [=equiv=] and [.collate.] contain a `]` that does NOT terminate the
+    // expression. Stopping at the first `]` made `[[:lower:]]` match nothing at all.
+    if (ch === "[" && (pattern[i + 1] === ":" || pattern[i + 1] === "=" || pattern[i + 1] === ".")) {
+      const kind = pattern[i + 1];
+      const close = pattern.indexOf(`${kind}]`, i + 2);
+      if (close === -1) return -1;
+      i = close + 2;
+      continue;
+    }
+    if (ch === "]") return i;
+    i += 1;
+  }
+  return -1;
+}
 
-    if (ch === "*") { source += "[^/]*"; continue; }
-    if (ch === "?") { source += "[^/]"; continue; }
+const POSIX_CLASS_MATCHERS: Record<string, (ch: string) => boolean> = {
+  alpha: (ch) => /\p{L}/u.test(ch),
+  digit: (ch) => /\p{Nd}/u.test(ch),
+  alnum: (ch) => /[\p{L}\p{Nd}]/u.test(ch),
+  lower: (ch) => /\p{Ll}/u.test(ch),
+  upper: (ch) => /\p{Lu}/u.test(ch),
+  space: (ch) => /\s/.test(ch),
+  punct: (ch) => /[!-\/:-@[-`{-~]/.test(ch),
+  xdigit: (ch) => /[0-9A-Fa-f]/.test(ch),
+  word: (ch) => /[\w]/.test(ch),
+  blank: (ch) => ch === " " || ch === "\t",
+  print: (ch) => ch >= " " && ch !== "\u007f",
+  graph: (ch) => ch > " " && ch !== "\u007f",
+  cntrl: (ch) => ch < " " || ch === "\u007f",
+};
 
-    if (ch === "[") {
-      // A `]` immediately after `[`, `[!` or `[^` is a literal member, not the terminator.
-      let end = i + 1;
-      if (component[end] === "!" || component[end] === "^") end += 1;
-      if (component[end] === "]") end += 1;
-      while (end < component.length && component[end] !== "]") end += 1;
-      if (end >= component.length) {
-        // Unterminated class: bash treats the `[` literally.
-        source += "\\[";
-        continue;
+/** Does `ch` satisfy the bracket expression `pattern[open..close]`? */
+function bracketMatches(pattern: string, open: number, close: number, ch: string): boolean {
+  let i = open + 1;
+  let negated = false;
+  if (pattern[i] === "!" || pattern[i] === "^") { negated = true; i += 1; }
+
+  let matched = false;
+  let first = true;
+  while (i < close) {
+    if (pattern[i] === "[" && (pattern[i + 1] === ":" || pattern[i + 1] === "=" || pattern[i + 1] === ".")) {
+      const kind = pattern[i + 1];
+      const end = pattern.indexOf(`${kind}]`, i + 2);
+      if (end === -1 || end >= close) break;
+      const name = pattern.slice(i + 2, end);
+      if (kind === ":") {
+        const test = POSIX_CLASS_MATCHERS[name];
+        // An unknown class must not silently match nothing.
+        if (test === undefined ? true : test(ch)) matched = true;
+      } else if (name === ch) {
+        matched = true;
       }
-      const body = component.slice(i + 1, end);
-      const negated = body.startsWith("!") || body.startsWith("^");
-      const members = (negated ? body.slice(1) : body).replace(/\\/g, "\\\\");
-      source += `[${negated ? "^" : ""}${members}]`;
-      i = end;
+      i = end + 2;
+      first = false;
       continue;
     }
 
-    source += ch.replace(/[.+^${}()|\]\\]/g, "\\$&");
+    let member = pattern[i];
+    if (member === "\\" && i + 1 < close) { i += 1; member = pattern[i]; }
+    // `]` is a literal only in first position; `-` is a literal at either end.
+    if (member === "]" && !first) break;
+
+    if (pattern[i + 1] === "-" && i + 2 < close && pattern[i + 2] !== "]") {
+      let upper = pattern[i + 2];
+      let step = 3;
+      if (upper === "\\" && i + 3 < close) { upper = pattern[i + 3]; step = 4; }
+      if (ch >= member && ch <= upper) matched = true;
+      i += step;
+    } else {
+      if (ch === member) matched = true;
+      i += 1;
+    }
+    first = false;
   }
-  return new RegExp(`^${source}$`);
+
+  return negated ? !matched : matched;
+}
+
+/**
+ * Two-pointer wildcard match with backtracking limited to the last `*`, so it is linear in
+ * practice and can never blow up the way the compiled regex did.
+ */
+function globMatches(pattern: string, name: string): boolean {
+  let p = 0;
+  let n = 0;
+  let starPattern = -1;
+  let starName = 0;
+
+  while (n < name.length) {
+    const ch = pattern[p];
+
+    if (p < pattern.length && ch === "*") {
+      starPattern = p;
+      starName = n;
+      p += 1;
+      continue;
+    }
+    if (p < pattern.length && ch === "?") {
+      p += 1;
+      n += 1;
+      continue;
+    }
+    if (p < pattern.length && ch === "[") {
+      const close = bracketExpressionEnd(pattern, p);
+      if (close !== -1) {
+        if (bracketMatches(pattern, p, close, name[n])) {
+          p = close + 1;
+          n += 1;
+          continue;
+        }
+      } else if (name[n] === "[") {
+        // Unterminated: bash treats the `[` literally.
+        p += 1;
+        n += 1;
+        continue;
+      }
+    } else if (p < pattern.length) {
+      const literal = ch === "\\" && p + 1 < pattern.length ? pattern[p + 1] : ch;
+      const width = ch === "\\" && p + 1 < pattern.length ? 2 : 1;
+      if (literal === name[n]) {
+        p += width;
+        n += 1;
+        continue;
+      }
+    }
+
+    if (starPattern === -1) return false;
+    starName += 1;
+    n = starName;
+    p = starPattern + 1;
+  }
+
+  while (pattern[p] === "*") p += 1;
+  return p >= pattern.length;
+}
+
+/**
+ * Does this glob keep no literal text at all, so it can match essentially any name?
+ * `[a-z]*` and `?*` are unanchored; `*.log` and `tmp-*` are anchored by their literals.
+ */
+function isUnanchoredGlob(pattern: string): boolean {
+  if (!/[*?[]/.test(pattern)) return false;
+  let residue = "";
+  for (let i = 0; i < pattern.length; i += 1) {
+    const ch = pattern[i];
+    if (ch === "\\" && i + 1 < pattern.length) { residue += pattern[i + 1]; i += 1; continue; }
+    if (ch === "*" || ch === "?") continue;
+    if (ch === "[") {
+      const close = bracketExpressionEnd(pattern, i);
+      if (close === -1) { residue += ch; continue; }
+      i = close;
+      continue;
+    }
+    residue += ch;
+  }
+  return residue.length === 0;
 }
 
 function globComponentMatches(pattern: string, literal: string): boolean {
   if (!/[*?[]/.test(pattern)) return pattern === literal;
   if (CATCH_ALL_GLOB.test(pattern)) return true;
-  try {
-    return globComponentToRegExp(pattern).test(literal);
-  } catch {
-    return true;
-  }
+  return globMatches(pattern, literal);
 }
 
 /**
@@ -802,10 +940,15 @@ function globThreatensRule(targetPath: string, rule: ProtectedPathRule): boolean
   if (CATCH_ALL_GLOB.test(last) && globPatternCovers(parts.slice(0, -1), rootParts)) return true;
 
   // A glob in the last component sweeps the contents of its own parent. When that parent IS
-  // the protected root, the sweep guts the root even though the glob is bounded:
-  // `rm -rf [a-z]*` at a repo root deletes almost all of it. d8c0e8a blocked this via the
-  // narrow-glob check; the precise-component rewrite dropped it.
-  if (/[*?[]/.test(last) && mutatesProtectedPath(parts.slice(0, -1).join(sep) || sep, rule)) return true;
+  // the protected root AND the pattern is unanchored, the sweep guts the root: `rm -rf [a-z]*`
+  // or `?*` at a repo root take almost everything.
+  //
+  // "Unanchored" means no literal character survives once wildcards are removed. That
+  // distinction is the whole point: `*.log`, `tmp-*`, `.turbo*` and `snapshot-[0-9]*` are
+  // anchored by their literal text and cannot take the root, and blocking them - which the
+  // blunt any-metacharacter version did - re-broke twelve everyday repo-root cleanups. A
+  // guard that blocks routine work gets switched off.
+  if (isUnanchoredGlob(last) && mutatesProtectedPath(parts.slice(0, -1).join(sep) || sep, rule)) return true;
 
   // A catch-all in the FIRST component sweeps every top-level directory: `/*/bin` deletes
   // /usr/bin, /var/bin and the rest, and a trailing literal makes the pattern deeper than any
@@ -927,6 +1070,12 @@ function expandBraces(token: string): string[] {
 const GUARDED_EXPANSION = /^\$\{[A-Za-z_][A-Za-z0-9_]*:\?/;
 const NON_EMPTY_PLACEHOLDER = "__hooks_guarded_expansion__";
 const MAX_EXPANSION_NESTING = 32;
+
+// Builtins that can bind or rebind a variable name. `eval` is here because its argument is
+// opaque, so nothing after it can be guaranteed.
+const REBINDING_BUILTINS = new Set([
+  "export", "declare", "typeset", "readonly", "local", "read", "eval", "let", "mapfile", "readarray",
+]);
 
 /** One shell expansion found in a token, with its exact source span. */
 interface FoundExpansion {
@@ -1147,6 +1296,30 @@ function assignmentTimeline(command: string): Array<ReadonlySet<string>> {
       for (const name of tokens.slice(1)) {
         if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) next.delete(name);
       }
+      current = next;
+      continue;
+    }
+
+    // Any construct that can rebind a name withdraws the guarantee. The token loop below
+    // stops at the first non-assignment token, so `export X=$(cmd)` was invisible while an
+    // earlier `X=/tmp/build` kept certifying X as non-empty.
+    if (REBINDING_BUILTINS.has(tokens[0])) {
+      const next = new Set(current);
+      for (const token of tokens.slice(1)) {
+        const name = token.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:=([\s\S]*))?$/);
+        if (!name) continue;
+        next.delete(name[1]);
+        // A literal, non-empty value re-establishes it; anything expandable does not.
+        if (name[2] !== undefined && name[2].length > 0 && !/[$`]/.test(name[2])) next.add(name[1]);
+      }
+      current = next;
+      continue;
+    }
+
+    // `for NAME in …` rebinds NAME to each word, any of which may be empty.
+    if (tokens[0] === "for" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(tokens[1] ?? "")) {
+      const next = new Set(current);
+      next.delete(tokens[1]);
       current = next;
       continue;
     }
@@ -1905,8 +2078,8 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
   // that subshell - it just does not escape to the parent - so skipping isolated `cd`
   // outright left `(cd / && rm -rf *)`, the standard "cd without moving my shell" idiom,
   // completely unguarded. Depth 0 is the parent shell.
-  let stack: Array<{ group: number; cwds: string[]; previous: string[]; explicit: boolean }> = [
-    { group: 0, cwds: [baseCwd], previous: [baseCwd], explicit: false },
+  let stack: Array<{ group: number; cwds: string[]; previous: string[]; dirStack: string[][]; explicit: boolean }> = [
+    { group: 0, cwds: [baseCwd], previous: [baseCwd], dirStack: [], explicit: false },
   ];
 
   const frameFor = (depth: number, group: number) => {
@@ -1914,7 +2087,7 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
     if (stack.length > depth + 1) stack = stack.slice(0, depth + 1);
     while (stack.length <= depth) {
       const parent = stack[stack.length - 1];
-      stack.push({ group, cwds: parent.cwds, previous: parent.previous, explicit: parent.explicit });
+      stack.push({ group, cwds: parent.cwds, previous: parent.previous, dirStack: [...parent.dirStack], explicit: parent.explicit });
     }
     // A DIFFERENT group at the same depth is a sibling subshell - a separate process that
     // never saw the previous one's `cd`. Reusing the frame let `(cd /elsewhere); (rm -rf *)`
@@ -1922,7 +2095,7 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
     const frame = stack[depth];
     if (frame.group !== group) {
       const parent = stack[depth - 1] ?? stack[0];
-      stack[depth] = { group, cwds: parent.cwds, previous: parent.previous, explicit: parent.explicit };
+      stack[depth] = { group, cwds: parent.cwds, previous: parent.previous, dirStack: [...parent.dirStack], explicit: parent.explicit };
     }
     return stack[depth];
   };
@@ -1933,9 +2106,25 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
     const tokens = shellWords(segment).filter((token, index) => !(index === 0 && (token === "{" || token === "}")));
     const verb = tokens[0];
 
+    // `popd` returns the shell to where `pushd` came from. It was unhandled, so the pushd
+    // target stayed as the tracked cwd for the rest of the command and
+    // `pushd /tmp; popd; rm -rf *` deleted the original directory unguarded.
+    if (verb === "popd") {
+      if (piped) return;
+      const restored = frame.dirStack.pop();
+      if (restored) {
+        frame.previous = frame.cwds;
+        frame.cwds = restored;
+        frame.explicit = restored.some((dir) => dir !== baseCwd);
+      }
+      return;
+    }
+
     if (verb === "cd" || verb === "pushd") {
       // A `cd` in a pipeline stage runs in its own process and moves nothing else.
       if (piped) return;
+      // `pushd` saves the current directory before moving.
+      if (verb === "pushd") frame.dirStack.push(frame.cwds);
       // Skip cd's own flags (-P, -L, --) to reach the directory operand.
       let i = 1;
       while (i < tokens.length && (tokens[i] === "-P" || tokens[i] === "-L" || tokens[i] === "-e" || tokens[i] === "-@" || tokens[i] === "--")) i += 1;

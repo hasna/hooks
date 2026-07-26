@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { join } from "path";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import {
   claimCommand,
   classifyDangerousOperation,
@@ -1113,6 +1113,119 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     const result = await classify(command);
     expect(result.block).toBe(true);
     expect(performance.now() - started).toBeLessThan(3000);
+  });
+
+  // -------------------------------------------------------------------------------------
+  // Adversarial review round 5.
+  // -------------------------------------------------------------------------------------
+
+  test("bracket expressions whose terminator is not the first ] still match", async () => {
+    // The compiler stopped at the first `]`, so `[[:lower:]]` compiled to a pattern requiring
+    // a literal `]` and matched nothing - a silent under-match, which fails OPEN. Verified
+    // against bash: /home/hasna/.hasn[[:lower:]] expands to /home/hasna/.hasna.
+    for (const command of [
+      "rm -rf /home/hasna/.hasn[[:lower:]]",
+      "rm -rf /home/hasna/.[[:lower:]]asna",
+      "rm -rf /home/hasna/.[[:lower:]]asna/repos",
+      "rm -rf /home/hasna/.hasn[a\\]]",
+      "rm -rf /[[:lower:]]tc",
+      "rm -rf /[[:alpha:]][[:alpha:]][[:alpha:]]",
+      `ssh station02 "rm -rf /home/hasna/.hasn[[:lower:]]"`,
+      `bash -c "rm -rf /home/hasna/.hasn[[:lower:]]"`,
+      "find /home/hasna/.hasn[[:lower:]] -delete",
+    ]) {
+      await expectBlocked(command);
+    }
+  });
+
+  test("popd returns the guard to where the shell returns", async () => {
+    // `pushd` was handled and `popd` was not, so the pushd target stayed as the tracked cwd
+    // for the rest of the command. Blocked on d8c0e8a; allowed from f6def3c until now.
+    // Deliberately NOT under the pushd target: a repo inside /tmp made this pass for the
+    // wrong reason, because `/tmp/*` covers the repo root whether or not popd is handled.
+    const repo = mkdtempSync(join(homedir(), ".hooks-popd-"));
+    try {
+      Bun.spawnSync(["git", "init", "-q", repo]);
+      for (const command of [
+        "pushd /var/tmp >/dev/null; popd >/dev/null; rm -rf *",
+        "pushd /var/tmp; popd; git clean -xfd",
+        "pushd /var/tmp; popd; find . -delete",
+      ]) {
+        await expectBlocked(command, { cwd: repo });
+      }
+      // pushd without popd still moves it.
+      await expectAllowed("pushd /var/tmp; rm -rf scratch-dir", { cwd: repo });
+    } finally {
+      try { rmSync(repo, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  test("any construct that can rebind a name withdraws the non-empty guarantee", async () => {
+    for (const rebind of [
+      "export X=$(bun pm cache)",
+      "declare X=$(cmd)",
+      "readonly X=$(cmd)",
+      "local X=$(cmd)",
+      "typeset X=$(cmd)",
+      "read X < /dev/null",
+      "eval 'X='",
+      'for X in ""; do :; done',
+    ]) {
+      await expectBlocked(`X=/tmp/build; ${rebind}; rm -rf "$X"/*`);
+    }
+    // A literal, non-empty binding through the same builtins is still a guarantee.
+    await expectAllowed(`export X=/tmp/build; rm -rf "$X"/*`);
+    await expectAllowed(`declare X=/tmp/build; rm -rf "$X"/*`);
+  });
+
+  test("glob matching is linear, so a long protected root cannot stall the hook", async () => {
+    // `*` compiled to `[^/]*` backtracked exponentially against a ~200-char root component:
+    // over 45s against a 20s timeout, and a timed-out hook fails open.
+    const base = mkdtempSync(join(tmpdir(), "hooks-redos-"));
+    const repo = join(base, "ab".repeat(100));
+    mkdirSync(repo, { recursive: true });
+    try {
+      Bun.spawnSync(["git", "init", "-q", repo]);
+      const started = performance.now();
+      await classify(`rm -rf ${base}/${"*b".repeat(15)}c`, { cwd: repo });
+      expect(performance.now() - started).toBeLessThan(2000);
+    } finally {
+      try { rmSync(base, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  test("the narrow-glob sweep fires only on unanchored patterns", async () => {
+    // Previously untested: deleting the whole rule left the suite green. It is also the
+    // rule most able to over-block, so both directions are asserted here.
+    const repo = mkdtempSync(join(tmpdir(), "hooks-sweep-"));
+    try {
+      Bun.spawnSync(["git", "init", "-q", repo]);
+      // Unanchored - nothing literal survives, so it takes essentially the whole root.
+      for (const command of ["rm -rf [a-z]*", "rm -rf [!x]*", "rm -rf ?*", "rm -rf *"]) {
+        await expectBlocked(command, { cwd: repo });
+      }
+      // Anchored by literal text - cannot take the root, and blocking these got the guard
+      // switched off last round.
+      for (const command of [
+        "rm -rf *.log",
+        "rm -rf *.tsbuildinfo",
+        "rm -rf .turbo* .next* .cache*",
+        "rm -rf tmp-*",
+        "rm -rf test-output-*",
+        "rm -rf dist-*.zip",
+        "rm -rf report-2026-*",
+        "rm -rf ./*.tgz",
+        "rm -rf out?/",
+        "rm -rf .venv*",
+        "rm -rf build-cache-*",
+        "rm -rf snapshot-[0-9]*",
+        "rm -rf [s]rc",
+      ]) {
+        await expectAllowed(command, { cwd: repo });
+      }
+    } finally {
+      try { rmSync(repo, { recursive: true, force: true }); } catch {}
+    }
   });
 
   test("a quoted paren inside a substitution does not disable the collapse rule", async () => {
