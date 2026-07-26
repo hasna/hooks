@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `cd` is tracked within a command, so `cd / && rm -rf *` and `cd "$(cmd)"/ && rm -rf ./*` block.
   - A `for VAR in <root-glob>` binding is followed into `rm -rf "$VAR"`.
   - Block messages now name a safe alternative instead of only refusing.
+  - A glob in **any** path component counts, not only the last: `rm -rf /*/*` destroys `/usr/*`, `/etc/*` and `/home/*` and is now blocked. A bounded glob (`~/proj*/dist`, `/var/log/*.gz`) keeps its narrower check and stays allowed.
+  - Brace alternations are expanded, so `rm -rf /{bin,etc,home}` is seen as the root deletes it performs.
+  - Command-substitution **bodies** are scanned as scripts: `echo $(rm -rf /)` runs the delete and discards only its output.
+  - `cd` inside `( … )` or a pipeline stage no longer moves the guard's working directory, and `cd -` returns to the previous one.
+  - Expansion nesting has no depth limit (`$(dirname "$(dirname "$(cmd)")")`, `${A:-${B}}`), and expansions the shell cannot return empty — `$(pwd)`, `$PWD`, `${VAR:-nonempty}`, and variables assigned a non-empty literal earlier in the same command — are not treated as collapsible.
 
   Remediates the 2026-07-24 data-destruction incident in which `rm -rf "$(bun pm cache)"/*`, sent over ssh inside `bash -c`, ran as `rm -rf /*` (`bun pm cache` exits non-zero with empty stdout when no `package.json` is found walking up from cwd), freeing ~700 GB and permanently destroying one repository's only source copy.
 

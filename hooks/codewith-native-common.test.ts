@@ -520,8 +520,13 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
   test("recursive delete of every declared system root blocks, bare and wholesale-glob", async () => {
     for (const root of SYSTEM_PROTECTED_ROOTS) {
       if (root === "/") continue;
-      await expectBlocked(`rm -rf ${root}`);
-      await expectBlocked(`rm -rf ${root}/*`);
+      // The label is asserted, not just the verdict: /home (and /root, /Users on machines
+      // whose HOME sits under them) is also covered by the ~/.hasna tree rule, so a
+      // verdict-only assertion would still pass with that entry deleted from the list.
+      const bare = await expectBlocked(`rm -rf ${root}`);
+      expect(bare.protectedLabel).toBe(`system root ${root}`);
+      const glob = await expectBlocked(`rm -rf ${root}/*`);
+      expect(glob.protectedLabel).toBe(`system root ${root}`);
     }
   });
 
@@ -787,5 +792,108 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     await expectBlocked("find / -delete");
     await expectBlocked("find / -exec rm -rf {} \\;");
     await expectBlocked("rsync -a --delete /var/empty/ /");
+  });
+
+  // -------------------------------------------------------------------------------------
+  // Adversarial review round 2. Each of these got a full wipe past the first draft of this
+  // change, and the first two were REGRESSIONS it introduced against the previous release.
+  // -------------------------------------------------------------------------------------
+
+  test("a delete inside a command substitution is still a delete", async () => {
+    // Regression guard. Making $( ) atomic for the collapse rule removed the accidental
+    // coverage the old segment splitter gave, so `echo $(rm -rf /)` became invisible: the
+    // delete runs and only its OUTPUT is discarded.
+    for (const command of [
+      "echo $(rm -rf /home/hasna/.hasna)",
+      "x=$(rm -rf /home/hasna/.hasna)",
+      "$(rm -rf /home/hasna/.hasna)",
+      "$(rm -rf /*)",
+      "x=$(rm -rf /*)",
+      'echo "$(cd / && rm -rf *)"',
+      "echo `rm -rf /*`",
+      'files=$(rm -rf "$(bun pm cache)"/*)',
+    ]) {
+      await expectBlocked(command);
+    }
+  });
+
+  test("a glob anywhere in the path counts, not only in the last component", async () => {
+    // `rm -rf /*/*` destroys /usr/*, /etc/*, /home/* - the incident's outcome, respelled.
+    for (const command of [
+      "rm -rf /*/*",
+      "rm -rf /*/*/*",
+      "rm -rf /**/*",
+      "rm -rf /home/*/*",
+      "rm -rf ~/*/*",
+      "rm -rf /home/*/.hasna",
+      "rm -rf /*/bin",
+      "find /*/x -delete",
+    ]) {
+      await expectBlocked(command);
+    }
+  });
+
+  test("a bounded glob earlier in the path still does not over-block", async () => {
+    const home = mkdtempSync(join(tmpdir(), "hooks-midglob-"));
+    try {
+      await expectAllowed(`rm -rf ${home}/proj*/dist`, { home });
+      await expectAllowed("rm -rf /var/log/*.gz", { home });
+      await expectAllowed("rm -rf /etc/nginx/sites-enabled/*", { home });
+      await expectAllowed("rm -rf /var/lib/docker/*", { home });
+    } finally {
+      try { rmSync(home, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  test("brace alternations are expanded", async () => {
+    await expectBlocked("rm -rf /{bin,boot,etc,home,lib,opt,root,srv,usr,var}");
+    await expectBlocked("rm -rf /{,usr,etc}");
+    await expectBlocked("rm -rf ~/{.hasna,Downloads}");
+    await expectAllowed("rm -rf ./{dist,build}");
+  });
+
+  test("cd in a subshell or pipeline does not move the guard, and cd - comes back", async () => {
+    // Regression guard: tracking `cd` naively made these WEAKER than before the change,
+    // because the tracker followed a `cd` that the real shell confines to a child process.
+    const cwd = "/home/hasna/.hasna/projects/workspaces";
+    for (const command of [
+      "cd /var/tmp && ls && cd - && rm -rf *",
+      "(cd /var/tmp && ls); rm -rf *",
+      "cd /var/tmp | cat; rm -rf *",
+      "cd /var/tmp; cd $OLDPWD; rm -rf *",
+      "for f in a b; do (cd /var/tmp); done; rm -rf *",
+    ]) {
+      await expectBlocked(command, { cwd });
+    }
+    await expectAllowed("cd /var/tmp && rm -rf scratch", { cwd });
+  });
+
+  test("shell options taking a value do not hide the -c script", async () => {
+    for (const command of [
+      "bash -o errexit -c 'rm -rf /*'",
+      "bash -o pipefail -c 'rm -rf /*'",
+      "sh -o errexit -c 'rm -rf /*'",
+      "bash --rcfile /dev/null -c 'rm -rf /*'",
+    ]) {
+      await expectBlocked(command);
+    }
+  });
+
+  test("expansion nesting has no depth limit", async () => {
+    await expectBlocked('rm -rf "$(dirname "$(dirname "$(bun pm cache)")")"/*');
+    await expectBlocked('rm -rf "${A:-${B}}"/*');
+    expect(emptyExpansionCollapse("${A:-${B}}/*")).toBe("/*");
+  });
+
+  test("expansions the shell cannot return empty are not treated as collapsible", async () => {
+    // These block routine cleanup if mishandled, and a guard that blocks routine work
+    // gets switched off - which is how this class of incident recurs.
+    await expectAllowed('rm -rf "$(pwd)"/*');
+    await expectAllowed('rm -rf "$PWD"/*');
+    await expectAllowed('rm -rf "${BUILD_DIR:-/tmp/build}"/*');
+    await expectAllowed('BUILD=/tmp/build && rm -rf "$BUILD"/*');
+    // ...but only where the guarantee is real.
+    await expectBlocked('rm -rf "${BUILD_DIR-/tmp/build}"/*');
+    await expectBlocked('BUILD=$(some-command) && rm -rf "$BUILD"/*');
   });
 });
