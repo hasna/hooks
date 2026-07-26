@@ -1129,8 +1129,8 @@ export function isInsidePath(child: string, parent: string): boolean {
 /**
  * Canonical managed-worktree path shape.
  *
- * Source of truth: Hasna Agent Operating Rules rule 8, published by
- * @hasna/identities (>= 0.4.4) global agent rules, verbatim:
+ * Source of truth: Hasna Agent Operating Rules rule 8, as published by the
+ * @hasna/identities 0.4.4 global agent rules, verbatim:
  *
  *   "must happen in a task-specific worktree at
  *    $HOME/.hasna/repos/worktrees/<repo-name>/<worktree-name>
@@ -1153,11 +1153,12 @@ export const CANONICAL_WORKTREE_SEGMENTS = 2;
  */
 export const LEGACY_LEASE_WORKTREE_SEGMENTS = 3;
 
-// Ordinary directory names, including a leading underscore (real repos use `_base`
-// style worktree names). A leading `.` is refused so `.`, `..` and `.git` can never
-// be read as a repo or worktree segment; a leading `-` is refused so a segment can
-// never be interpolated into a command as an option.
-const WORKTREE_SEGMENT_PATTERN = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,80}$/;
+// Any ordinary directory name, bounded by the filesystem's own limit rather than an
+// allowlist — repo and worktree names are user data, and an over-narrow pattern would
+// reject legitimate work (real fleet names include `_base`). Refused: a leading `.`,
+// so `.`, `..` and `.git` can never be read as a segment; a leading `-`, so a segment
+// can never read as an option in the remediation command; and control characters.
+const WORKTREE_SEGMENT_PATTERN = /^[^.\-\/\x00-\x1f][^\/\x00-\x1f]{0,254}$/;
 const LEGACY_LEASE_REPO_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*-[0-9a-fA-F]{7,16}$/;
 const LEGACY_LEASE_ID_PATTERN = /^wt_[0-9a-fA-F]{16,64}$/;
 
@@ -1183,21 +1184,49 @@ export function canonicalWorktreeTemplate(root: string = defaultWorktreesRoot())
   return join(root, "<repo-name>", "<worktree-name>");
 }
 
-/** True when `path` is the root of a git worktree or repository (has a `.git` entry). */
-function looksLikeGitWorktreeRoot(path: string): boolean {
-  try {
-    return existsSync(join(path, ".git"));
-  } catch {
-    return false;
+/**
+ * Verify that `<root>/<repo>/<worktree>` is a real, non-symlinked git worktree root.
+ *
+ * Path shape alone is not evidence: `<root>/<flat-worktree>/<subdir>` has exactly the
+ * same shape as `<root>/<repo>/<worktree>`, so without this check a `cd` into any
+ * subdirectory of a flat worktree would launder it into a compliant-looking path.
+ * Symlinks are refused at every level (hence lstat, not existsSync, which follows
+ * them) because a symlinked segment can aim a canonical-looking path at a shared
+ * checkout, which rule 10 forbids mutating.
+ *
+ * A `.git` directory is accepted alongside a `.git` file: rule 8 governs where the
+ * checkout lives, not whether it is a linked worktree. The stricter linked-worktree
+ * proof stays in verifiedLinkedWorktreeRoot(), which gates the write carve-out.
+ */
+function canonicalWorktreeRootReason(root: string, repo: string, worktree: string): string | null {
+  let probe = resolve(root);
+  for (const segment of [repo, worktree]) {
+    probe = join(probe, segment);
+    let metadata;
+    try {
+      metadata = lstatSync(probe);
+    } catch {
+      return `no worktree exists at ${probe}`;
+    }
+    if (metadata.isSymbolicLink()) return `worktree path traverses a symlink at ${probe}`;
+    if (!metadata.isDirectory()) return `worktree path is not a directory at ${probe}`;
   }
+  try {
+    if (lstatSync(join(probe, ".git")).isSymbolicLink()) return `worktree .git is a symlink at ${probe}`;
+  } catch {
+    return `${probe} is not a git worktree root (no .git)`;
+  }
+  return null;
 }
 
 /**
  * Classify a path against the canonical managed-worktree shape (rule 8).
  *
- * Accepted: `<worktrees-root>/<repo-name>/<worktree-name>` and any path inside it.
- * Rejected, each with a reason: paths outside the worktrees root, the root itself,
- * flat single-segment worktrees, station-id/machine segments, and deeper nesting.
+ * Accepted: a real git worktree root at `<worktrees-root>/<repo-name>/<worktree-name>`,
+ * and any path inside it. Rejected, each with a reason: paths outside the worktrees
+ * root, the root itself, flat single-segment worktrees, station-id/machine segments,
+ * deeper nesting, and canonical-shaped paths that are not actually a worktree root
+ * (invented, symlinked, or a subdirectory of a flat worktree).
  */
 export function managedWorktreeInfo(cwd: string): ManagedWorktreeInfo {
   const root = defaultWorktreesRoot();
@@ -1223,23 +1252,24 @@ export function managedWorktreeInfo(cwd: string): ManagedWorktreeInfo {
     }
   }
 
+  // A canonical classification must be grounded in a real worktree root at depth 2,
+  // never in path shape alone: at depth 2 the shape is ambiguous with a subdirectory
+  // of a forbidden flat worktree, and at any depth it is ambiguous with an invented
+  // or symlinked path.
   const worktreeRoot = resolve(root, repo!, worktree!);
-  const canonicalMatch: ManagedWorktreeInfo = {
-    managed: true,
-    root,
-    layout: "canonical",
-    repo,
-    worktree,
-    worktreeRoot,
-  };
-  if (parts.length === CANONICAL_WORKTREE_SEGMENTS) return canonicalMatch;
+  const rootReason = canonicalWorktreeRootReason(root, repo!, worktree!);
+  if (!rootReason) {
+    return { managed: true, root, layout: "canonical", repo, worktree, worktreeRoot };
+  }
 
-  // Deeper than the canonical shape: either the cwd is a subdirectory of a
-  // canonical worktree (allowed), or the worktree root itself is over-nested
-  // (a station-id/machine segment or extra nesting — both forbidden by rule 8).
-  if (looksLikeGitWorktreeRoot(worktreeRoot)) return canonicalMatch;
+  if (parts.length === CANONICAL_WORKTREE_SEGMENTS) {
+    return { managed: false, root, reason: `${rootReason}; canonical shape is ${canonical}` };
+  }
 
-  if (parts.length === LEGACY_LEASE_WORKTREE_SEGMENTS
+  // Recognised at or inside a legacy lease root, mirroring how a canonical worktree
+  // covers its own subdirectories — an agent cwd'd into `src/` of a legacy worktree
+  // is in the same non-compliant worktree, and must get the same migration message.
+  if (parts.length >= LEGACY_LEASE_WORKTREE_SEGMENTS
     && LEGACY_LEASE_REPO_PATTERN.test(parts[1]!)
     && LEGACY_LEASE_ID_PATTERN.test(parts[2]!)) {
     return {
@@ -1255,7 +1285,7 @@ export function managedWorktreeInfo(cwd: string): ManagedWorktreeInfo {
   return {
     managed: false,
     root,
-    reason: `worktree root is ${parts.length} segments under the worktrees root (station-id/machine segment or extra nesting), which rule 8 forbids; canonical shape is ${canonical}`,
+    reason: `worktree root is ${parts.length} segments under the worktrees root (station-id/machine segment or extra nesting); rule 8 requires the worktree to be created at exactly ${canonical}`,
   };
 }
 
@@ -1276,20 +1306,75 @@ export async function gitRemoteSlug(cwd: string): Promise<string | null> {
   return match?.[1] || null;
 }
 
+/** `origin` normalised to the `host/org/name` form the repos CLI resolves exactly. */
+export async function gitRemoteHostSlug(cwd: string): Promise<string | null> {
+  if (!commandExists("git")) return null;
+  const result = await runCommand(["git", "remote", "get-url", "origin"], { cwd, timeoutMs: 2000 });
+  if (result.exitCode !== 0) return null;
+  const remote = result.stdout.trim().replace(/\.git$/, "");
+  if (!remote) return null;
+  const match = remote.match(/^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?([^/:\s]+)[:/](.+)$/i);
+  const host = match?.[1];
+  const path = match?.[2]?.replace(/^\/+/, "");
+  if (!host || !path || !/^[^/\s]+\/[^/\s]+$/.test(path)) return null;
+  return `${host}/${path}`;
+}
+
+export interface CanonicalRepoIdentity {
+  /** The repo name that forms the `<repo-name>` segment of the canonical path. */
+  name: string | null;
+  defaultBranch: string | null;
+}
+
+/**
+ * Resolve the canonical repo name via the repos CLI, as rule 8 requires:
+ * "Locate repos with the repos CLI (`repos repo <name> --json` for the exact
+ * lookup; never fuzzy `repos cd` or 'did you mean' output for targeting)".
+ *
+ * This matters because the repos-CLI name is frequently NOT the git remote
+ * basename — on this fleet 46 of 50 indexed repos differ (`open-hooks` is
+ * `github.com/hasna/hooks`, `open-mailery` is `.../emails`). Deriving the
+ * canonical path segment from the remote would send every agent to the wrong
+ * directory, so the remote is only ever used as the exact lookup key.
+ *
+ * `--remote host/org/name` is the exact-match form, so no fuzzy "did you mean"
+ * output can be mistaken for a hit. OSS-safe: a missing or failing repos CLI
+ * yields nulls and the caller falls back to local information.
+ */
+export async function canonicalRepoIdentity(cwd: string): Promise<CanonicalRepoIdentity> {
+  const empty: CanonicalRepoIdentity = { name: null, defaultBranch: null };
+  if (!commandExists("repos")) return empty;
+  const remote = await gitRemoteHostSlug(cwd);
+  if (!remote) return empty;
+  const result = await runCommand(["repos", "repo", "--remote", remote, "--json"], { cwd, timeoutMs: 2000 });
+  if (result.exitCode !== 0) return empty;
+  try {
+    const parsed = JSON.parse(result.stdout) as { name?: unknown; default_branch?: unknown };
+    return {
+      name: typeof parsed.name === "string" && parsed.name ? parsed.name : null,
+      defaultBranch: typeof parsed.default_branch === "string" && parsed.default_branch ? parsed.default_branch : null,
+    };
+  } catch {
+    return empty;
+  }
+}
+
 /**
  * Remediation command for work happening outside a canonical worktree.
  *
  * Rule 8: create the worktree at `<worktrees-root>/<repo-name>/<worktree-name>`,
  * named after the todos task where one exists, then `repos scan`. The repos CLI
  * has no worktree verb, so `git worktree` is the creation path.
+ *
+ * `repo` must be a canonical repo name (see canonicalRepoIdentity) — never a
+ * remote slug, which names a different directory for most repos.
  */
-export function claimCommand(repo: string | null, taskId: string | null): string {
-  // `repo` may arrive as an `owner/name` remote slug; the canonical shape uses the
-  // bare repo name, so a slug must never leak an extra path segment into the template.
-  const repoName = repo?.split("/").filter(Boolean).pop() || "<repo-name>";
+export function claimCommand(repo: string | null, taskId: string | null, defaultBranch: string | null = null): string {
+  const repoName = repo || "<repo-name>";
   const worktreeName = taskId || "<worktree-name>";
   const path = join(defaultWorktreesRoot(), repoName, worktreeName);
-  return `git worktree add -b ${worktreeName} ${path} origin/<base> && repos scan`;
+  const base = defaultBranch || "<default-branch>";
+  return `git worktree add -b ${worktreeName} ${path} origin/${base} && repos scan`;
 }
 
 export function taskIdFrom(input: CodewithHookInput): string | null {

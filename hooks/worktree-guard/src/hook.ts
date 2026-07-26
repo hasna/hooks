@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import {
+  canonicalRepoIdentity,
   canonicalWorktreeTemplate,
   classifyDangerousOperation,
   claimCommand,
@@ -40,12 +41,45 @@ export async function evaluate(input: CodewithHookInput): Promise<{ output: Reco
   const managed = managedWorktreeInfo(targetCwd);
   if (managed.managed) return { output: { continue: true }, warnings };
 
+  // Migration shim, temporary and deliberately narrow: worktrees created under the
+  // pre-rule-8 station-id lease layout are non-compliant, but they are real, active
+  // worktrees. Hard-blocking their git work on day one would strand in-flight tasks
+  // with no way to land, so this one recognised layout warns instead of blocking.
+  // Everything else non-canonical is still blocked. Remove once they are re-homed.
+  if (managed.layout === "legacy-station-lease") {
+    const message = `${managed.reason}. This layout will stop being tolerated; re-home this worktree.`;
+    warnings.push(message);
+    return {
+      output: {
+        continue: true,
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          additionalContext: `[worktree-guard] ${message}`,
+        },
+      },
+      warnings,
+    };
+  }
+
   const repoRoot = await gitRepoRoot(targetCwd);
-  const repo = await gitRemoteSlug(targetCwd) || (repoRoot ? repoRoot.split("/").filter(Boolean).pop() || null : null);
+  // Rule 8 resolution order: the repos CLI is the source of truth for <repo-name>.
+  // The local checkout directory is the next best guess, and the remote slug is the
+  // last resort — for most repos the remote basename is NOT the canonical repo name.
+  const identity = await canonicalRepoIdentity(targetCwd);
+  const repo = identity.name
+    || (repoRoot ? repoRoot.split("/").filter(Boolean).pop() || null : null)
+    || (await gitRemoteSlug(targetCwd))?.split("/").filter(Boolean).pop()
+    || null;
   const taskId = taskIdFrom(input);
-  const recommended = claimCommand(repo, taskId);
+  const recommended = claimCommand(repo, taskId, identity.defaultBranch);
   const action = gitInfo?.action || null;
   const canonical = canonicalWorktreeTemplate(managed.root);
+  // Rule 8 requires an exact repos-CLI lookup for <repo-name>. When that lookup did
+  // not resolve, the name below is a local guess, so say so rather than imply it is
+  // authoritative — the repo directory name and the remote basename often differ.
+  const unverifiedRepoName = identity.name
+    ? null
+    : `Confirm <repo-name> with an exact repos CLI lookup first: repos repo ${repo || "<name>"} --json`;
 
   if (action) {
     const reason = [
@@ -53,6 +87,7 @@ export async function evaluate(input: CodewithHookInput): Promise<{ output: Reco
       `Command target cwd: ${targetCwd}`,
       `Canonical worktree path (Agent Operating Rules rule 8): ${canonical}`,
       `Create one first: ${recommended}`,
+      ...(unverifiedRepoName ? [unverifiedRepoName] : []),
     ].join(" ");
     return { output: { decision: "block", reason }, warnings };
   }
@@ -62,6 +97,7 @@ export async function evaluate(input: CodewithHookInput): Promise<{ output: Reco
       `Feature work appears to be outside a canonical task worktree (${managed.reason || "not under managed root"}).`,
       `Canonical worktree path (Agent Operating Rules rule 8): ${canonical}.`,
       `Use: ${recommended}`,
+      ...(unverifiedRepoName ? [unverifiedRepoName] : []),
     ].join(" "));
     return {
       output: {

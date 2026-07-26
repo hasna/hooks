@@ -1494,7 +1494,7 @@ describe("Codewith-native hooks", () => {
   test("worktree-guard allows git commit inside a canonical <repo-name>/<worktree-name> worktree", async () => {
     const worktreesRoot = join(tmp, "worktrees");
     const managed = join(worktreesRoot, "open-hooks", "OPE61-00004-worktree-guard");
-    mkdirSync(managed, { recursive: true });
+    initGitRepo(managed);
 
     const result = await runHook("worktree-guard", {
       hook_event_name: "PreToolUse",
@@ -1553,14 +1553,14 @@ describe("Codewith-native hooks", () => {
         reason: "station-id/machine segment or extra nesting",
       },
       {
-        name: "deprecated station-id lease layout",
-        cwd: join(worktreesRoot, "station01", "open-hooks-a55c105a", "wt_2ab04216a30ef5ece642792e"),
-        reason: "deprecated station-id lease layout",
+        name: "canonical-shaped path that is not a worktree root",
+        cwd: join(worktreesRoot, "open-hooks", "never-created-by-git"),
+        reason: "is not a git worktree root (no .git)",
       },
       {
-        name: "nesting deeper than the lease layout",
-        cwd: join(worktreesRoot, "station01", "open-hooks-a55c105a", "wt_2ab04216a30ef5ece642792e", "repo"),
-        reason: "station-id/machine segment or extra nesting",
+        name: "subdirectory of a flat worktree, which has the canonical shape",
+        cwd: join(worktreesRoot, "open-hooks-flat", "src"),
+        reason: "is not a git worktree root (no .git)",
       },
     ];
 
@@ -1583,6 +1583,36 @@ describe("Codewith-native hooks", () => {
       expect(result.json.decision, testCase.name).toBe("block");
       expect(result.json.reason, testCase.name).toContain(testCase.reason);
       expect(result.json.reason, testCase.name).toContain(join(worktreesRoot, "<repo-name>", "<worktree-name>"));
+    }
+  });
+
+  // Migration shim: these worktrees are non-compliant and must be re-homed, but they
+  // are live, so the guard warns instead of blocking rather than stranding in-flight
+  // work with edits it can never land. Remove once the layout is gone.
+  test("worktree-guard warns but does not block git commit in the deprecated lease layout", async () => {
+    const worktreesRoot = join(tmp, "worktrees");
+    const lease = join(worktreesRoot, "station01", "open-hooks-a55c105a", "wt_2ab04216a30ef5ece642792e");
+
+    for (const [index, cwd] of [lease, join(lease, "repo", "src")].entries()) {
+      mkdirSync(cwd, { recursive: true });
+      const result = await runHook("worktree-guard", {
+        hook_event_name: "PreToolUse",
+        session_id: `sess-legacy-shim-${index}`,
+        cwd,
+        model: "gpt-test",
+        permission_mode: "default",
+        tool_name: "Bash",
+        tool_input: { command: "git commit -m test" },
+        tool_use_id: `tool-legacy-shim-${index}`,
+        transcript_path: null,
+        turn_id: `turn-legacy-shim-${index}`,
+      }, { env: { HASNA_REPOS_WORKTREES_ROOT: worktreesRoot } });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.json.decision, cwd).toBeUndefined();
+      expect(result.json.continue, cwd).toBe(true);
+      expect(result.json.hookSpecificOutput.additionalContext, cwd).toContain("deprecated station-id lease layout");
+      expect(result.json.hookSpecificOutput.additionalContext, cwd).toContain("re-home");
     }
   });
 
