@@ -1,8 +1,17 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { join } from "path";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
-import { claimCommand, getAgentName, gitCommandInfo, gitRemoteHostSlug, managedWorktreeInfo } from "./codewith-native-common";
+import {
+  claimCommand,
+  classifyDangerousOperation,
+  emptyExpansionCollapse,
+  getAgentName,
+  gitCommandInfo,
+  gitRemoteHostSlug,
+  managedWorktreeInfo,
+  SYSTEM_PROTECTED_ROOTS,
+} from "./codewith-native-common";
 
 describe("codewith native common helpers", () => {
   test("gitCommandInfo detects global option commit/push forms and target cwd", () => {
@@ -409,5 +418,374 @@ describe("codewith native common helpers", () => {
         else process.env[key] = value;
       }
     }
+  });
+});
+
+/**
+ * Regression suite for the 2026-07-24 station02 data-destruction incident.
+ *
+ * A subagent composed `bash -c 'rm -rf "$(bun pm cache)"/* ; ... bun add -g ...'` and ssh'd
+ * it to station02. `bun pm cache` exits 1 with an empty stdout when no package.json is found
+ * walking up from cwd, so the substitution collapsed and the command ran as `rm -rf /*`. It
+ * ran unprivileged for ~5 minutes, freed ~700 GB, and destroyed the org repo checkouts;
+ * hasna/cloud's source is permanently gone.
+ *
+ * Every case below is a command STRING handed to the classifier. Nothing here executes any
+ * rm, at any scope, ever.
+ */
+describe("destructive shell guard - rm -rf /* incident regression", () => {
+  // The incident machine's HOME. Pinned as an explicit fixture so the three mandated
+  // regression commands can appear verbatim rather than reconstructed from the runner's env.
+  const INCIDENT_HOME = "/home/hasna";
+
+  let scratchCwd: string;
+  let savedHome: string | undefined;
+
+  beforeAll(() => {
+    // A cwd outside any git repo and outside every protected root, so a verdict is
+    // attributable to the command under test rather than to where the suite happens to run.
+    scratchCwd = mkdtempSync(join(tmpdir(), "hooks-destructive-"));
+    savedHome = process.env.HOME;
+  });
+
+  afterAll(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    try { rmSync(scratchCwd, { recursive: true, force: true }); } catch {}
+  });
+
+  async function classify(command: string, options: { home?: string; cwd?: string } = {}) {
+    process.env.HOME = options.home ?? INCIDENT_HOME;
+    return classifyDangerousOperation({
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      cwd: options.cwd ?? scratchCwd,
+      tool_input: { command },
+    });
+  }
+
+  async function expectBlocked(command: string, options: { home?: string; cwd?: string } = {}) {
+    const result = await classify(command, options);
+    if (!result.block) throw new Error(`expected BLOCK, got continue for: ${command}`);
+    return result;
+  }
+
+  async function expectAllowed(command: string, options: { home?: string; cwd?: string } = {}) {
+    const result = await classify(command, options);
+    if (result.block) throw new Error(`expected continue, got BLOCK (${result.reason}) for: ${command}`);
+    return result;
+  }
+
+  // ---------------------------------------------------------------------------------------
+  // The three fixtures mandated by the incident remediation, verbatim.
+  // ---------------------------------------------------------------------------------------
+
+  test("control: rm -rf /home/hasna/.hasna still blocks (guard is wired up at all)", async () => {
+    const result = await expectBlocked("rm -rf /home/hasna/.hasna");
+    expect(result.protectedLabel).toBe("Hasna state root ~/.hasna");
+    expect(result.operation).toBe("rm -rf");
+  });
+
+  test("rm -rf /* blocks (was `continue` before this change)", async () => {
+    const result = await expectBlocked("rm -rf /*");
+    expect(result.protectedLabel).toBe("filesystem root /");
+    expect(result.reason).toContain("rm -rf");
+  });
+
+  test('rm -rf "$(bun pm cache)"/* blocks (was `continue` before this change)', async () => {
+    const result = await expectBlocked('rm -rf "$(bun pm cache)"/*');
+    expect(result.targetPath).toBe("/*");
+    expect(result.reason).toContain("collapses to /*");
+    // A refusal that does not tell the agent what to do instead just gets retried.
+    expect(result.reason).toContain("Safe alternative");
+  });
+
+  test("the realized incident command blocks", async () => {
+    await expectBlocked(
+      `bash -c 'rm -rf "$(bun pm cache)"/* ; bun add -g @hasna/connectors@1.3.45'`
+    );
+  });
+
+  // ---------------------------------------------------------------------------------------
+  // Rule 1 - system and filesystem roots.
+  // ---------------------------------------------------------------------------------------
+
+  test("recursive delete of the filesystem root blocks in bare and glob form", async () => {
+    for (const command of ["rm -rf /", "rm -rf /*", "rm -rf /.*", "rm -rf /**"]) {
+      const result = await expectBlocked(command);
+      expect(result.protectedLabel).toBe("filesystem root /");
+    }
+  });
+
+  test("recursive delete of every declared system root blocks, bare and wholesale-glob", async () => {
+    for (const root of SYSTEM_PROTECTED_ROOTS) {
+      if (root === "/") continue;
+      await expectBlocked(`rm -rf ${root}`);
+      await expectBlocked(`rm -rf ${root}/*`);
+    }
+  });
+
+  test("targeted deletes under a system root stay allowed", async () => {
+    await expectAllowed("rm -rf /usr/local/lib/my-abandoned-build");
+    await expectAllowed("rm -rf /var/log/my-app/old");
+    await expectAllowed("rm -rf /opt/my-app/cache/*");
+    // /tmp is deliberately not a protected root: scratch cleanup there is routine.
+    await expectAllowed("rm -rf /tmp/scratch-1234");
+    await expectAllowed("rm -rf /tmp/*");
+  });
+
+  test("a wholesale glob blocks where a narrower glob over the same directory does not", async () => {
+    const home = mkdtempSync(join(tmpdir(), "hooks-glob-home-"));
+    try {
+      // ~/.hasna lives under `home`, so `home/*` destroys it but `home/proj*` cannot.
+      await expectBlocked(`rm -rf ${home}/*`, { home });
+      await expectAllowed(`rm -rf ${home}/proj*`, { home });
+      await expectAllowed(`rm -rf ${home}/.cache`, { home });
+    } finally {
+      try { rmSync(home, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  // ---------------------------------------------------------------------------------------
+  // Rule 2 - expansions that can collapse to empty.
+  // ---------------------------------------------------------------------------------------
+
+  test("any expansion immediately followed by / blocks, whatever the expansion is", async () => {
+    const commands = [
+      'rm -rf "$(bun pm cache)"/*',
+      "rm -rf $(bun pm cache)/*",
+      "rm -rf `bun pm cache`/*",
+      'rm -rf "$(some-command-nobody-has-written-yet --json)"/*',
+      'rm -rf "${BUN_CACHE}"/*',
+      'rm -rf "$BUN_CACHE"/*',
+      'rm -rf "$1"/*',
+      'rm -rf "$(dirname "$(which bun)")"/*',
+      'rm -rf "$CACHE"/',
+    ];
+    for (const command of commands) {
+      const result = await expectBlocked(command);
+      expect(result.reason).toContain("collapses to");
+    }
+  });
+
+  test('rm -rf "$HOME"/* blocks on the expanded path, before the collapse rule is needed', async () => {
+    // Two independent mechanisms cover this one: $HOME expands to a real home whose wholesale
+    // glob destroys ~/.hasna, and an empty $HOME would collapse the target to /*.
+    const result = await expectBlocked('rm -rf "$HOME"/*');
+    expect(result.protectedLabel).toBe("Hasna state root ~/.hasna");
+    expect(emptyExpansionCollapse("$HOME/*")).toBe("/*");
+  });
+
+  test("stderr redirection does not launder the shape - it discards the diagnostic, not the path", async () => {
+    await expectBlocked('rm -rf "$(bun pm cache 2>/dev/null)"/*');
+  });
+
+  test("an expansion collapsing onto a system root blocks even mid-path", async () => {
+    await expectBlocked('rm -rf "$SYSROOT"/usr');
+    await expectBlocked('rm -rf /opt/"$APP"/*');
+  });
+
+  test("rsync --delete and find -delete get the same collapse check as rm", async () => {
+    await expectBlocked('rsync -a --delete empty/ "$(build-dir)"/');
+    await expectBlocked('find "$(build-dir)"/ -delete');
+  });
+
+  /**
+   * Deliberate non-block. `rm -rf "$(cmd)"` with an empty expansion becomes `rm -rf ""`,
+   * which POSIX rm rejects ("cannot remove ''") with a non-zero exit and no deletion. The
+   * entire catastrophic class is the trailing separator, which turns the empty string into
+   * `/`. Blocking the bare form would break routine `rm -rf "$tmpdir"` cleanup for no gain.
+   */
+  test("the bare expansion form without a trailing separator stays allowed, by decision", async () => {
+    await expectAllowed('rm -rf "$(mktemp -d)"');
+    await expectAllowed('rm -rf "$BUILD_DIR"');
+    expect(emptyExpansionCollapse('$(mktemp -d)')).toBeNull();
+  });
+
+  test("an expansion collapsing to a non-protected absolute path stays allowed", async () => {
+    await expectAllowed('rm -rf "$BUILD_DIR"/dist');
+    await expectAllowed('rm -rf "$HOME"/.cache/my-app');
+    expect(emptyExpansionCollapse('"$BUILD_DIR"/dist'.replaceAll('"', ""))).toBe("/dist");
+  });
+
+  // ---------------------------------------------------------------------------------------
+  // Evasion: the guard must not be defeated by spelling.
+  // ---------------------------------------------------------------------------------------
+
+  test("recursive-flag spellings, privilege prefixes and chaining do not evade the guard", async () => {
+    const commands = [
+      "rm -fr /*",
+      "rm -R -f /*",
+      "rm -Rf /*",
+      "rm --recursive --force /*",
+      "rm --force --recursive /*",
+      "rm -r /*",
+      "sudo rm -rf /*",
+      "doas rm -rf /*",
+      "FOO=bar BAZ=qux rm -rf /*",
+      "/bin/rm -rf /*",
+      "/usr/bin/rm -rf /*",
+      "rm -rf -- /*",
+      "true && rm -rf /*",
+      "false; rm -rf /*",
+      "echo starting\nrm -rf /*",
+      "cd / && rm -rf *",
+      "nice -n 19 rm -rf /*",
+      "env FOO=1 rm -rf /*",
+    ];
+    for (const command of commands) await expectBlocked(command);
+  });
+
+  // ---------------------------------------------------------------------------------------
+  // Wrappers. The realized incident was inside `bash -c` inside `ssh`, so this is required.
+  // ---------------------------------------------------------------------------------------
+
+  test("interpreter wrappers are unwrapped and scanned", async () => {
+    const commands = [
+      `bash -c 'rm -rf /*'`,
+      `sh -c "rm -rf /*"`,
+      `zsh -c 'rm -rf /*'`,
+      `/bin/bash -c 'rm -rf /*'`,
+      `bash -lc 'rm -rf /*'`,
+      `bash -euxc 'rm -rf /*'`,
+      `sudo bash -c 'rm -rf /*'`,
+      `timeout 150 bash -c 'rm -rf "$(bun pm cache)"/*'`,
+      `bash -c 'cd /tmp && rm -rf /*'`,
+    ];
+    for (const command of commands) await expectBlocked(command);
+  });
+
+  test("ssh remote commands are unwrapped and scanned, including nested interpreters", async () => {
+    const commands = [
+      `ssh station02 'rm -rf /*'`,
+      `ssh -o BatchMode=yes -p 22 station02 'rm -rf /etc'`,
+      `ssh -i /home/hasna/.ssh/id_ed25519 hasna@station02 'rm -rf /usr/*'`,
+      `ssh station02 bash -c 'rm -rf /*'`,
+      `timeout 150 ssh station02 'rm -rf "$(bun pm cache)"/* ; bun add -g @hasna/connectors@1.3.45'`,
+    ];
+    for (const command of commands) {
+      const result = await expectBlocked(command);
+      expect(result.reason).toContain("on a remote host");
+    }
+  });
+
+  test("an unquoted ssh remote command still blocks, scanned as if it were local", async () => {
+    // `ssh host rm -rf /*` puts a bare `rm` token in the outer command, so the ordinary local
+    // scan catches it first. The verdict is the same; only the wording omits the remote host.
+    await expectBlocked(`ssh station02 rm -rf /*`);
+  });
+
+  test("a relative target on a remote host is not resolved against the local cwd", async () => {
+    // The remote `.` is not this machine's cwd, so guessing would be a false positive.
+    await expectAllowed(`ssh station02 'rm -rf dist'`);
+    await expectAllowed(`ssh station02 'rm -rf .'`);
+    await expectAllowed(`ssh station02 'ls -la /'`);
+  });
+
+  // ---------------------------------------------------------------------------------------
+  // False positives. A guard that blocks routine cleanup gets disabled, which is how this
+  // class of incident recurs.
+  // ---------------------------------------------------------------------------------------
+
+  test("routine cleanup stays allowed", async () => {
+    const commands = [
+      "rm -rf dist",
+      "rm -rf ./node_modules",
+      "rm -rf dist .turbo build",
+      "rm -rf ./dist/*",
+      "rm -f /home/hasna/some-file.txt",
+      "ls -la /",
+      "du -sh /*",
+      "git status",
+      "find . -name '*.log' -print",
+      "bun pm cache",
+    ];
+    for (const command of commands) await expectAllowed(command);
+  });
+
+  test("an unterminated substitution falls back to the plain tokenizer instead of swallowing the rest", async () => {
+    await expectBlocked("echo $( ; rm -rf /*");
+    await expectBlocked("echo ` ; rm -rf /*");
+  });
+
+  // ---------------------------------------------------------------------------------------
+  // Adversarial pass. Each of these got a root wipe past an earlier draft of this guard.
+  // ---------------------------------------------------------------------------------------
+
+  test("quoting tricks that still resolve to the filesystem root are blocked", async () => {
+    for (const command of [
+      `rm -rf "/"*`,
+      `rm -rf /"*"`,
+      `rm -rf ''/*`,
+      `rm -rf /./*`,
+      `rm -rf /*/`,
+      `rm -rf //*`,
+      `rm -rf /home/hasna/../..`,
+      `rm -rf ~/../*`,
+      `rm -rf "$HOME/.."/*`,
+      `rm -rf "$(bun pm cache)"/../*`,
+      `rm -rf "$(bun pm cache)"//*`,
+    ]) {
+      await expectBlocked(command);
+    }
+  });
+
+  test("cd moves the guard with it", async () => {
+    await expectBlocked("cd / ; rm -rf *");
+    await expectBlocked("cd /usr && rm -rf *");
+    await expectBlocked(`sh -c 'cd / && rm -rf *'`);
+    await expectBlocked(`ssh station02 "cd / && rm -rf *"`);
+    // The incident shape moved one command to the left: an empty substitution leaves cd at /.
+    await expectBlocked(`cd "$(bun pm cache)"/ && rm -rf ./*`);
+    await expectBlocked(`bash -c 'cd "$(bun pm cache)"/ && rm -rf ./*'`);
+  });
+
+  test("cd into a resolved directory then clearing it stays allowed", async () => {
+    // No trailing separator, so an empty substitution leaves cwd untouched rather than at /.
+    await expectAllowed(`bash -c 'cd "$(bun pm cache)" && rm -rf ./*'`);
+    await expectAllowed(`cd "$HOME/.cache/my-app" && rm -rf ./*`);
+    await expectAllowed("cd /tmp && rm -rf my-scratch-dir");
+  });
+
+  test("eval and user-switch wrappers are unwrapped", async () => {
+    await expectBlocked(`eval 'rm -rf /*'`);
+    await expectBlocked(`su -c 'rm -rf /*'`);
+    await expectBlocked(`su root -c 'rm -rf /*'`);
+    await expectBlocked(`runuser -u hasna -c 'rm -rf /*'`);
+  });
+
+  test("a for-loop over a root glob is blocked even though the delete target is just $d", async () => {
+    await expectBlocked(`for d in /*; do rm -rf "$d"; done`);
+    await expectBlocked(`for p in /usr/* /etc/*; do rm -rf "$p"; done`);
+    // The binding must actually be a root glob; ordinary loops stay allowed.
+    await expectAllowed(`for d in ./build/*; do rm -rf "$d"; done`);
+  });
+
+  test('${VAR:?} is honoured as the non-empty assertion it is', async () => {
+    // POSIX `:?` aborts on unset *or* empty, so this cannot collapse. Blocking the idiom the
+    // guard's own message recommends would teach agents to drop it.
+    await expectAllowed('rm -rf "${CACHE:?cache path required}"/*');
+    await expectAllowed('rm -rf "${BUN_CACHE:?}"/*');
+    expect(emptyExpansionCollapse("${BUN_CACHE:?}/*")).toBeNull();
+    // `${VAR?}` without the colon permits an empty value, which is the whole hazard.
+    expect(emptyExpansionCollapse("${BUN_CACHE?}/*")).toBe("/*");
+  });
+
+  test("privilege and scheduling prefixes do not hide the delete", async () => {
+    for (const command of [
+      String.raw`\rm -rf /*`,
+      `'rm' -rf /*`,
+      "command rm -rf /*",
+      "nohup rm -rf /* &",
+      "setsid rm -rf /*",
+    ]) {
+      await expectBlocked(command);
+    }
+  });
+
+  test("non-rm destructive tools targeting the root are blocked", async () => {
+    await expectBlocked("find / -delete");
+    await expectBlocked("find / -exec rm -rf {} \\;");
+    await expectBlocked("rsync -a --delete /var/empty/ /");
   });
 });

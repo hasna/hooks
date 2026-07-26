@@ -134,11 +134,18 @@ export interface GitCommandInfo {
   workTree?: string;
 }
 
-function splitShellSegments(command: string): string[] {
+// `$( ... )` and backtick substitutions are one operand of the surrounding command:
+// their inner `;`, `|` and whitespace are not separators. Tokenizing them atomically is
+// what lets the expansion-collapse rule below see `$(cmd)/*` as a single target token.
+// If a substitution is left unterminated the command is malformed, so both tokenizers
+// re-run with substitution tracking disabled rather than swallow the rest of the input.
+function splitShellSegmentsPass(command: string, atomicSubstitutions: boolean): { segments: string[]; unterminated: boolean } {
   const segments: string[] = [];
   let current = "";
   let quote: "'" | '"' | null = null;
   let escaped = false;
+  let substitutionDepth = 0;
+  let inBacktick = false;
 
   for (let i = 0; i < command.length; i += 1) {
     const ch = command[i];
@@ -150,6 +157,28 @@ function splitShellSegments(command: string): string[] {
     if (ch === "\\" && quote !== "'") {
       escaped = true;
       current += ch;
+      continue;
+    }
+    if (atomicSubstitutions && substitutionDepth > 0) {
+      current += ch;
+      if (ch === "(") substitutionDepth += 1;
+      else if (ch === ")") substitutionDepth -= 1;
+      continue;
+    }
+    if (atomicSubstitutions && inBacktick) {
+      current += ch;
+      if (ch === "`") inBacktick = false;
+      continue;
+    }
+    if (atomicSubstitutions && quote !== "'" && ch === "$" && command[i + 1] === "(") {
+      current += "$(";
+      substitutionDepth = 1;
+      i += 1;
+      continue;
+    }
+    if (atomicSubstitutions && quote !== "'" && ch === "`") {
+      current += ch;
+      inBacktick = true;
       continue;
     }
     if (quote) {
@@ -172,14 +201,22 @@ function splitShellSegments(command: string): string[] {
   }
 
   if (current.trim()) segments.push(current.trim());
-  return segments;
+  return { segments, unterminated: substitutionDepth > 0 || inBacktick };
 }
 
-function shellWords(segment: string): string[] {
+function splitShellSegments(command: string): string[] {
+  const atomic = splitShellSegmentsPass(command, true);
+  if (!atomic.unterminated) return atomic.segments;
+  return splitShellSegmentsPass(command, false).segments;
+}
+
+function shellWordsPass(segment: string, atomicSubstitutions: boolean): { words: string[]; unterminated: boolean } {
   const words: string[] = [];
   let current = "";
   let quote: "'" | '"' | null = null;
   let escaped = false;
+  let substitutionDepth = 0;
+  let inBacktick = false;
 
   const push = () => {
     if (current.length > 0) {
@@ -195,8 +232,32 @@ function shellWords(segment: string): string[] {
       escaped = false;
       continue;
     }
+    // Substitution bodies are copied verbatim, quotes and spaces included: the raw text
+    // is what emptyExpansionCollapse inspects.
+    if (atomicSubstitutions && substitutionDepth > 0) {
+      current += ch;
+      if (ch === "(") substitutionDepth += 1;
+      else if (ch === ")") substitutionDepth -= 1;
+      continue;
+    }
+    if (atomicSubstitutions && inBacktick) {
+      current += ch;
+      if (ch === "`") inBacktick = false;
+      continue;
+    }
     if (ch === "\\" && quote !== "'") {
       escaped = true;
+      continue;
+    }
+    if (atomicSubstitutions && quote !== "'" && ch === "$" && segment[i + 1] === "(") {
+      current += "$(";
+      substitutionDepth = 1;
+      i += 1;
+      continue;
+    }
+    if (atomicSubstitutions && quote !== "'" && ch === "`") {
+      current += ch;
+      inBacktick = true;
       continue;
     }
     if (quote) {
@@ -218,7 +279,13 @@ function shellWords(segment: string): string[] {
     current += ch;
   }
   push();
-  return words;
+  return { words, unterminated: substitutionDepth > 0 || inBacktick };
+}
+
+function shellWords(segment: string): string[] {
+  const atomic = shellWordsPass(segment, true);
+  if (!atomic.unterminated) return atomic.words;
+  return shellWordsPass(segment, false).words;
 }
 
 function expandHome(path: string): string {
@@ -418,6 +485,59 @@ function activeRootsFor(input: CodewithHookInput, cwd: string): string[] {
   return uniqueResolved(candidates, cwd);
 }
 
+/**
+ * Filesystem roots a recursive delete must never target wholesale: the FHS system
+ * directories plus their macOS equivalents, and `/` itself.
+ *
+ * `/` is here because of the 2026-07-24 station02 incident: `rm -rf "$(bun pm cache)"/*`
+ * ran as `rm -rf /*` after the substitution collapsed to empty, freed ~700 GB and
+ * permanently destroyed one repository's only source copy. Every entry is matched in
+ * "root" mode, so `rm -rf /usr` and `rm -rf /usr/*` block while `rm -rf /usr/local/lib/mine`
+ * stays allowed - the guard is about wholesale wipes, not targeted deletes.
+ *
+ * `/tmp` is deliberately absent: scratch cleanup there is routine and bounded.
+ * Machine-specific additions come from HASNA_PROTECTED_SYSTEM_ROOTS (colon-separated).
+ */
+export const SYSTEM_PROTECTED_ROOTS: readonly string[] = [
+  "/",
+  "/bin",
+  "/boot",
+  "/dev",
+  "/etc",
+  "/home",
+  "/lib",
+  "/lib32",
+  "/lib64",
+  "/libx32",
+  "/opt",
+  "/proc",
+  "/root",
+  "/run",
+  "/sbin",
+  "/srv",
+  "/sys",
+  "/usr",
+  "/var",
+  "/Applications",
+  "/Library",
+  "/System",
+  "/Users",
+  "/Volumes",
+  "/private",
+];
+
+function systemProtectedRulesFor(cwd: string): ProtectedPathRule[] {
+  const roots = uniqueResolved(
+    [...SYSTEM_PROTECTED_ROOTS, ...splitPathList(process.env.HASNA_PROTECTED_SYSTEM_ROOTS)],
+    cwd
+  );
+  return roots.map((root) => ({
+    root,
+    label: root === sep ? "filesystem root /" : `system root ${root}`,
+    mode: "root" as const,
+  }));
+}
+
 function hasnaDivisionRuleFor(target: string, workspaceRoot: string): ProtectedPathRule | null {
   const rel = relative(resolve(workspaceRoot), resolve(target));
   if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
@@ -435,6 +555,10 @@ function hasnaDivisionRuleFor(target: string, workspaceRoot: string): ProtectedP
 async function protectedPathContextFor(input: CodewithHookInput, cwd: string): Promise<ProtectedPathContext> {
   const home = process.env.HOME || homedir();
   const rules: ProtectedPathRule[] = [
+    // System roots first so a root wipe is reported as the root wipe it is, rather than as
+    // whichever Hasna path happened to sit underneath it. Overlapping paths are deduplicated
+    // below with the Hasna rule's more specific label winning.
+    ...systemProtectedRulesFor(cwd),
     { root: join(home, ".hasna"), label: "Hasna state root ~/.hasna", mode: "tree" },
   ];
   const workspaceRoots = workspaceRootsFor(input, cwd);
@@ -479,11 +603,70 @@ function mutatesProtectedPath(targetPath: string, rule: ProtectedPathRule): bool
   return target === root;
 }
 
-function broadContentWipeBase(targetPath: string): string | null {
+// A trailing glob that matches every entry, so `dir/*` destroys all of `dir`.
+const CATCH_ALL_GLOB = /^(?:\*|\*\*|\.\*|\.\[!\.\]\*)$/;
+
+/**
+ * Base directory of a wholesale content wipe (`dir/*`). Everything under the base is
+ * destroyed, so this base is checked with the full threatensProtectedPath test - a
+ * protected root nested *under* the base is destroyed just as surely as the base itself.
+ * That asymmetry is why `rm -rf /` blocked before this change but `rm -rf /*` did not.
+ */
+function catchAllWipeBase(targetPath: string): string | null {
+  const target = resolve(targetPath);
+  return CATCH_ALL_GLOB.test(basename(target)) ? dirname(target) : null;
+}
+
+/**
+ * Base directory of a narrower glob (`dir/build-*`). Such a glob cannot reach an
+ * arbitrary sibling, so it keeps the weaker mutatesProtectedPath test it always had.
+ */
+function narrowGlobWipeBase(targetPath: string): string | null {
   const target = resolve(targetPath);
   const last = basename(target);
   if (!/[*?\[]/.test(last)) return null;
   return dirname(target);
+}
+
+// Command substitutions, backtick substitutions and variable expansions, in the order
+// they must be tried (longest construct first).
+const SHELL_EXPANSION = /\$\((?:[^()]|\([^()]*\))*\)|`[^`]*`|\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$[0-9@*?#$!-]/g;
+
+// `${VAR:?}` / `${VAR:?message}` aborts the shell when VAR is unset *or* empty, so this
+// form cannot collapse. It is the POSIX way to assert a path is present, and blocking it
+// would punish exactly the defensive code this guard asks for. `${VAR?}` without the colon
+// is NOT exempt: it permits an empty value, which is the whole hazard.
+const GUARDED_EXPANSION = /^\$\{[A-Za-z_][A-Za-z0-9_]*:\?/;
+const NON_EMPTY_PLACEHOLDER = "__hooks_guarded_expansion__";
+
+/**
+ * The shape that destroyed station02 on 2026-07-24.
+ *
+ * `bun pm cache` writes its path to stdout on success, but exits 1 with an empty stdout
+ * when no package.json is found walking up from cwd. `rm -rf "$(bun pm cache)"/*` therefore
+ * became `rm -rf /*`. Redirecting stderr does not help: the redirect discards the
+ * diagnostic, not the path. The hazard is not this command - it is any expansion the shell
+ * may hand back empty, immediately followed by a path separator.
+ *
+ * Returns the token with every expansion replaced by the empty string, i.e. the worst case
+ * the shell can produce. Returns null when:
+ *  - the token contains no expansion; or
+ *  - the collapse is not absolute. A bare `rm -rf "$(cmd)"` collapses to `rm -rf ""`, which
+ *    POSIX rm rejects with "cannot remove ''" and a non-zero exit without deleting anything,
+ *    and blocking it would break routine `rm -rf "$tmpdir"` cleanup for no safety gain. A
+ *    relative collapse stays inside cwd and is already covered by the ordinary target check.
+ *    The whole catastrophic class is the one where the collapse leaves a leading `/`.
+ */
+export function emptyExpansionCollapse(token: string): string | null {
+  if (!/[$`]/.test(token)) return null;
+  let sawCollapsible = false;
+  const collapsed = token.replace(SHELL_EXPANSION, (match) => {
+    if (GUARDED_EXPANSION.test(match)) return NON_EMPTY_PLACEHOLDER;
+    sawCollapsible = true;
+    return "";
+  });
+  if (!sawCollapsible || !collapsed.startsWith("/")) return null;
+  return collapsed;
 }
 
 function shouldSkipHasnaTreeRule(targetPath: string, rule: ProtectedPathRule, currentManagedRepoRoot: string | null): boolean {
@@ -677,8 +860,10 @@ async function verifiedManagedRepoRoot(
 
 function threatensRule(targetPath: string, rule: ProtectedPathRule, currentManagedRepoRoot: string | null): boolean {
   if (shouldSkipHasnaTreeRule(targetPath, rule, currentManagedRepoRoot)) return false;
-  const contentBase = broadContentWipeBase(targetPath);
-  if (contentBase && mutatesProtectedPath(contentBase, rule)) return true;
+  const catchAllBase = catchAllWipeBase(targetPath);
+  if (catchAllBase && threatensProtectedPath(catchAllBase, rule)) return true;
+  const narrowBase = narrowGlobWipeBase(targetPath);
+  if (narrowBase && mutatesProtectedPath(narrowBase, rule)) return true;
   return threatensProtectedPath(targetPath, rule);
 }
 
@@ -690,6 +875,17 @@ function mutatesRule(targetPath: string, rule: ProtectedPathRule, currentManaged
 interface DestructiveShellTarget {
   path: string;
   operation: string;
+  /** Same target with every shell expansion collapsed to empty; see emptyExpansionCollapse. */
+  collapsed?: string;
+  /** Target of a command sent to another host, so relative paths cannot be resolved here. */
+  remote?: boolean;
+  /** Working directory in effect for this target, after any `cd` earlier in the command. */
+  baseCwd?: string;
+}
+
+function destructiveTarget(path: string, operation: string): DestructiveShellTarget {
+  const collapsed = emptyExpansionCollapse(path);
+  return collapsed === null ? { path, operation } : { path, operation, collapsed };
 }
 
 function rmCommandTargets(command: string): DestructiveShellTarget[] {
@@ -724,7 +920,7 @@ function rmCommandTargets(command: string): DestructiveShellTarget[] {
     }
 
     if (recursive) {
-      targets.push(...segmentTargets.map((path) => ({ path, operation: force ? "rm -rf" : "rm -r" })));
+      targets.push(...segmentTargets.map((path) => destructiveTarget(path, force ? "rm -rf" : "rm -r")));
     }
   }
   return targets;
@@ -785,7 +981,7 @@ function rsyncDeleteTargets(command: string): DestructiveShellTarget[] {
     }
 
     if (hasDelete && operands.length > 0) {
-      targets.push({ path: operands[operands.length - 1], operation: "rsync --delete" });
+      targets.push(destructiveTarget(operands[operands.length - 1], "rsync --delete"));
     }
   }
   return targets;
@@ -823,10 +1019,10 @@ function findDestructiveTargets(command: string): DestructiveShellTarget[] {
     }
 
     if (hasDelete || hasExecRm) {
-      targets.push(...(roots.length > 0 ? roots : ["."]).map((path) => ({
+      targets.push(...(roots.length > 0 ? roots : ["."]).map((path) => destructiveTarget(
         path,
-        operation: hasDelete ? "find -delete" : "find -exec rm",
-      })));
+        hasDelete ? "find -delete" : "find -exec rm"
+      )));
     }
   }
   return targets;
@@ -953,13 +1149,248 @@ function gitDestructiveTargets(command: string, baseCwd: string): DestructiveShe
   return targets;
 }
 
+const SHELL_INTERPRETERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "busybox"]);
+
+// Also take a script via `-c`, but with a username operand in front of the flag.
+const USER_SWITCH_COMMANDS = new Set(["su", "runuser"]);
+
+// ssh options that consume the following argument, so the first bare operand really is the host.
+const SSH_OPTIONS_WITH_VALUE = new Set([
+  "-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m",
+  "-O", "-o", "-P", "-p", "-Q", "-R", "-S", "-W", "-w",
+]);
+
+interface ShellCommandLayer {
+  command: string;
+  /** True once the layer is being executed on another host via ssh. */
+  remote: boolean;
+}
+
+function commandName(token: string): string {
+  return token.includes("/") ? token.slice(token.lastIndexOf("/") + 1) : token;
+}
+
+function isShellInterpreterToken(token: string): boolean {
+  return SHELL_INTERPRETERS.has(commandName(token));
+}
+
+/**
+ * Script passed via `-c`. For a shell, the first bare operand is the script *file* and the
+ * scan stops there; `su`/`runuser` take a username operand first, so one is skipped.
+ */
+function interpreterScriptFrom(tokens: string[], shellIndex: number, allowedOperands = 0): string | null {
+  let operands = 0;
+  for (let i = shellIndex + 1; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    // -c, and combined short forms such as -lc / -euxc.
+    if (/^-[A-Za-z]*c$/.test(token)) return tokens[i + 1] ?? null;
+    if (!token.startsWith("-")) {
+      operands += 1;
+      if (operands > allowedOperands) return null;
+    }
+  }
+  return null;
+}
+
+function sshRemoteCommandFrom(tokens: string[], sshIndex: number): string | null {
+  for (let i = sshIndex + 1; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token === "--") continue;
+    if (token.startsWith("-")) {
+      if (SSH_OPTIONS_WITH_VALUE.has(token)) i += 1;
+      continue;
+    }
+    // First bare operand is [user@]host; everything after it is the remote command.
+    const remote = tokens.slice(i + 1).join(" ").trim();
+    return remote.length > 0 ? remote : null;
+  }
+  return null;
+}
+
+/**
+ * Scripts this command hands to another interpreter or to another host.
+ *
+ * Required, not optional: the realized 2026-07-24 incident arrived as
+ * `ssh station02 bash -c '...'`, and the `rm` token only exists inside the quoted script.
+ * A scan of the outer command alone sees `ssh`, `bash` and a single opaque operand.
+ */
+function isSshToken(token: string): boolean {
+  return token === "ssh" || token.endsWith("/ssh");
+}
+
+function wrappedShellLayers(command: string, remote: boolean): ShellCommandLayer[] {
+  const layers: ShellCommandLayer[] = [];
+  for (const segment of splitShellSegments(command)) {
+    const tokens = shellWords(segment);
+    // `ssh host bash -c '...'`: everything after the ssh token executes on the other machine.
+    let sshSeen = false;
+    for (let i = 0; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      if (isShellInterpreterToken(token) || USER_SWITCH_COMMANDS.has(commandName(token))) {
+        const allowedOperands = USER_SWITCH_COMMANDS.has(commandName(token)) ? 1 : 0;
+        const script = interpreterScriptFrom(tokens, i, allowedOperands);
+        if (script) layers.push({ command: script, remote: remote || sshSeen });
+        continue;
+      }
+      if (token === "eval") {
+        const script = tokens.slice(i + 1).join(" ").trim();
+        if (script) layers.push({ command: script, remote: remote || sshSeen });
+        continue;
+      }
+      if (isSshToken(token)) {
+        sshSeen = true;
+        const script = sshRemoteCommandFrom(tokens, i);
+        if (script) layers.push({ command: script, remote: true });
+      }
+    }
+  }
+  return layers;
+}
+
+const MAX_WRAPPER_DEPTH = 3;
+const MAX_SHELL_LAYERS = 32;
+
+function shellCommandLayers(command: string): ShellCommandLayer[] {
+  const layers: ShellCommandLayer[] = [{ command, remote: false }];
+  const seen = new Set([command]);
+  let frontier: ShellCommandLayer[] = layers;
+
+  for (let depth = 0; depth < MAX_WRAPPER_DEPTH && layers.length < MAX_SHELL_LAYERS; depth += 1) {
+    const next: ShellCommandLayer[] = [];
+    for (const layer of frontier) {
+      for (const inner of wrappedShellLayers(layer.command, layer.remote)) {
+        if (seen.has(inner.command) || layers.length + next.length >= MAX_SHELL_LAYERS) continue;
+        seen.add(inner.command);
+        next.push(inner);
+      }
+    }
+    if (next.length === 0) break;
+    layers.push(...next);
+    frontier = next;
+  }
+
+  return layers;
+}
+
+/**
+ * Remote layers run against another machine's filesystem, so a relative or cwd-derived
+ * target here would be a guess. Absolute targets (including `~` / `$HOME` forms, which the
+ * fleet shares) and empty-collapse targets (always absolute by construction) still apply.
+ */
+function keepRemoteTarget(target: DestructiveShellTarget): boolean {
+  return target.collapsed !== undefined || isAbsolute(expandHome(target.path));
+}
+
+interface CommandChunk {
+  segment: string;
+  /** Working directories this segment may run in: the tracked cwd, plus the cwd a `cd`
+   *  whose operand collapsed to empty would have left behind. */
+  cwds: string[];
+  /** An absolute `cd` inside this layer fixed the directory, so it is known even remotely. */
+  explicitCwd: boolean;
+}
+
+const MAX_CWD_VARIANTS = 4;
+
+/**
+ * Segments of one layer paired with the working directories in effect when they run.
+ *
+ * Without this, `cd / && rm -rf *` reads as a glob over wherever the agent started, which is
+ * the cheapest possible way around a guard that only inspects the literal target. The
+ * collapsed variant covers `cd "$(cmd)"/ && rm -rf ./*`, which is the incident's shape moved
+ * one command to the left.
+ */
+function cwdTrackedSegments(command: string, baseCwd: string): CommandChunk[] {
+  const chunks: CommandChunk[] = [];
+  const home = process.env.HOME || homedir();
+  let cwds = [baseCwd];
+  let explicitCwd = false;
+
+  for (const segment of splitShellSegments(command)) {
+    const tokens = shellWords(segment);
+    if (tokens[0] === "cd") {
+      const operand = tokens[1];
+      // `cd -` returns somewhere this scan cannot know, so the previous cwd is kept.
+      if (operand === undefined) {
+        cwds = [home];
+        explicitCwd = true;
+      } else if (operand !== "-" && !operand.startsWith("-")) {
+        const collapsed = emptyExpansionCollapse(operand);
+        const next = new Set<string>();
+        for (const current of cwds) {
+          next.add(resolveFrom(current, operand));
+          if (collapsed !== null) next.add(resolveFrom(current, collapsed));
+        }
+        cwds = [...next].slice(0, MAX_CWD_VARIANTS);
+        if (isAbsolute(expandHome(operand)) || collapsed !== null) explicitCwd = true;
+      }
+      continue;
+    }
+    chunks.push({ segment, cwds, explicitCwd });
+  }
+  return chunks;
+}
+
+/**
+ * `for d in /*; do rm -rf "$d"; done` deletes the filesystem root one entry at a time while
+ * the delete's own target is an innocuous `$d`. Only exact `$VAR` / `${VAR}` targets bound by
+ * a `for ... in` in the same layer are substituted, so this cannot fire on unrelated commands.
+ */
+function forLoopBindings(command: string): Map<string, string[]> {
+  const bindings = new Map<string, string[]>();
+  for (const segment of splitShellSegments(command)) {
+    const tokens = shellWords(segment);
+    const forIndex = tokens.indexOf("for");
+    if (forIndex === -1) continue;
+    const name = tokens[forIndex + 1];
+    if (!name || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
+    if (tokens[forIndex + 2] !== "in") continue;
+    const words = tokens.slice(forIndex + 3).filter((token) => token !== "do");
+    if (words.length > 0) bindings.set(name, words);
+  }
+  return bindings;
+}
+
+function loopBoundWords(path: string, bindings: Map<string, string[]>): string[] | null {
+  const match = path.match(/^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/);
+  if (!match) return null;
+  return bindings.get(match[1]) ?? null;
+}
+
 function destructiveShellTargets(command: string, cwd: string): DestructiveShellTarget[] {
-  return [
-    ...rmCommandTargets(command),
-    ...rsyncDeleteTargets(command),
-    ...findDestructiveTargets(command),
-    ...gitDestructiveTargets(command, cwd),
-  ];
+  const targets: DestructiveShellTarget[] = [];
+  for (const layer of shellCommandLayers(command)) {
+    const bindings = forLoopBindings(layer.command);
+
+    for (const chunk of cwdTrackedSegments(layer.command, cwd)) {
+      const raw = [
+        ...rmCommandTargets(chunk.segment),
+        ...rsyncDeleteTargets(chunk.segment),
+        ...findDestructiveTargets(chunk.segment),
+        ...gitDestructiveTargets(chunk.segment, chunk.cwds[0]),
+      ];
+
+      const expanded = raw.flatMap((target) => {
+        const words = loopBoundWords(target.path, bindings);
+        return words === null ? [target] : words.map((word) => destructiveTarget(word, target.operation));
+      });
+
+      const chunkTargets = expanded.flatMap((target) =>
+        chunk.cwds.map((chunkCwd) => ({ ...target, baseCwd: chunkCwd }))
+      );
+
+      if (!layer.remote) {
+        targets.push(...chunkTargets);
+        continue;
+      }
+      targets.push(
+        ...chunkTargets
+          .filter((target) => chunk.explicitCwd || keepRemoteTarget(target))
+          .map((target) => ({ ...target, remote: true }))
+      );
+    }
+  }
+  return targets;
 }
 
 function isApplyPatchTool(toolName: string): boolean {
@@ -1006,11 +1437,33 @@ function extractFileToolPaths(input: CodewithHookInput): Array<{ path: string; o
   return paths;
 }
 
-function scopedBlockReason(operation: string, targetPath: string, rule: ProtectedPathRule): string {
+function scopedBlockReason(operation: string, targetPath: string, rule: ProtectedPathRule, remote?: boolean): string {
   return [
-    `Blocked scoped dangerous operation: ${operation} targets ${targetPath}.`,
+    `Blocked scoped dangerous operation: ${operation} targets ${targetPath}${remote ? " on a remote host" : ""}.`,
     `Protected scope: ${rule.label} (${rule.root}).`,
     "This guard is scoped; destructive commands outside protected roots are not blocked.",
+    "Delete a specific named subdirectory instead of the root or its contents.",
+  ].join(" ");
+}
+
+function collapseBlockReason(
+  operation: string,
+  rawTarget: string,
+  collapsedTarget: string,
+  rule: ProtectedPathRule,
+  remote?: boolean
+): string {
+  return [
+    `Blocked unsafe expansion in a destructive command: ${operation} target ${rawTarget}`,
+    `collapses to ${collapsedTarget}${remote ? " on a remote host" : ""} when the expansion returns empty`,
+    "(a command substitution that fails or prints nothing, or an unset variable),",
+    `which would destroy ${rule.label} (${rule.root}).`,
+    "This is the 2026-07-24 station02 failure: `bun pm cache` exits non-zero with empty stdout when no",
+    "package.json is found walking up from cwd, so `rm -rf \"$(bun pm cache)\"/*` ran as `rm -rf /*`.",
+    "Redirecting stderr does not help - it discards the diagnostic, not the path.",
+    "Safe alternative: resolve the path first, verify it is non-empty and not a protected root, then delete it,",
+    'e.g. `dir="$(bun pm cache)" || exit 1; case "$dir" in /|"") exit 1;; esac; rm -rf -- "$dir"`.',
+    "This guard blocks the shape, not the command: any expansion immediately followed by `/` can collapse to the filesystem root.",
   ].join(" ");
 }
 
@@ -1021,10 +1474,14 @@ export async function classifyDangerousOperation(input: CodewithHookInput): Prom
 
   if (input.tool_name === "Bash") {
     for (const target of destructiveShellTargets(getCommand(input), cwd)) {
-      const targetPath = resolveFrom(cwd, target.path);
-      const extraRule = workspaceRoots.map((root) => hasnaDivisionRuleFor(targetPath, root)).find((rule): rule is ProtectedPathRule => Boolean(rule));
-      const allRules = extraRule ? [...rules, extraRule] : rules;
-      for (const rule of allRules) {
+      const targetCwd = target.baseCwd ?? cwd;
+      const targetPath = resolveFrom(targetCwd, target.path);
+      const rulesFor = (path: string) => {
+        const extraRule = workspaceRoots.map((root) => hasnaDivisionRuleFor(path, root)).find((rule): rule is ProtectedPathRule => Boolean(rule));
+        return extraRule ? [...rules, extraRule] : rules;
+      };
+
+      for (const rule of rulesFor(targetPath)) {
         if (threatensRule(targetPath, rule, currentManagedRepoRoot)) {
           return {
             block: true,
@@ -1032,7 +1489,25 @@ export async function classifyDangerousOperation(input: CodewithHookInput): Prom
             protectedPath: rule.root,
             protectedLabel: rule.label,
             operation: target.operation,
-            reason: scopedBlockReason(target.operation, targetPath, rule),
+            reason: scopedBlockReason(target.operation, targetPath, rule, target.remote),
+          };
+        }
+      }
+
+      // Second pass over the same target as the shell would produce it if every expansion
+      // came back empty. The managed-worktree escape hatch is not applied here: an empty
+      // collapse leaves the worktree entirely, so it can never be the intended target.
+      if (target.collapsed === undefined) continue;
+      const collapsedPath = resolveFrom(targetCwd, target.collapsed);
+      for (const rule of rulesFor(collapsedPath)) {
+        if (threatensRule(collapsedPath, rule, null)) {
+          return {
+            block: true,
+            targetPath: collapsedPath,
+            protectedPath: rule.root,
+            protectedLabel: rule.label,
+            operation: target.operation,
+            reason: collapseBlockReason(target.operation, target.path, collapsedPath, rule, target.remote),
           };
         }
       }

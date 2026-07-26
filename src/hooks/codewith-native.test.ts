@@ -514,6 +514,62 @@ describe("Codewith-native hooks", () => {
     expect(allWorktrees.json.reason).toContain("Hasna state root ~/.hasna");
   });
 
+  /**
+   * End-to-end form of the 2026-07-24 station02 regression fixtures. The unit matrix in
+   * hooks/codewith-native-common.test.ts drives the classifier directly; this proves the
+   * installed `hooks run pre-bash` process emits decision:"block" for the same input, since
+   * that JSON is what actually stops the tool call.
+   *
+   * HOME is pinned to the incident machine's home so the three commands appear verbatim.
+   * No rm is executed - the hook only ever reads the command as a string.
+   */
+  test("pre-bash blocks the rm -rf /* incident shapes end to end", async () => {
+    const incidentEnv = { HOME: "/home/hasna", HASNA_HOOKS_CACHE_DIR: tmp };
+
+    const run = (command: string) => runHook("pre-bash", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-rmrf-incident",
+      cwd: tmp,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command },
+      tool_use_id: "tool-rmrf-incident",
+      transcript_path: null,
+      turn_id: "turn-rmrf-incident",
+    }, { env: incidentEnv });
+
+    // Control: the classifier is wired up at all. This blocked before the change and must stay blocking.
+    const control = await run("rm -rf /home/hasna/.hasna");
+    expect(control.exitCode).toBe(0);
+    expect(control.json.decision).toBe("block");
+    expect(control.json.reason).toContain("Hasna state root ~/.hasna");
+
+    // Was {"continue":true} before the change.
+    const rootGlob = await run("rm -rf /*");
+    expect(rootGlob.exitCode).toBe(0);
+    expect(rootGlob.json.decision).toBe("block");
+    expect(rootGlob.json.reason).toContain("filesystem root /");
+
+    // Was {"continue":true} before the change.
+    const substitution = await run('rm -rf "$(bun pm cache)"/*');
+    expect(substitution.exitCode).toBe(0);
+    expect(substitution.json.decision).toBe("block");
+    expect(substitution.json.reason).toContain("collapses to /*");
+    expect(substitution.json.reason).toContain("Safe alternative");
+
+    // The command as it was actually sent to station02.
+    const realized = await run(`bash -c 'rm -rf "$(bun pm cache)"/* ; bun add -g @hasna/connectors@1.3.45'`);
+    expect(realized.exitCode).toBe(0);
+    expect(realized.json.decision).toBe("block");
+
+    // Routine cleanup must still pass, or the guard gets turned off and the class recurs.
+    const allowed = await run("rm -rf dist .turbo");
+    expect(allowed.exitCode).toBe(0);
+    expect(allowed.json.continue).toBe(true);
+    expect(allowed.json.decision).toBeUndefined();
+  });
+
   test("pre-bash blocks protected-root content globs but allows nested cleanup globs", async () => {
     const repo = join(tmp, "repo");
     mkdirSync(join(repo, "dist"), { recursive: true });

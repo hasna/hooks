@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`pre-bash` / `worktree-guard` destructive-shell guard no longer lets a filesystem-root wipe through.** `rm -rf /*` and `rm -rf "$(cmd)"/*` both returned `{"continue":true}` before this change; only `rm -rf /` blocked, and only incidentally, because `~/.hasna` sits under it. Two complementary rules close the class:
+  - **System roots are protected.** `/` and the FHS/macOS system directories (`/usr`, `/etc`, `/bin`, `/lib`, `/var`, `/boot`, `/home`, `/Users`, …) are now protected roots in `root` mode, so wiping a root or its contents blocks while a targeted delete beneath one (`rm -rf /usr/local/lib/my-build`) still passes. Extend per machine with `HASNA_PROTECTED_SYSTEM_ROOTS`. `/tmp` is deliberately excluded.
+  - **Expansions that can collapse to empty are blocked by shape.** Every destructive target containing a command substitution, backtick substitution or variable expansion is re-checked as the shell would render it if the expansion came back empty. `rm -rf "$(anything)"/*`, `` rm -rf `cmd`/* ``, `rm -rf "$VAR"/*` and `rm -rf "${VAR}"/*` all block regardless of what the expansion is. `${VAR:?}` is exempt — POSIX guarantees it non-empty. The bare `rm -rf "$(cmd)"` form (no trailing separator) stays allowed: it degrades to `rm -rf ""`, which rm rejects without deleting anything.
+  - A wholesale content glob (`dir/*`) is now matched against protected roots nested *under* `dir`, not just against `dir` itself. This is the asymmetry that let `rm -rf /*` through while `rm -rf /` blocked. Narrower globs (`dir/build-*`) keep their previous, weaker check.
+  - Wrapped and relocated commands are unwrapped before scanning: `bash -c`/`sh -c`/`zsh -c`, `su -c`, `runuser -c`, `eval`, and `ssh host '…'` including nested combinations. Remote layers only consider absolute targets, since a remote relative path cannot be resolved locally.
+  - `cd` is tracked within a command, so `cd / && rm -rf *` and `cd "$(cmd)"/ && rm -rf ./*` block.
+  - A `for VAR in <root-glob>` binding is followed into `rm -rf "$VAR"`.
+  - Block messages now name a safe alternative instead of only refusing.
+
+  Remediates the 2026-07-24 data-destruction incident in which `rm -rf "$(bun pm cache)"/*`, sent over ssh inside `bash -c`, ran as `rm -rf /*` (`bun pm cache` exits non-zero with empty stdout when no `package.json` is found walking up from cwd), freeing ~700 GB and permanently destroying one repository's only source copy.
+
 ## [0.4.1] - 2026-07-26
 
 ### Fixed
