@@ -710,9 +710,21 @@ function expandLeftmostBrace(token: string): string[] | null {
  * expansion is combinatorial: `/{a,b}` repeated 26 times is 2^26 paths. A recursive version
  * that capped only the finished list took 19.75s on that input, past this hook's 20s timeout
  * - and a hook that times out fails open, so a long enough brace string would have switched
- * the guard off and then run the delete. Abandoning returns the unexpanded token, which is
- * still checked by every other rule.
+ * the guard off and then run the delete.
+ *
+ * Abandoning does NOT return the raw token. Doing that was itself a bypass:
+ * `rm -rf /{a0,…,a69,etc}` exceeded the cap and the unexpanded token resolved to a literal
+ * path matching no protected root. Instead the brace-free prefix is returned as a catch-all
+ * wipe, which is what an unbounded alternation under that prefix actually is - every
+ * expansion is necessarily a child of it.
  */
+function braceAbandonFallback(token: string): string[] {
+  const open = token.indexOf("{");
+  const prefix = open === -1 ? token : token.slice(0, open);
+  const base = prefix.endsWith(sep) || prefix === "" ? prefix : `${prefix}${sep}`;
+  return [`${base}*`];
+}
+
 function expandBraces(token: string): string[] {
   if (!token.includes("{")) return [token];
 
@@ -728,14 +740,14 @@ function expandBraces(token: string): string[] {
       }
       expandedAny = true;
       for (const part of parts) {
-        if (next.length >= MAX_BRACE_EXPANSIONS) return [token];
+        if (next.length >= MAX_BRACE_EXPANSIONS) return braceAbandonFallback(token);
         next.push(part);
       }
     }
     if (!expandedAny) return next;
     frontier = next;
   }
-  return [token];
+  return braceAbandonFallback(token);
 }
 
 // `${VAR:?}` / `${VAR:?message}` aborts the shell when VAR is unset *or* empty, so this

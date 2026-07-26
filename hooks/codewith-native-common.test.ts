@@ -852,6 +852,17 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     await expectAllowed("rm -rf ./{dist,build}");
   });
 
+  test("exceeding the brace cap falls back conservatively rather than becoming a bypass", async () => {
+    // Abandoning expansion by returning the raw token was itself a hole: the unexpanded
+    // token resolved to a literal path matching no protected root.
+    const many = Array.from({ length: 70 }, (_, i) => `a${i}`).join(",");
+    await expectBlocked(`rm -rf /{${many},etc}`);
+    await expectBlocked(`rm -rf ~/{${many}}`);
+    // Ordinary alternations under the cap keep expanding normally.
+    await expectAllowed("rm -rf ./{dist,build}");
+    await expectAllowed("rm -rf /tmp/{a,b,c}");
+  });
+
   test("combinatorial brace input cannot stall the hook into failing open", async () => {
     // Brace expansion is combinatorial: 26 groups is 2^26 paths. A version that capped only
     // the finished list took 19.75s, past this hook's 20s timeout - and a timed-out hook
