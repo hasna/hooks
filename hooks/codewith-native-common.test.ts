@@ -863,6 +863,32 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     await expectAllowed("rm -rf /tmp/{a,b,c}");
   });
 
+  test("a command too nested to analyse is refused, not waved through", async () => {
+    // Padding with dummy wrappers pushed the real delete past MAX_SHELL_LAYERS and it
+    // returned continue. Every cap in this file must fail closed: "too complex to analyse"
+    // must never mean "allowed".
+    const pad = (n: number) => Array.from({ length: n }, (_, i) => `sh -c 'a${i}'`).join(" ; ");
+    await expectBlocked(`${pad(32)} ; sh -c 'rm -rf /*'`);
+    await expectBlocked(`${pad(40)} ; sh -c 'rm -rf /*'`);
+    // Deep wrapper nesting, built programmatically so the escaping is not hand-maintained.
+    const nest = (inner: string, depth: number) => {
+      let out = inner;
+      for (let i = 0; i < depth; i += 1) out = `sh -c ${JSON.stringify(out)}`;
+      return out;
+    };
+    for (const depth of [2, 3, 4, 5]) await expectBlocked(nest("rm -rf /*", depth));
+    // Refusal is scoped to commands that actually contain a destructive verb.
+    await expectAllowed(pad(40));
+    await expectAllowed(nest("rm -rf dist", 2));
+  });
+
+  test("a quoted paren inside a substitution does not disable the collapse rule", async () => {
+    // The unterminated-substitution fallback turned an ordinary awk field separator into a
+    // bypass, because the quoted "(" was counted as structure.
+    await expectBlocked(`rm -rf "$(awk -F'(' '{print $2}' conf.txt)"/*`);
+    await expectBlocked(`rm -rf "$(echo ")")"/*`);
+  });
+
   test("combinatorial brace input cannot stall the hook into failing open", async () => {
     // Brace expansion is combinatorial: 26 groups is 2^26 paths. A version that capped only
     // the finished list took 19.75s, past this hook's 20s timeout - and a timed-out hook

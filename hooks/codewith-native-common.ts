@@ -149,6 +149,7 @@ function splitShellSegmentsPass(
   let quote: "'" | '"' | null = null;
   let escaped = false;
   let substitutionDepth = 0;
+  let substitutionQuote: "'" | '"' | null = null;
   let inBacktick = false;
   let parenDepth = 0;
   let pipedFromPrevious = false;
@@ -177,7 +178,12 @@ function splitShellSegmentsPass(
     }
     if (atomicSubstitutions && substitutionDepth > 0) {
       current += ch;
-      if (ch === "(") substitutionDepth += 1;
+      // Quotes inside the body are tracked so a quoted paren is not read as structure.
+      if (substitutionQuote) {
+        if (ch === substitutionQuote) substitutionQuote = null;
+      } else if (ch === "'" || ch === '"') {
+        substitutionQuote = ch;
+      } else if (ch === "(") substitutionDepth += 1;
       else if (ch === ")") substitutionDepth -= 1;
       continue;
     }
@@ -253,6 +259,7 @@ function shellWordsPass(segment: string, atomicSubstitutions: boolean): { words:
   let quote: "'" | '"' | null = null;
   let escaped = false;
   let substitutionDepth = 0;
+  let substitutionQuote: "'" | '"' | null = null;
   let inBacktick = false;
 
   const push = () => {
@@ -273,7 +280,11 @@ function shellWordsPass(segment: string, atomicSubstitutions: boolean): { words:
     // is what emptyExpansionCollapse inspects.
     if (atomicSubstitutions && substitutionDepth > 0) {
       current += ch;
-      if (ch === "(") substitutionDepth += 1;
+      if (substitutionQuote) {
+        if (ch === substitutionQuote) substitutionQuote = null;
+      } else if (ch === "'" || ch === '"') {
+        substitutionQuote = ch;
+      } else if (ch === "(") substitutionDepth += 1;
       else if (ch === ")") substitutionDepth -= 1;
       continue;
     }
@@ -791,11 +802,19 @@ function findExpansions(token: string): FoundExpansion[] {
       const open = next;
       const close = open === "(" ? ")" : "}";
       let depth = 0;
+      let quote: "'" | '"' | null = null;
       let j = i + 1;
       for (; j < token.length; j += 1) {
-        if (token[j] === "\\") { j += 1; continue; }
-        if (token[j] === open) depth += 1;
-        else if (token[j] === close) {
+        const ch = token[j];
+        if (ch === "\\") { j += 1; continue; }
+        // A paren inside quotes is data, not structure: `awk -F'(' '{print $2}'`.
+        if (quote) {
+          if (ch === quote) quote = null;
+          continue;
+        }
+        if (ch === "'" || ch === '"') { quote = ch; continue; }
+        if (ch === open) depth += 1;
+        else if (ch === close) {
           depth -= 1;
           if (depth === 0) break;
         }
@@ -1535,16 +1554,21 @@ function wrappedShellLayers(command: string, remote: boolean): ShellCommandLayer
 const MAX_WRAPPER_DEPTH = 3;
 const MAX_SHELL_LAYERS = 32;
 
-function shellCommandLayers(command: string): ShellCommandLayer[] {
+function shellCommandLayers(command: string): { layers: ShellCommandLayer[]; truncated: boolean } {
   const layers: ShellCommandLayer[] = [{ command, remote: false }];
   const seen = new Set([command]);
   let frontier: ShellCommandLayer[] = layers;
+  let truncated = false;
 
-  for (let depth = 0; depth < MAX_WRAPPER_DEPTH && layers.length < MAX_SHELL_LAYERS; depth += 1) {
+  for (let depth = 0; depth < MAX_WRAPPER_DEPTH; depth += 1) {
     const next: ShellCommandLayer[] = [];
     for (const layer of frontier) {
       for (const inner of wrappedShellLayers(layer.command, layer.remote)) {
-        if (seen.has(inner.command) || layers.length + next.length >= MAX_SHELL_LAYERS) continue;
+        if (seen.has(inner.command)) continue;
+        if (layers.length + next.length >= MAX_SHELL_LAYERS) {
+          truncated = true;
+          continue;
+        }
         seen.add(inner.command);
         next.push(inner);
       }
@@ -1552,9 +1576,37 @@ function shellCommandLayers(command: string): ShellCommandLayer[] {
     if (next.length === 0) break;
     layers.push(...next);
     frontier = next;
+    // More wrappers remain below the depth limit.
+    if (depth === MAX_WRAPPER_DEPTH - 1 && next.some((layer) => wrappedShellLayers(layer.command, layer.remote).length > 0)) {
+      truncated = true;
+    }
   }
 
-  return layers;
+  return { layers, truncated };
+}
+
+// Verbs whose presence makes an unanalysable command unsafe to wave through.
+const DESTRUCTIVE_VERB = /(?:^|[^\w.-])(?:[\w/.-]*\/)?(?:rm\s+(?:-\S*[rR]|--recursive|--dir)|rsync\s[^;&|]*--delete|find\s[^;&|]*(?:-delete|-execdir?\s)|git\s[^;&|]*(?:clean\s+-\S*[fd]|reset\s+--hard))/;
+
+/**
+ * A command too deeply wrapped or too wide to analyse within the caps is refused when it
+ * contains a destructive verb, instead of being allowed by default.
+ *
+ * The caps exist so a pathological command cannot stall the hook past its 20s timeout - and
+ * a timed-out hook fails open. But dropping work silently turns "too complex to analyse"
+ * into "allowed", which is the same passes-silently-while-protecting-nothing failure this
+ * guard exists to prevent. Padding with 32 dummy `sh -c` wrappers pushed the real delete
+ * past the cap and it returned continue.
+ */
+function truncatedAnalysisBlockReason(command: string): string | null {
+  if (!DESTRUCTIVE_VERB.test(command)) return null;
+  return [
+    "Blocked: this command nests more shell wrappers than the safety guard can analyse,",
+    "and it contains a recursive delete. The guard refuses rather than guess, because an",
+    "unanalysable delete is exactly the shape that destroyed a machine on 2026-07-24.",
+    "Run the delete directly instead of through nested bash -c / ssh / eval wrappers,",
+    "with a literal, non-empty target path.",
+  ].join(" ");
 }
 
 /**
@@ -1656,7 +1708,7 @@ function loopBoundWords(path: string, bindings: Map<string, string[]>): string[]
 
 function destructiveShellTargets(command: string, cwd: string): DestructiveShellTarget[] {
   const targets: DestructiveShellTarget[] = [];
-  for (const layer of shellCommandLayers(command)) {
+  for (const layer of shellCommandLayers(command).layers) {
     const bindings = forLoopBindings(layer.command);
     const nonEmptyNames = nonEmptyAssignedNames(layer.command);
 
@@ -1774,7 +1826,15 @@ export async function classifyDangerousOperation(input: CodewithHookInput): Prom
   const { rules, workspaceRoots, currentManagedRepoRoot } = await protectedPathContextFor(input, cwd);
 
   if (input.tool_name === "Bash") {
-    for (const target of destructiveShellTargets(getCommand(input), cwd)) {
+    const command = getCommand(input);
+    if (shellCommandLayers(command).truncated) {
+      const reason = truncatedAnalysisBlockReason(command);
+      if (reason) {
+        return { block: true, operation: "unanalysable nested command", reason };
+      }
+    }
+
+    for (const target of destructiveShellTargets(command, cwd)) {
       const targetCwd = target.baseCwd ?? cwd;
       const targetPath = resolveFrom(targetCwd, target.path);
       const rulesFor = (path: string) => {
