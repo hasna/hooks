@@ -852,6 +852,16 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     await expectAllowed("rm -rf ./{dist,build}");
   });
 
+  test("combinatorial brace input cannot stall the hook into failing open", async () => {
+    // Brace expansion is combinatorial: 26 groups is 2^26 paths. A version that capped only
+    // the finished list took 19.75s, past this hook's 20s timeout - and a timed-out hook
+    // fails open, so a long enough brace string would switch the guard off and then delete.
+    const command = `rm -rf ${Array.from({ length: 26 }, (_, i) => `/{a${i},b${i}}`).join("")}`;
+    const started = performance.now();
+    await classify(command);
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
   test("cd in a subshell or pipeline does not move the guard, and cd - comes back", async () => {
     // Regression guard: tracking `cd` naively made these WEAKER than before the change,
     // because the tracker followed a `cd` that the real shell confines to a child process.

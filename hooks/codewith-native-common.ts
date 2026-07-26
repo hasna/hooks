@@ -667,15 +667,12 @@ function globWipeInfo(targetPath: string): { base: string; catchAll: boolean } |
 }
 
 const MAX_BRACE_EXPANSIONS = 64;
+const MAX_BRACE_ROUNDS = 16;
 
-/**
- * Expand `{a,b}` alternations, so `rm -rf /{bin,etc,home}` is seen as the three root deletes
- * it performs rather than as one literal path. Bounded, and returns the original token
- * unchanged when there is no brace or the expansion would exceed the cap.
- */
-function expandBraces(token: string): string[] {
+/** Expand only the leftmost brace group of a token; null when there is none to expand. */
+function expandLeftmostBrace(token: string): string[] | null {
   const open = token.indexOf("{");
-  if (open === -1) return [token];
+  if (open === -1) return null;
 
   let depth = 0;
   let close = -1;
@@ -697,13 +694,48 @@ function expandBraces(token: string): string[] {
     }
     current += ch;
   }
-  if (close === -1 || parts.length === 0) return [token];
+  if (close === -1 || parts.length === 0) return null;
   parts.push(current);
 
   const prefix = token.slice(0, open);
   const suffix = token.slice(close + 1);
-  const expanded = parts.flatMap((part) => expandBraces(`${prefix}${part}${suffix}`));
-  return expanded.length > MAX_BRACE_EXPANSIONS ? [token] : expanded;
+  return parts.map((part) => `${prefix}${part}${suffix}`);
+}
+
+/**
+ * Expand `{a,b}` alternations, so `rm -rf /{bin,etc,home}` is seen as the three root deletes
+ * it performs rather than as one literal path.
+ *
+ * Expansion is breadth-first and abandoned the moment it exceeds the cap, because brace
+ * expansion is combinatorial: `/{a,b}` repeated 26 times is 2^26 paths. A recursive version
+ * that capped only the finished list took 19.75s on that input, past this hook's 20s timeout
+ * - and a hook that times out fails open, so a long enough brace string would have switched
+ * the guard off and then run the delete. Abandoning returns the unexpanded token, which is
+ * still checked by every other rule.
+ */
+function expandBraces(token: string): string[] {
+  if (!token.includes("{")) return [token];
+
+  let frontier = [token];
+  for (let round = 0; round < MAX_BRACE_ROUNDS; round += 1) {
+    const next: string[] = [];
+    let expandedAny = false;
+    for (const item of frontier) {
+      const parts = expandLeftmostBrace(item);
+      if (parts === null) {
+        next.push(item);
+        continue;
+      }
+      expandedAny = true;
+      for (const part of parts) {
+        if (next.length >= MAX_BRACE_EXPANSIONS) return [token];
+        next.push(part);
+      }
+    }
+    if (!expandedAny) return next;
+    frontier = next;
+  }
+  return [token];
 }
 
 // `${VAR:?}` / `${VAR:?message}` aborts the shell when VAR is unset *or* empty, so this
