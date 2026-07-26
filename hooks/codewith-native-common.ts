@@ -516,12 +516,41 @@ function hasUnsafeTargetComponent(worktreesRoot: string, target: string): boolea
   return false;
 }
 
-function managedLeaseRoot(worktreesRoot: string, target: string): string | null {
-  const relativeTarget = relative(worktreesRoot, target);
-  const parts = relativeTarget.split(sep).filter(Boolean);
-  if (parts.length < 3) return null;
-  const leaseRoot = resolve(worktreesRoot, ...parts.slice(0, 3));
-  return managedWorktreeInfo(leaseRoot).managed ? leaseRoot : null;
+/**
+ * Candidate worktree roots for an absolute target, canonical shape first.
+ *
+ * The canonical root sits at `<worktrees-root>/<repo-name>/<worktree-name>`
+ * (CANONICAL_WORKTREE_SEGMENTS). The deprecated station-id lease layout sits one
+ * level deeper. Order matters: a canonical worktree that happens to contain a
+ * subdirectory must resolve to the canonical root, never to the subdirectory.
+ */
+function managedWorktreeRootCandidates(worktreesRoot: string, target: string): string[] {
+  const parts = relative(worktreesRoot, target).split(sep).filter(Boolean);
+  const depths = [CANONICAL_WORKTREE_SEGMENTS, LEGACY_LEASE_WORKTREE_SEGMENTS];
+  return depths
+    .filter((depth) => parts.length >= depth)
+    .map((depth) => resolve(worktreesRoot, ...parts.slice(0, depth)));
+}
+
+/**
+ * Worktree roots that could own `target`, for the scoped dangerous-operation
+ * carve-out only.
+ *
+ * This is a structural lookup ("could a real managed worktree own this path?"),
+ * not a policy check ("is this path canonical?"). It therefore keeps the
+ * deprecated station-id lease layout as a candidate, so that worktrees created
+ * before rule 8 keep their `~/.hasna` write carve-out during migration. Policy
+ * enforcement lives in managedWorktreeInfo() / worktree-guard.
+ *
+ * Both depths are returned when both are plausible, because path shape alone
+ * cannot tell a canonical root from a legacy lease container. Each candidate is
+ * still verified against Git provenance by the caller, which fails closed.
+ */
+function managedLeaseRootCandidates(worktreesRoot: string, target: string): string[] {
+  return managedWorktreeRootCandidates(worktreesRoot, target).filter((candidate) => {
+    const info = managedWorktreeInfo(candidate);
+    return info.managed || info.layout === "legacy-station-lease";
+  });
 }
 
 async function verifiedLinkedWorktreeRoot(leaseRoot: string): Promise<string | null> {
@@ -587,8 +616,19 @@ async function managedRepoRootForAbsoluteTarget(
     return null;
   }
 
-  const leaseRoot = managedLeaseRoot(worktreesRoot, target);
-  if (!leaseRoot) return null;
+  for (const leaseRoot of managedLeaseRootCandidates(worktreesRoot, target)) {
+    const repoRoot = await verifiedManagedRepoRoot(leaseRoot, target, physicalWorktreesRoot, repoRootCache);
+    if (repoRoot) return repoRoot;
+  }
+  return null;
+}
+
+async function verifiedManagedRepoRoot(
+  leaseRoot: string,
+  target: string,
+  physicalWorktreesRoot: string,
+  repoRootCache: Map<string, Promise<string | null>>,
+): Promise<string | null> {
   let repoRootPromise = repoRootCache.get(leaseRoot);
   if (!repoRootPromise) {
     repoRootPromise = verifiedLinkedWorktreeRoot(leaseRoot);
@@ -1086,22 +1126,137 @@ export function isInsidePath(child: string, parent: string): boolean {
   return rel === "" || (!!rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
-export function managedWorktreeInfo(cwd: string): { managed: boolean; root: string; reason?: string } {
+/**
+ * Canonical managed-worktree path shape.
+ *
+ * Source of truth: Hasna Agent Operating Rules rule 8, published by
+ * @hasna/identities (>= 0.4.4) global agent rules, verbatim:
+ *
+ *   "must happen in a task-specific worktree at
+ *    $HOME/.hasna/repos/worktrees/<repo-name>/<worktree-name>
+ *    (repo name then worktree name; no station-id or machine segment,
+ *    never flat under the worktrees root)"
+ *
+ * So, relative to the worktrees root, a compliant worktree root is exactly two
+ * segments deep: <repo-name>/<worktree-name>.
+ */
+export const CANONICAL_WORKTREE_SEGMENTS = 2;
+
+/**
+ * Depth of the DEPRECATED station-id lease layout
+ * (`<station-id>/<repo-slug>-<hex>/wt_<hex>`) that predates rule 8.
+ *
+ * Read-only migration tolerance: it is never a compliant target shape, and it is
+ * never reported as `managed`. It is recognised only so that (a) guard messages
+ * can name it precisely and (b) the scoped dangerous-operation carve-out keeps
+ * working for worktrees created before the canonical shape was mandated.
+ */
+export const LEGACY_LEASE_WORKTREE_SEGMENTS = 3;
+
+// Ordinary directory names, including a leading underscore (real repos use `_base`
+// style worktree names). A leading `.` is refused so `.`, `..` and `.git` can never
+// be read as a repo or worktree segment; a leading `-` is refused so a segment can
+// never be interpolated into a command as an option.
+const WORKTREE_SEGMENT_PATTERN = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,80}$/;
+const LEGACY_LEASE_REPO_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*-[0-9a-fA-F]{7,16}$/;
+const LEGACY_LEASE_ID_PATTERN = /^wt_[0-9a-fA-F]{16,64}$/;
+
+export type ManagedWorktreeLayout = "canonical" | "legacy-station-lease";
+
+export interface ManagedWorktreeInfo {
+  managed: boolean;
+  /** The worktrees root the path was classified against. */
+  root: string;
+  /** Recognised layout, set for compliant and for deprecated-but-recognised paths. */
+  layout?: ManagedWorktreeLayout;
+  /** True when the layout is recognised but no longer permitted by rule 8. */
+  deprecated?: boolean;
+  repo?: string;
+  worktree?: string;
+  /** Absolute path of the worktree root that owns `cwd`. */
+  worktreeRoot?: string;
+  reason?: string;
+}
+
+/** The canonical worktree path template, for user-facing guard messages. */
+export function canonicalWorktreeTemplate(root: string = defaultWorktreesRoot()): string {
+  return join(root, "<repo-name>", "<worktree-name>");
+}
+
+/** True when `path` is the root of a git worktree or repository (has a `.git` entry). */
+function looksLikeGitWorktreeRoot(path: string): boolean {
+  try {
+    return existsSync(join(path, ".git"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Classify a path against the canonical managed-worktree shape (rule 8).
+ *
+ * Accepted: `<worktrees-root>/<repo-name>/<worktree-name>` and any path inside it.
+ * Rejected, each with a reason: paths outside the worktrees root, the root itself,
+ * flat single-segment worktrees, station-id/machine segments, and deeper nesting.
+ */
+export function managedWorktreeInfo(cwd: string): ManagedWorktreeInfo {
   const root = defaultWorktreesRoot();
+  const canonical = canonicalWorktreeTemplate(root);
   if (!isInsidePath(cwd, root)) return { managed: false, root, reason: "outside worktrees root" };
-  const rel = relative(resolve(root), resolve(cwd));
-  const parts = rel.split(sep).filter(Boolean);
-  if (parts.length < 3) return { managed: false, root, reason: "path is inside worktrees root but not deep enough" };
-  const [machine, repoSlugHash, lease] = parts;
-  if (!machine || !repoSlugHash || !lease) return { managed: false, root, reason: "missing machine/repo/lease path segments" };
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{1,80}$/.test(machine)) return { managed: false, root, reason: "machine segment is malformed" };
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*-[0-9a-fA-F]{7,16}$/.test(repoSlugHash)) {
-    return { managed: false, root, reason: "repo segment must end in a hex hash suffix" };
+
+  const parts = relative(resolve(root), resolve(cwd)).split(sep).filter(Boolean);
+  if (parts.length === 0) {
+    return { managed: false, root, reason: `path is the worktrees root itself; canonical worktrees live at ${canonical}` };
   }
-  if (!/^wt_[0-9a-fA-F]{16,64}$/.test(lease)) {
-    return { managed: false, root, reason: "lease segment must look like wt_<hex hash>" };
+  if (parts.length < CANONICAL_WORKTREE_SEGMENTS) {
+    return {
+      managed: false,
+      root,
+      reason: `worktree is flat under the worktrees root, which rule 8 forbids; canonical shape is ${canonical}`,
+    };
   }
-  return { managed: true, root };
+
+  const [repo, worktree] = parts;
+  for (const [label, segment] of [["repo-name", repo], ["worktree-name", worktree]] as const) {
+    if (!segment || !WORKTREE_SEGMENT_PATTERN.test(segment)) {
+      return { managed: false, root, reason: `${label} segment is malformed; canonical shape is ${canonical}` };
+    }
+  }
+
+  const worktreeRoot = resolve(root, repo!, worktree!);
+  const canonicalMatch: ManagedWorktreeInfo = {
+    managed: true,
+    root,
+    layout: "canonical",
+    repo,
+    worktree,
+    worktreeRoot,
+  };
+  if (parts.length === CANONICAL_WORKTREE_SEGMENTS) return canonicalMatch;
+
+  // Deeper than the canonical shape: either the cwd is a subdirectory of a
+  // canonical worktree (allowed), or the worktree root itself is over-nested
+  // (a station-id/machine segment or extra nesting — both forbidden by rule 8).
+  if (looksLikeGitWorktreeRoot(worktreeRoot)) return canonicalMatch;
+
+  if (parts.length === LEGACY_LEASE_WORKTREE_SEGMENTS
+    && LEGACY_LEASE_REPO_PATTERN.test(parts[1]!)
+    && LEGACY_LEASE_ID_PATTERN.test(parts[2]!)) {
+    return {
+      managed: false,
+      root,
+      layout: "legacy-station-lease",
+      deprecated: true,
+      worktreeRoot: resolve(root, ...parts.slice(0, LEGACY_LEASE_WORKTREE_SEGMENTS)),
+      reason: `deprecated station-id lease layout <station-id>/<repo-slug>-<hex>/wt_<hex>; rule 8 forbids a station-id or machine segment — re-home to ${canonical}`,
+    };
+  }
+
+  return {
+    managed: false,
+    root,
+    reason: `worktree root is ${parts.length} segments under the worktrees root (station-id/machine segment or extra nesting), which rule 8 forbids; canonical shape is ${canonical}`,
+  };
 }
 
 export async function gitRepoRoot(cwd: string): Promise<string | null> {
@@ -1121,8 +1276,20 @@ export async function gitRemoteSlug(cwd: string): Promise<string | null> {
   return match?.[1] || null;
 }
 
-export function claimCommand(repo: string | null, taskId: string | null, runId: string | null): string {
-  return `repos worktrees claim --repo ${repo || "<repo>"} --task-id ${taskId || "<task-id>"} --run-id ${runId || "<run-id>"} --base main --mode required --json`;
+/**
+ * Remediation command for work happening outside a canonical worktree.
+ *
+ * Rule 8: create the worktree at `<worktrees-root>/<repo-name>/<worktree-name>`,
+ * named after the todos task where one exists, then `repos scan`. The repos CLI
+ * has no worktree verb, so `git worktree` is the creation path.
+ */
+export function claimCommand(repo: string | null, taskId: string | null): string {
+  // `repo` may arrive as an `owner/name` remote slug; the canonical shape uses the
+  // bare repo name, so a slug must never leak an extra path segment into the template.
+  const repoName = repo?.split("/").filter(Boolean).pop() || "<repo-name>";
+  const worktreeName = taskId || "<worktree-name>";
+  const path = join(defaultWorktreesRoot(), repoName, worktreeName);
+  return `git worktree add -b ${worktreeName} ${path} origin/<base> && repos scan`;
 }
 
 export function taskIdFrom(input: CodewithHookInput): string | null {

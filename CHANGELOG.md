@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-07-26
+
+### Fixed
+
+- `worktree-guard` / `managedWorktreeInfo()` now classify worktrees against the canonical path shape from Hasna Agent Operating Rules rule 8 (`@hasna/identities` >= 0.4.4): `$HOME/.hasna/repos/worktrees/<repo-name>/<worktree-name>`. The guard previously required a 3-segment `<station-id>/<repo-slug>-<hex>/wt_<hex>` lease layout, so every rule-8-compliant worktree was classified UNMANAGED — blocking `git commit`/`git push` from it, and denying it the scoped `~/.hasna` write carve-out so that `Write`/`Edit`/`apply_patch` into a canonical worktree was blocked as a dangerous operation.
+- Non-canonical shapes are now rejected with a specific reason instead of a generic "not deep enough": flat single-segment worktrees under the worktrees root, station-id/machine segments in front of the repo name, and deeper nesting. Subdirectories of a canonical worktree are correctly accepted.
+- Guard messages cite the canonical path template and the rule-8 remediation (`git worktree add` at the canonical path, then `repos scan`) instead of the stale `repos worktrees claim` command; the repos CLI has no worktree verb.
+- Worktree/repo path segments may start with an underscore (e.g. `connectors/_base`), while a leading `.` or `-` is still refused.
+
+### Deprecated
+
+- The pre-rule-8 station-id lease layout `<station-id>/<repo-slug>-<hex>/wt_<hex>` is no longer a compliant worktree shape and is reported as unmanaged with a migration reason. It is retained read-only for the scoped dangerous-operation carve-out, so worktrees created before rule 8 keep their `~/.hasna` write exemption during migration. Git provenance verification is unchanged: standalone repos, forged worktree metadata, symlink/hardlink escapes, and Git metadata targets still fail closed at either depth.
+
 ## [0.4.0] - 2026-07-24
 
 ### Added

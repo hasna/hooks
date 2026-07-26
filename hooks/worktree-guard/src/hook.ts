@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import {
+  canonicalWorktreeTemplate,
   classifyDangerousOperation,
   claimCommand,
   gitCommandInfo,
@@ -10,7 +11,6 @@ import {
   managedWorktreeInfo,
   readInput,
   respond,
-  runIdFrom,
   taskIdFrom,
   warn,
   type CodewithHookInput,
@@ -43,23 +43,24 @@ export async function evaluate(input: CodewithHookInput): Promise<{ output: Reco
   const repoRoot = await gitRepoRoot(targetCwd);
   const repo = await gitRemoteSlug(targetCwd) || (repoRoot ? repoRoot.split("/").filter(Boolean).pop() || null : null);
   const taskId = taskIdFrom(input);
-  const runId = runIdFrom(input);
-  const recommended = claimCommand(repo, taskId, runId);
+  const recommended = claimCommand(repo, taskId);
   const action = gitInfo?.action || null;
+  const canonical = canonicalWorktreeTemplate(managed.root);
 
   if (action) {
     const reason = [
-      `Blocked git ${action} outside a managed repos worktree (${managed.reason || "not under managed root"}).`,
+      `Blocked git ${action} outside a canonical task worktree (${managed.reason || "not under managed root"}).`,
       `Command target cwd: ${targetCwd}`,
-      `Managed root: ${managed.root}`,
-      `Claim a task worktree first: ${recommended}`,
+      `Canonical worktree path (Agent Operating Rules rule 8): ${canonical}`,
+      `Create one first: ${recommended}`,
     ].join(" ");
     return { output: { decision: "block", reason }, warnings };
   }
 
   if (isFeatureWork(input, command)) {
     warnings.push([
-      `Feature work appears to be outside a managed repos worktree (${managed.reason || "not under managed root"}).`,
+      `Feature work appears to be outside a canonical task worktree (${managed.reason || "not under managed root"}).`,
+      `Canonical worktree path (Agent Operating Rules rule 8): ${canonical}.`,
       `Use: ${recommended}`,
     ].join(" "));
     return {
