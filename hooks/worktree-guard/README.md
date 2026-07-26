@@ -44,8 +44,13 @@ existing worktrees working while they are re-homed:
 - git work there warns instead of being blocked, so in-flight tasks can still land;
 - it keeps its scoped `~/.hasna` write carve-out.
 
-Both are temporary. Re-home these worktrees to the canonical path; the tolerances
-will be removed once the layout is gone.
+Both are temporary. Re-home these worktrees to the canonical path, then set
+`HASNA_HOOKS_LEGACY_WORKTREE_TOLERANCE=0`; the branch is removed after that.
+
+The tolerance still requires the same provenance proof as the canonical path — it
+softens the verdict, it does not skip the check. It does key off the path name, so
+a worktree deliberately named to match also gets the warn tier; that is an opt-out
+from a guardrail by a cooperating agent, not a way to reach a shared checkout.
 
 ## Install for Codewith
 

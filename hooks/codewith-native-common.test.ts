@@ -112,6 +112,24 @@ describe("codewith native common helpers", () => {
       expect(managedWorktreeInfo(grafted).reason).toContain("grafted onto another repository");
     });
 
+    test("rejects a .git directory whose object or ref storage is symlinked away", () => {
+      // Needs no write inside the victim: symlinking objects+refs makes commits here
+      // land on the victim's refs, the same end state as a forged .git file.
+      const shared = makeSourceRepo();
+      for (const [name, store] of [["objects-graft", "objects"], ["refs-graft", "refs"]] as const) {
+        const grafted = join(root, "victimrepo", name);
+        mkdirSync(join(grafted, ".git"), { recursive: true });
+        writeFileSync(join(grafted, ".git", "HEAD"), "ref: refs/heads/main\n");
+        for (const dir of ["objects", "refs"]) {
+          if (dir === store) symlinkSync(join(shared, ".git", dir), join(grafted, ".git", dir));
+          else mkdirSync(join(grafted, ".git", dir), { recursive: true });
+        }
+        const info = managedWorktreeInfo(grafted);
+        expect(info.managed, name).toBe(false);
+        expect(info.reason, name).toContain(`${store} is grafted onto another repository`);
+      }
+    });
+
     test("rejects a worktree whose repository no longer registers it", () => {
       // Real fleet state: the parent repo was pruned, so git itself refuses to work here.
       const worktreeRoot = makeWorktree("open-hooks", "orphaned");
@@ -329,6 +347,24 @@ describe("codewith native common helpers", () => {
       if (previous === undefined) delete process.env.HASNA_REPOS_WORKTREES_ROOT;
       else process.env.HASNA_REPOS_WORKTREES_ROOT = previous;
     }
+  });
+
+  test("respond writes the whole verdict even when the process exits immediately", async () => {
+    // process.stdout.write is async on a pipe, so a verdict larger than the pipe
+    // buffer used to be truncated by the exit — and a truncated verdict is unparseable.
+    const script = join(mkdtempSync(join(tmpdir(), "hooks-respond-")), "emit.ts");
+    writeFileSync(script, [
+      `import { respond } from ${JSON.stringify(join(import.meta.dir, "codewith-native-common"))};`,
+      `respond({ decision: "block", reason: "x".repeat(1048576) });`,
+      "process.exit(0);",
+    ].join("\n"));
+
+    const proc = Bun.spawn([process.execPath, "run", script], { stdout: "pipe", stderr: "pipe" });
+    const stdout = await new Response(proc.stdout).text();
+    await proc.exited;
+
+    expect(stdout.length).toBeGreaterThan(1048576);
+    expect(JSON.parse(stdout).reason).toHaveLength(1048576);
   });
 
   test("gitRemoteHostSlug normalises origin to the repos CLI's exact host/org/name form", async () => {

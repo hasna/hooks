@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync, writeSync } from "fs";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "path";
 import { homedir, tmpdir } from "os";
 
@@ -57,7 +57,15 @@ export function readInput(): CodewithHookInput {
 }
 
 export function respond(output: CodewithHookOutput): void {
-  process.stdout.write(`${JSON.stringify(output)}\n`);
+  // Written synchronously: `process.stdout.write` is async on a pipe, so a verdict
+  // larger than the pipe buffer is silently truncated if the process exits before it
+  // drains — and a truncated verdict is unparseable, so the caller sees no decision.
+  const payload = `${JSON.stringify(output)}\n`;
+  try {
+    writeSync(1, payload);
+  } catch {
+    process.stdout.write(payload);
+  }
 }
 
 export function warn(message: string): void {
@@ -1162,6 +1170,24 @@ const WORKTREE_SEGMENT_PATTERN = /^[^.\-\/\x00-\x1f][^\/\x00-\x1f]{0,254}$/;
 const LEGACY_LEASE_REPO_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*-[0-9a-fA-F]{7,16}$/;
 const LEGACY_LEASE_ID_PATTERN = /^wt_[0-9a-fA-F]{16,64}$/;
 
+/**
+ * Whether the deprecated station-id lease layout still gets its migration tolerance.
+ *
+ * Default on, so the change does not strand worktrees created before rule 8. It is a
+ * kill switch, not a policy knob: the layout is non-compliant either way, and the
+ * tolerance only softens the verdict from blocked to warned. Set
+ * `HASNA_HOOKS_LEGACY_WORKTREE_TOLERANCE=0` once those worktrees are re-homed; the
+ * whole branch goes away after that.
+ *
+ * Known limitation while it is on: the tolerance keys off the path name, so a newly
+ * created worktree deliberately named to match also gets the warn tier. That is an
+ * opt-out from a guardrail by a cooperating agent, not a security boundary — the
+ * boundary is the provenance proof above, which applies to both tiers.
+ */
+export function legacyWorktreeToleranceEnabled(): boolean {
+  return process.env.HASNA_HOOKS_LEGACY_WORKTREE_TOLERANCE !== "0";
+}
+
 export type ManagedWorktreeLayout = "canonical" | "legacy-station-lease";
 
 export interface ManagedWorktreeInfo {
@@ -1196,12 +1222,15 @@ export function canonicalWorktreeTemplate(root: string = defaultWorktreesRoot())
  *   - its `gitdir:` target must live under `<common-dir>/worktrees/`, and
  *   - that target's `gitdir` back-pointer must resolve to this very control file.
  *
- * This mirrors the async verifiedLinkedWorktreeRoot() proof used for the write
- * carve-out. Forging it requires write access inside the victim repository's own
- * `.git`, at which point the repository is already owned.
+ * A `.git` directory is accepted only as a self-contained repository. A `commondir`
+ * grafts it onto another repository's history outright, and symlinked `objects` or
+ * `refs` graft it onto another repository's refs — reaching the same end state as a
+ * forged `.git` file without writing anything inside the victim.
  *
- * A `.git` directory is accepted only as a self-contained repository — a `commondir`
- * inside it would likewise graft it onto another repository's history.
+ * This is a structural proof only. It is deliberately close to, but not the same as,
+ * the async verifiedLinkedWorktreeRoot() used for the write carve-out, which is
+ * stricter still (regular-file control file, nlink === 1, worktrees dir directly
+ * under the common dir).
  */
 function worktreeProvenanceReason(worktreeRoot: string): string | null {
   const controlPath = join(worktreeRoot, ".git");
@@ -1218,6 +1247,19 @@ function worktreeProvenanceReason(worktreeRoot: string): string | null {
       return `worktree .git is grafted onto another repository at ${worktreeRoot}`;
     }
     if (!existsSync(join(controlPath, "HEAD"))) return `worktree .git is not a repository at ${worktreeRoot}`;
+    // A self-contained repository owns its object and ref storage. Symlinking either
+    // into another repository makes commits here land on that repository's refs.
+    for (const store of ["objects", "refs"]) {
+      let metadata;
+      try {
+        metadata = lstatSync(join(controlPath, store));
+      } catch {
+        return `worktree .git is missing ${store} at ${worktreeRoot}`;
+      }
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        return `worktree .git ${store} is grafted onto another repository at ${worktreeRoot}`;
+      }
+    }
     return null;
   }
   if (!control.isFile()) return `worktree .git is not a file or directory at ${worktreeRoot}`;
@@ -1325,7 +1367,8 @@ export function managedWorktreeInfo(cwd: string): ManagedWorktreeInfo {
   // the same grounding as the canonical branch. Otherwise the lease name pattern is a
   // forgery kit: two directories named to match would launder a symlinked or grafted
   // path into a warn-and-allow.
-  if (parts.length >= LEGACY_LEASE_WORKTREE_SEGMENTS
+  if (legacyWorktreeToleranceEnabled()
+    && parts.length >= LEGACY_LEASE_WORKTREE_SEGMENTS
     && LEGACY_LEASE_REPO_PATTERN.test(parts[1]!)
     && LEGACY_LEASE_ID_PATTERN.test(parts[2]!)) {
     // The layout has two historical variants: the checkout sits at the lease dir, or
