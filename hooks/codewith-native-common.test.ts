@@ -882,6 +882,139 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     await expectAllowed(nest("rm -rf dist", 2));
   });
 
+  // -------------------------------------------------------------------------------------
+  // Adversarial review round 3. A fixed corpus, kept together deliberately: every entry here
+  // was a live escape or false positive at some commit ON THIS BRANCH, several of them
+  // introduced by the fix for the entry above it. Replay the whole block, never a subset.
+  // -------------------------------------------------------------------------------------
+
+  test("a cd inside a subshell still guards the rest of that subshell", async () => {
+    // Regression from the first isolation fix: `isolated` was read as "this cd never
+    // applies", but it only means "does not escape to the parent". `(cd X && rm -rf *)` is
+    // THE idiom for cd-without-moving-my-shell, and it was completely unguarded.
+    for (const command of [
+      "(cd / && rm -rf *)",
+      "(cd /usr && rm -rf *)",
+      "(cd /home/hasna && rm -rf .hasna)",
+      `(cd "$(bun pm cache)"/ && rm -rf ./*)`,
+      `bash -c '(cd / && rm -rf *)'`,
+      "echo x | (cd / && rm -rf *)",
+    ]) {
+      await expectBlocked(command);
+    }
+    // ...while a cd that genuinely cannot reach the delete is still ignored.
+    await expectBlocked("cd /var/tmp | cat; rm -rf *", { cwd: "/home/hasna/.hasna/projects" });
+  });
+
+  test("cd flag forms and brace groups are followed", async () => {
+    for (const command of [
+      "cd -P / && rm -rf *",
+      "cd -L / && rm -rf *",
+      "cd -- / && rm -rf *",
+      "{ cd /; }; rm -rf *",
+      "pushd / && rm -rf *",
+    ]) {
+      await expectBlocked(command);
+    }
+  });
+
+  test("a non-empty assignment only counts where the shell would actually apply it", async () => {
+    for (const command of [
+      // bash expands $X BEFORE applying a prefix assignment, so $X is still empty.
+      `X=/tmp/build rm -rf "$X"/*`,
+      `X=/tmp/build; X=$(bun pm cache); rm -rf "$X"/*`,
+      `rm -rf "$X"/* ; X=/tmp/build`,
+      `X=/tmp/build; X=; rm -rf "$X"/*`,
+      `(X=/tmp/build); rm -rf "$X"/*`,
+      `X=/tmp/build | cat; rm -rf "$X"/*`,
+      `PWD=$(bun pm cache); rm -rf "$PWD"/*`,
+      `PWD=; rm -rf "$PWD"/*`,
+      // The default IS the worst case, so it is substituted verbatim rather than assumed safe.
+      `rm -rf "\${A:-/}"/*`,
+    ]) {
+      await expectBlocked(command);
+    }
+    // The genuine guarantees still hold.
+    await expectAllowed(`X=/tmp/build; rm -rf "$X"/*`);
+    await expectAllowed(`rm -rf "\${BUILD_DIR:-/tmp/build}"/*`);
+  });
+
+  test("a delete nested inside a parameter expansion is still a delete", async () => {
+    await expectBlocked(`echo "\${x:-$(rm -rf /*)}"`);
+    await expectBlocked("echo \"\${x:-`rm -rf /*`}\"");
+  });
+
+  test("brace fallback covers absolute alternatives, and ${} does not abandon expansion", async () => {
+    const many = Array.from({ length: 70 }, (_, i) => `a${i}`).join(",");
+    // An absolute alternative is not a child of the brace-free prefix.
+    await expectBlocked(`rm -rf {/etc,${many}}`);
+    await expectBlocked(`rm -rf {/,${many}}`);
+    // A ${...} before the group is not a brace group; treating it as one abandoned the token.
+    await expectBlocked(`rm -rf "\${HOME}"/{,.hasna}`);
+    await expectBlocked(`rm -rf "\${HOME}"/{bin,.hasna}`);
+  });
+
+  test("an escaped character inside a substitution is data, not structure", async () => {
+    // Same root cause as the quoted-paren bug: quotes were fixed, backslashes were not.
+    await expectBlocked(`rm -rf "$(echo \\')"/*`);
+    await expectBlocked(`rm -rf "$(grep -c \\( f)"/*`);
+  });
+
+  test("a catch-all in the first component sweeps the filesystem root", async () => {
+    for (const command of ["rm -rf /*/bin", "rm -rf /*/*", "find /*/x -delete"]) {
+      await expectBlocked(command);
+    }
+  });
+
+  test("everyday monorepo and ops cleanup is not blocked", async () => {
+    // A guard that blocks `rm -rf */node_modules` at a monorepo root gets switched off, and
+    // then it protects nothing at all. Matching on "the first glob's parent" caused exactly
+    // that: the trailing literal bounds the delete, so the repo root is never destroyed.
+    const repo = mkdtempSync(join(tmpdir(), "hooks-monorepo-"));
+    try {
+      for (const command of [
+        "rm -rf */node_modules",
+        "rm -rf */dist",
+        "rm -rf ./*/dist",
+        "rm -rf **/dist",
+        "rm -rf */*.log",
+      ]) {
+        await expectAllowed(command, { cwd: repo });
+      }
+      for (const command of [
+        "rm -rf /opt/*/logs",
+        "rm -rf /var/*/tmp",
+        "rm -rf /home/*/tmp",
+        "rm -rf /srv/*/cache",
+        "rm -rf ~/workspace/*/node_modules",
+      ]) {
+        await expectAllowed(command);
+      }
+    } finally {
+      try { rmSync(repo, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  test("ordinary commands never reach the unanalysable-command refusal", async () => {
+    // Every $( ) counts as a layer, so a low cap made 40 substitutions in one ops line trip a
+    // hard block on `rm -rf dist`.
+    const substitutions = Array.from({ length: 40 }, (_, i) => `echo $(echo ${i})`).join(" ; ");
+    await expectAllowed(`${substitutions} ; rm -rf dist`);
+    await expectAllowed(`${substitutions} ; rm -rf /tmp/scratch`);
+    await expectAllowed(`${substitutions} ; find . -name '*.log' -delete`);
+    await expectAllowed(`bash -c "sh -c 'sh -c \\"sh -c \\\\"rm -rf dist\\\\"\\"'"`);
+  });
+
+  test("deeply nested parameter expansion cannot stall the hook into failing open", async () => {
+    // 40k-deep `${A:-…}` overflowed the stack; the hook caught it and answered
+    // {"continue":true}, so the `rm -rf /*` in the same command was never classified.
+    const command = `rm -rf /* "${"${A:-".repeat(2000)}x${"}".repeat(2000)}"`;
+    const started = performance.now();
+    const result = await classify(command);
+    expect(result.block).toBe(true);
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
   test("a quoted paren inside a substitution does not disable the collapse rule", async () => {
     // The unterminated-substitution fallback turned an ordinary awk field separator into a
     // bypass, because the quoted "(" was counted as structure.

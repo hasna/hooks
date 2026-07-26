@@ -142,9 +142,11 @@ export interface GitCommandInfo {
 function splitShellSegmentsPass(
   command: string,
   atomicSubstitutions: boolean
-): { segments: string[]; isolation: boolean[]; unterminated: boolean } {
+): { segments: string[]; isolation: boolean[]; depths: number[]; piped: boolean[]; unterminated: boolean } {
   const segments: string[] = [];
   const isolation: boolean[] = [];
+  const depths: number[] = [];
+  const pipedFlags: boolean[] = [];
   let current = "";
   let quote: "'" | '"' | null = null;
   let escaped = false;
@@ -159,6 +161,8 @@ function splitShellSegmentsPass(
       segments.push(current.trim());
       // A stage of a pipeline runs in its own process, as does anything inside `( … )`.
       isolation.push(parenDepth > 0 || pipedFromPrevious || nextSeparator === "|");
+      depths.push(parenDepth);
+      pipedFlags.push(pipedFromPrevious || nextSeparator === "|");
     }
     current = "";
     pipedFromPrevious = nextSeparator === "|";
@@ -226,7 +230,7 @@ function splitShellSegmentsPass(
   }
 
   flush(null);
-  return { segments, isolation, unterminated: substitutionDepth > 0 || inBacktick };
+  return { segments, isolation, depths, piped: pipedFlags, unterminated: substitutionDepth > 0 || inBacktick };
 }
 
 function splitShellSegments(command: string): string[] {
@@ -236,6 +240,10 @@ function splitShellSegments(command: string): string[] {
 /** A segment plus whether a `cd` in it changes the working directory of later segments. */
 interface ShellSegment {
   text: string;
+  /** Subshell nesting depth of this segment; a `cd` applies to this depth and deeper. */
+  depth: number;
+  /** This segment is a pipeline stage, so its `cd` affects nothing outside the stage. */
+  piped: boolean;
   /**
    * True when the segment runs in a subshell `( … )` or as a stage of a pipeline. A `cd`
    * there affects only that child process, so treating it as persistent silently moves the
@@ -249,6 +257,8 @@ function splitShellSegmentsDetailed(command: string): ShellSegment[] {
   const chosen = pass.unterminated ? splitShellSegmentsPass(command, false) : pass;
   return chosen.segments.map((text, index) => ({
     text,
+    depth: chosen.depths[index] ?? 0,
+    piped: chosen.piped[index] ?? false,
     isolated: chosen.isolation[index] ?? false,
   }));
 }
@@ -276,11 +286,15 @@ function shellWordsPass(segment: string, atomicSubstitutions: boolean): { words:
       escaped = false;
       continue;
     }
-    // Substitution bodies are copied verbatim, quotes and spaces included: the raw text
-    // is what emptyExpansionCollapse inspects.
+    // Substitution bodies are copied verbatim - quotes, spaces AND backslashes. Consuming the
+    // escape here strips the backslash, and findExpansions then re-counts `\'` or `\(` as
+    // structure on the de-escaped text, which reopened the bug the quote fix closed.
     if (atomicSubstitutions && substitutionDepth > 0) {
       current += ch;
-      if (substitutionQuote) {
+      if (ch === "\\") {
+        current += segment[i + 1] ?? "";
+        i += 1;
+      } else if (substitutionQuote) {
         if (ch === substitutionQuote) substitutionQuote = null;
       } else if (ch === "'" || ch === '"') {
         substitutionQuote = ch;
@@ -290,7 +304,8 @@ function shellWordsPass(segment: string, atomicSubstitutions: boolean): { words:
     }
     if (atomicSubstitutions && inBacktick) {
       current += ch;
-      if (ch === "`") inBacktick = false;
+      if (ch === "\\") { current += segment[i + 1] ?? ""; i += 1; }
+      else if (ch === "`") inBacktick = false;
       continue;
     }
     if (ch === "\\" && quote !== "'") {
@@ -654,27 +669,78 @@ function mutatesProtectedPath(targetPath: string, rule: ProtectedPathRule): bool
 // A trailing glob that matches every entry, so `dir/*` destroys all of `dir`.
 const CATCH_ALL_GLOB = /^(?:\*|\*\*|\.\*|\.\[!\.\]\*)$/;
 
-/**
- * Where a glob target starts matching, and whether that first glob is a catch-all.
- *
- * The glob is found by scanning *every* path component, not just the last one. Looking only
- * at `basename` treats `rm -rf /*​/*` as a literal directory named `*` and lets it through,
- * even though it destroys `/usr/*`, `/etc/*` and `/home/*` - the realized incident's outcome
- * by a different spelling.
- *
- * `catchAll` distinguishes `dir/*` (matches every entry, so the whole of `dir` is destroyed
- * and any protected root *under* `dir` goes with it) from `dir/build-*` (bounded by its
- * literal prefix, so it cannot reach an arbitrary sibling and keeps the weaker test).
- */
-function globWipeInfo(targetPath: string): { base: string; catchAll: boolean } | null {
-  const target = resolve(targetPath);
-  const parts = target.split(sep);
-  for (let i = 0; i < parts.length; i += 1) {
-    if (!/[*?[]/.test(parts[i])) continue;
-    const base = parts.slice(0, i).join(sep) || sep;
-    return { base, catchAll: CATCH_ALL_GLOB.test(parts[i]) };
+function globComponentToRegExp(component: string): RegExp {
+  let source = "";
+  for (let i = 0; i < component.length; i += 1) {
+    const ch = component[i];
+    if (ch === "*") source += "[^/]*";
+    else if (ch === "?") source += "[^/]";
+    else source += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
   }
-  return null;
+  return new RegExp(`^${source}$`);
+}
+
+function globComponentMatches(pattern: string, literal: string): boolean {
+  if (!/[*?[]/.test(pattern)) return pattern === literal;
+  if (CATCH_ALL_GLOB.test(pattern)) return true;
+  try {
+    return globComponentToRegExp(pattern).test(literal);
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Could this glob pattern match `root` itself, or an ancestor of it?
+ *
+ * If it can, every expansion that lands there takes `root` with it. A pattern DEEPER than
+ * `root` cannot: `*​/node_modules` from a repo root deletes `<child>/node_modules`, never the
+ * repo root, which is why matching only on "the first glob's parent directory" wrongly blocked
+ * `rm -rf *​/node_modules` - a daily monorepo command, and exactly the kind of false positive
+ * that gets a guard switched off.
+ */
+function globPatternCovers(patternParts: string[], rootParts: string[]): boolean {
+  if (patternParts.length > rootParts.length) return false;
+  return patternParts.every((part, index) => globComponentMatches(part, rootParts[index]));
+}
+
+/** Components of the pattern up to, but not including, its first glob component. */
+function literalPrefixOf(parts: string[]): string {
+  const globIndex = parts.findIndex((part) => /[*?[]/.test(part));
+  return (globIndex === -1 ? parts : parts.slice(0, globIndex)).join(sep) || sep;
+}
+
+function pathHasGlob(targetPath: string): boolean {
+  return /[*?[]/.test(resolve(targetPath));
+}
+
+/**
+ * Does a glob delete threaten this rule?
+ *
+ * Two ways, and both are needed:
+ *  (a) the pattern can match the protected root or an ancestor of it - `rm -rf /*` matches
+ *      `/home`, `rm -rf /*​/*` matches `/home/hasna`;
+ *  (b) the pattern is a wholesale wipe of the root's own contents - `rm -rf /home/*`, whose
+ *      last component is a catch-all and whose prefix covers `/home`.
+ * For a tree rule, a pattern sitting inside the tree also threatens it.
+ */
+function globThreatensRule(targetPath: string, rule: ProtectedPathRule): boolean {
+  const parts = resolve(targetPath).split(sep);
+  const rootParts = resolve(rule.root).split(sep);
+
+  if (rule.mode === "tree" && isInsidePath(literalPrefixOf(parts), rule.root)) return true;
+  if (globPatternCovers(parts, rootParts)) return true;
+
+  const last = parts[parts.length - 1];
+  if (CATCH_ALL_GLOB.test(last) && globPatternCovers(parts.slice(0, -1), rootParts)) return true;
+
+  // A catch-all in the FIRST component sweeps every top-level directory: `/*/bin` deletes
+  // /usr/bin, /var/bin and the rest, and a trailing literal makes the pattern deeper than any
+  // single root, so component matching alone misses it. Scoped to the filesystem root so
+  // ordinary sweeps deeper down - `/opt/*/logs`, `/var/*/tmp`, `*/node_modules` - stay allowed.
+  if (rule.root === sep && parts.length > 1 && CATCH_ALL_GLOB.test(parts[1])) return true;
+
+  return false;
 }
 
 const MAX_BRACE_EXPANSIONS = 64;
@@ -682,7 +748,23 @@ const MAX_BRACE_ROUNDS = 16;
 
 /** Expand only the leftmost brace group of a token; null when there is none to expand. */
 function expandLeftmostBrace(token: string): string[] | null {
-  const open = token.indexOf("{");
+  // Skip `${…}` parameter expansions when looking for an alternation: their brace is not a
+  // brace group, and treating it as one abandoned expansion for the whole token, so
+  // `rm -rf "${HOME}"/{,.hasna}` was never expanded at all.
+  let open = -1;
+  for (let i = 0; i < token.length; i += 1) {
+    if (token[i] !== "{") continue;
+    if (i > 0 && token[i - 1] === "$") {
+      let depth = 0;
+      for (; i < token.length; i += 1) {
+        if (token[i] === "{") depth += 1;
+        else if (token[i] === "}") { depth -= 1; if (depth === 0) break; }
+      }
+      continue;
+    }
+    open = i;
+    break;
+  }
   if (open === -1) return null;
 
   let depth = 0;
@@ -733,7 +815,11 @@ function braceAbandonFallback(token: string): string[] {
   const open = token.indexOf("{");
   const prefix = open === -1 ? token : token.slice(0, open);
   const base = prefix.endsWith(sep) || prefix === "" ? prefix : `${prefix}${sep}`;
-  return [`${base}*`];
+  const fallback = [`${base}*`];
+  // An alternative that is itself absolute is NOT a child of the prefix: `rm -rf {/etc,a0,…}`
+  // expands to `rm -rf /etc a0 …`, so the prefix-based fallback would miss `/etc` entirely.
+  if (/[{,]\s*\//.test(token)) fallback.push(`${sep}*`);
+  return fallback;
 }
 
 function expandBraces(token: string): string[] {
@@ -767,6 +853,7 @@ function expandBraces(token: string): string[] {
 // is NOT exempt: it permits an empty value, which is the whole hazard.
 const GUARDED_EXPANSION = /^\$\{[A-Za-z_][A-Za-z0-9_]*:\?/;
 const NON_EMPTY_PLACEHOLDER = "__hooks_guarded_expansion__";
+const MAX_EXPANSION_NESTING = 32;
 
 /** One shell expansion found in a token, with its exact source span. */
 interface FoundExpansion {
@@ -806,6 +893,7 @@ function findExpansions(token: string): FoundExpansion[] {
       let j = i + 1;
       for (; j < token.length; j += 1) {
         const ch = token[j];
+        // An escaped character is data whether or not a quote is open: `$(echo \')`.
         if (ch === "\\") { j += 1; continue; }
         // A paren inside quotes is data, not structure: `awk -F'(' '{print $2}'`.
         if (quote) {
@@ -847,30 +935,53 @@ function expansionCannotBeEmpty(text: string, nonEmptyNames: ReadonlySet<string>
   // ${VAR:-default} with a non-empty default. `:-` substitutes the default when VAR is unset
   // OR empty, so the result is non-empty. Plain `${VAR-default}` does NOT qualify: it only
   // covers unset, so a set-but-empty VAR still yields "".
-  const withDefault = text.match(/^\$\{[A-Za-z_][A-Za-z0-9_]*:-([\s\S]*)\}$/);
-  if (withDefault) {
-    // The default can itself be an expansion, so it only guarantees non-emptiness if what
-    // survives collapsing it is still non-empty. `${A:-${B}}` guarantees nothing.
-    const fallback = withDefault[1];
-    if (fallback.length === 0) return false;
-    let residue = "";
-    let cursor = 0;
-    for (const inner of findExpansions(fallback)) {
-      residue += fallback.slice(cursor, inner.start);
-      if (expansionCannotBeEmpty(inner.text, nonEmptyNames)) residue += NON_EMPTY_PLACEHOLDER;
-      cursor = inner.end;
-    }
-    residue += fallback.slice(cursor);
-    return residue.length > 0;
+  // $PWD and $(pwd) are maintained by the shell, but only while nothing reassigns PWD.
+  if (text === "$PWD" || text === "${PWD}" || /^\$\(\s*pwd\s*\)$/.test(text) || /^`\s*pwd\s*`$/.test(text)) {
+    return !nonEmptyNames.has("\u0000PWD-REASSIGNED");
   }
-
-  // $PWD and $(pwd) are maintained by the shell itself and are never empty.
-  if (text === "$PWD" || text === "${PWD}") return true;
-  if (/^\$\(\s*pwd\s*\)$/.test(text) || /^`\s*pwd\s*`$/.test(text)) return true;
 
   // Assigned a non-empty literal earlier in this same command.
   const name = text.match(/^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/);
   return name !== null && nonEmptyNames.has(name[1]);
+}
+
+/**
+ * Value an expansion is guaranteed to take when the variable is unset or empty, or null when
+ * there is no such guarantee.
+ *
+ * `${VAR:-default}` substitutes the default whenever VAR is unset OR empty, so the worst case
+ * is the default itself - and the default is used verbatim rather than assumed harmless.
+ * `${A:-/}` therefore collapses to `/` and blocks, where treating "has a default" as "is safe"
+ * let it through. Plain `${VAR-default}` does NOT qualify: it only covers unset, so a
+ * set-but-empty VAR still yields "".
+ */
+function expansionFallbackValue(
+  text: string,
+  nonEmptyNames: ReadonlySet<string>,
+  depth = 0
+): string | null {
+  const withDefault = text.match(/^\$\{[A-Za-z_][A-Za-z0-9_]*:-([\s\S]*)\}$/);
+  if (!withDefault) return null;
+  // Bounded because this recurses once per nesting level while re-scanning the remainder:
+  // `${A:-${A:- … }}` 40k deep overflowed the stack, the hook caught it and answered
+  // {"continue":true}, and the `rm -rf /*` in the same command was never classified at all.
+  // Past the cap there is no guarantee left to prove, so the value is treated as collapsible,
+  // which blocks rather than allows.
+  if (depth >= MAX_EXPANSION_NESTING) return "";
+  const fallback = withDefault[1];
+  if (fallback.length === 0) return "";
+
+  let value = "";
+  let cursor = 0;
+  for (const inner of findExpansions(fallback)) {
+    value += fallback.slice(cursor, inner.start);
+    const nested = expansionFallbackValue(inner.text, nonEmptyNames, depth + 1);
+    if (nested !== null) value += nested;
+    else if (expansionCannotBeEmpty(inner.text, nonEmptyNames)) value += NON_EMPTY_PLACEHOLDER;
+    cursor = inner.end;
+  }
+  value += fallback.slice(cursor);
+  return value;
 }
 
 /**
@@ -904,7 +1015,13 @@ export function emptyExpansionCollapse(
   let cursor = 0;
   for (const expansion of expansions) {
     collapsed += token.slice(cursor, expansion.start);
-    if (expansionCannotBeEmpty(expansion.text, nonEmptyNames)) {
+    const fallback = expansionFallbackValue(expansion.text, nonEmptyNames);
+    if (fallback !== null) {
+      // The default IS the worst case, so the resulting path still has to be checked -
+      // `${A:-/}` yields `/`, which is the whole hazard, not a reason to skip the check.
+      collapsed += fallback;
+      sawCollapsible = true;
+    } else if (expansionCannotBeEmpty(expansion.text, nonEmptyNames)) {
       collapsed += NON_EMPTY_PLACEHOLDER;
     } else {
       sawCollapsible = true;
@@ -918,21 +1035,44 @@ export function emptyExpansionCollapse(
 }
 
 /**
- * Variables assigned a non-empty literal earlier in the same command, e.g.
- * `BUILD=/tmp/build && rm -rf "$BUILD"/*`. Without this the collapse rule treats `$BUILD` as
- * possibly-empty and blocks a command whose own text proves it is not.
- * Only literal values count - `X=$(cmd)` is still collapsible, which is the point.
+ * Variables that are provably non-empty at the point `segmentIndex` runs.
+ *
+ * Every relaxation here is a way to get a delete past the guard, so each condition is a
+ * guarantee rather than a heuristic. Recomputed per segment because the naive version - one
+ * set for the whole command - was defeated six different ways:
+ *
+ *   X=/tmp/build rm -rf "$X"/*        a PREFIX assignment applies to the command's own
+ *                                     environment, not to the expansion, which bash performs
+ *                                     first; `$X` is still empty
+ *   rm -rf "$X"/* ; X=/tmp/build      an assignment AFTER the delete counted
+ *   X=/tmp/build; X=$(cmd); rm …      a later reassignment to something collapsible did not
+ *                                     invalidate the earlier literal
+ *   X=/tmp/build; X=; rm …            an explicit empty reassignment did not either
+ *   (X=/tmp/build); rm …              a subshell-scoped assignment escaped its subshell
+ *   X=/tmp/build | cat; rm …          a pipeline-stage assignment did the same
  */
-function nonEmptyAssignedNames(command: string): Set<string> {
+function nonEmptyAssignedNames(command: string, segmentIndex: number): Set<string> {
   const names = new Set<string>();
-  for (const segment of splitShellSegments(command)) {
-    for (const token of shellWords(segment)) {
-      const assignment = token.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+  const segments = splitShellSegmentsDetailed(command);
+
+  segments.forEach(({ text, depth, isolated }, index) => {
+    // Only assignments that already ran, in the parent shell, in their own right.
+    if (index >= segmentIndex || depth > 0 || isolated) return;
+
+    const tokens = shellWords(text);
+    for (const [position, token] of tokens.entries()) {
+      const assignment = token.match(/^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/);
       if (!assignment) break;
       const [, name, value] = assignment;
+      const isPrefixAssignment = position < tokens.length - 1 && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[position + 1] ?? "");
+      // A later assignment always invalidates an earlier guarantee.
+      names.delete(name);
+      if (name === "PWD") names.add("\u0000PWD-REASSIGNED");
+      if (isPrefixAssignment) continue;
       if (value.length > 0 && !/[$`]/.test(value)) names.add(name);
     }
-  }
+  });
+
   return names;
 }
 
@@ -1127,11 +1267,7 @@ async function verifiedManagedRepoRoot(
 
 function threatensRule(targetPath: string, rule: ProtectedPathRule, currentManagedRepoRoot: string | null): boolean {
   if (shouldSkipHasnaTreeRule(targetPath, rule, currentManagedRepoRoot)) return false;
-  const glob = globWipeInfo(targetPath);
-  if (glob) {
-    if (glob.catchAll && threatensProtectedPath(glob.base, rule)) return true;
-    if (!glob.catchAll && mutatesProtectedPath(glob.base, rule)) return true;
-  }
+  if (pathHasGlob(targetPath)) return globThreatensRule(targetPath, rule);
   return threatensProtectedPath(targetPath, rule);
 }
 
@@ -1481,13 +1617,27 @@ function interpreterScriptFrom(tokens: string[], shellIndex: number, allowedOper
  * at all and every rule misses it - the delete runs, its output is simply discarded.
  */
 function substitutionBodies(segment: string): string[] {
-  return findExpansions(segment)
-    .filter((expansion) => expansion.text.startsWith("$(") || expansion.text.startsWith("`"))
-    .map((expansion) => (expansion.text.startsWith("`")
-      ? expansion.text.slice(1, -1)
-      : expansion.text.slice(2, -1)))
-    .map((body) => body.trim())
-    .filter((body) => body.length > 0);
+  const bodies: string[] = [];
+  const visit = (text: string, depth: number): void => {
+    if (depth > 4) return;
+    for (const expansion of findExpansions(text)) {
+      if (expansion.text.startsWith("$(") || expansion.text.startsWith("`")) {
+        const body = (expansion.text.startsWith("`")
+          ? expansion.text.slice(1, -1)
+          : expansion.text.slice(2, -1)).trim();
+        if (body.length > 0) {
+          bodies.push(body);
+          visit(body, depth + 1);
+        }
+        continue;
+      }
+      // `${x:-$(rm -rf /*)}` runs the substitution when x is unset. findExpansions returns
+      // the outer ${...} and swallows the inner one, so the body has to be re-scanned.
+      if (expansion.text.startsWith("${")) visit(expansion.text.slice(2, -1), depth + 1);
+    }
+  };
+  visit(segment, 0);
+  return bodies;
 }
 
 function sshRemoteCommandFrom(tokens: string[], sshIndex: number): string | null {
@@ -1551,8 +1701,8 @@ function wrappedShellLayers(command: string, remote: boolean): ShellCommandLayer
   return layers;
 }
 
-const MAX_WRAPPER_DEPTH = 3;
-const MAX_SHELL_LAYERS = 32;
+const MAX_WRAPPER_DEPTH = 8;
+const MAX_SHELL_LAYERS = 256;
 
 function shellCommandLayers(command: string): { layers: ShellCommandLayer[]; truncated: boolean } {
   const layers: ShellCommandLayer[] = [{ command, remote: false }];
@@ -1620,6 +1770,8 @@ function keepRemoteTarget(target: DestructiveShellTarget): boolean {
 
 interface CommandChunk {
   segment: string;
+  /** Index of this segment in the layer, so assignment visibility can be ordered. */
+  segmentIndex: number;
   /** Working directories this segment may run in: the tracked cwd, plus the cwd a `cd`
    *  whose operand collapsed to empty would have left behind. */
   cwds: string[];
@@ -1640,43 +1792,61 @@ const MAX_CWD_VARIANTS = 4;
 function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: ReadonlySet<string>): CommandChunk[] {
   const chunks: CommandChunk[] = [];
   const home = process.env.HOME || homedir();
-  let cwds = [baseCwd];
-  let previousCwds = [baseCwd];
-  let explicitCwd = false;
+  // One entry per subshell nesting depth. A `cd` inside `( … )` DOES apply to the rest of
+  // that subshell - it just does not escape to the parent - so skipping isolated `cd`
+  // outright left `(cd / && rm -rf *)`, the standard "cd without moving my shell" idiom,
+  // completely unguarded. Depth 0 is the parent shell.
+  let stack: Array<{ cwds: string[]; previous: string[]; explicit: boolean }> = [
+    { cwds: [baseCwd], previous: [baseCwd], explicit: false },
+  ];
 
-  for (const { text: segment, isolated } of splitShellSegmentsDetailed(command)) {
-    const tokens = shellWords(segment);
-    if (tokens[0] === "cd") {
-      // A `cd` inside `( … )` or in a pipeline stage does not move the parent shell, so
-      // applying it would move the guard's cwd away from where the later `rm` actually runs.
-      if (isolated) continue;
+  const frameFor = (depth: number) => {
+    while (stack.length <= depth) {
+      const parent = stack[stack.length - 1];
+      stack.push({ cwds: parent.cwds, previous: parent.previous, explicit: parent.explicit });
+    }
+    // Leaving a subshell discards everything it did.
+    if (stack.length > depth + 1) stack = stack.slice(0, depth + 1);
+    return stack[depth];
+  };
 
-      const operand = tokens[1];
-      const priorCwds = cwds;
+  splitShellSegmentsDetailed(command).forEach(({ text: segment, depth, piped }, segmentIndex) => {
+    const frame = frameFor(depth);
+    // A leading `{` from a brace group is not part of the command.
+    const tokens = shellWords(segment).filter((token, index) => !(index === 0 && (token === "{" || token === "}")));
+    const verb = tokens[0];
+
+    if (verb === "cd" || verb === "pushd") {
+      // A `cd` in a pipeline stage runs in its own process and moves nothing else.
+      if (piped) return;
+      // Skip cd's own flags (-P, -L, --) to reach the directory operand.
+      let i = 1;
+      while (i < tokens.length && (tokens[i] === "-P" || tokens[i] === "-L" || tokens[i] === "-e" || tokens[i] === "-@" || tokens[i] === "--")) i += 1;
+      const operand = tokens[i];
+      const priorCwds = frame.cwds;
+
       if (operand === undefined || operand === "~") {
-        cwds = [home];
-        explicitCwd = true;
+        frame.cwds = [home];
+        frame.explicit = true;
       } else if (operand === "-" || operand === "$OLDPWD" || operand === "${OLDPWD}") {
-        // `cd -` returns to the directory the shell was in before the last cd.
-        cwds = previousCwds;
-        explicitCwd = previousCwds.some((dir) => dir !== baseCwd);
-      } else if (!operand.startsWith("-")) {
+        frame.cwds = frame.previous;
+        frame.explicit = frame.previous.some((dir) => dir !== baseCwd);
+      } else {
         const collapsed = emptyExpansionCollapse(operand, nonEmptyNames);
         const next = new Set<string>();
-        for (const current of cwds) {
+        for (const current of frame.cwds) {
           next.add(resolveFrom(current, operand));
           if (collapsed !== null) next.add(resolveFrom(current, collapsed));
         }
-        cwds = [...next].slice(0, MAX_CWD_VARIANTS);
-        if (isAbsolute(expandHome(operand)) || collapsed !== null) explicitCwd = true;
-      } else {
-        continue;
+        frame.cwds = [...next].slice(0, MAX_CWD_VARIANTS);
+        if (isAbsolute(expandHome(operand)) || collapsed !== null) frame.explicit = true;
       }
-      previousCwds = priorCwds;
-      continue;
+      frame.previous = priorCwds;
+      return;
     }
-    chunks.push({ segment, cwds, explicitCwd });
-  }
+
+    chunks.push({ segment, segmentIndex, cwds: frame.cwds, explicitCwd: frame.explicit });
+  });
   return chunks;
 }
 
@@ -1710,9 +1880,9 @@ function destructiveShellTargets(command: string, cwd: string): DestructiveShell
   const targets: DestructiveShellTarget[] = [];
   for (const layer of shellCommandLayers(command).layers) {
     const bindings = forLoopBindings(layer.command);
-    const nonEmptyNames = nonEmptyAssignedNames(layer.command);
 
-    for (const chunk of cwdTrackedSegments(layer.command, cwd, nonEmptyNames)) {
+    for (const chunk of cwdTrackedSegments(layer.command, cwd, new Set())) {
+      const nonEmptyNames = nonEmptyAssignedNames(layer.command, chunk.segmentIndex);
       const raw = [
         ...rmCommandTargets(chunk.segment),
         ...rsyncDeleteTargets(chunk.segment),
