@@ -22,11 +22,16 @@ reason: a flat single-segment worktree directly under the worktrees root, a
 station-id or machine segment in front of the repo name, and any deeper nesting
 are all rejected. Subdirectories of a canonical worktree are accepted.
 
-The classification is grounded in the filesystem, not in path shape alone: the
-two-segment path must really be a git worktree root, and no segment may be a
-symlink. Otherwise `<root>/<flat-worktree>/<subdir>` — which has exactly the
-canonical shape — would launder a forbidden flat worktree into a compliant one,
-and a symlinked segment could aim a compliant-looking path at a shared checkout.
+The classification is grounded in verified git provenance, not path shape. The
+two-segment path must be a real worktree root, no segment may be a symlink, and
+its `.git` must prove it owns its own history: a `.git` file's `gitdir:` target
+has to live under its repository's `worktrees/` directory and point back at this
+control file, and a `.git` directory must not be grafted on by a `commondir`.
+
+Shape alone proves nothing. `<root>/<flat-worktree>/<subdir>` has exactly the
+canonical shape, so a `cd` would otherwise launder a forbidden flat worktree into
+a compliant one; and a symlink or a two-line forged `.git` file would aim a
+compliant-looking path at a shared checkout, making `git commit` land there.
 
 Override the worktrees root with `HASNA_REPOS_WORKTREES_ROOT`.
 

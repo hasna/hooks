@@ -1586,14 +1586,123 @@ describe("Codewith-native hooks", () => {
     }
   });
 
+  test("worktree-guard takes <repo-name> and the base branch from the repos CLI, not the remote", async () => {
+    const worktreesRoot = join(tmp, "worktrees");
+    const repo = join(tmp, "checkout");
+    initGitRepo(repo);
+    Bun.spawnSync(["git", "remote", "add", "origin", "https://github.com/hasna/hooks.git"], { cwd: repo });
+
+    // The repos CLI is the source of truth for the canonical name: this repo's remote
+    // basename is `hooks`, but its canonical name is `open-hooks`.
+    const bin = join(tmp, "stub-bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "repos"), [
+      "#!/bin/sh",
+      'echo "$@" | grep -q -- "--remote github.com/hasna/hooks" || exit 1',
+      'printf \'{"name":"open-hooks","default_branch":"trunk","path":"/home/hasna/workspace/open-hooks"}\'',
+    ].join("\n"));
+    chmodSync(join(bin, "repos"), 0o755);
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-repos-identity",
+      cwd: repo,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "git commit -m test" },
+      tool_use_id: "tool-repos-identity",
+      transcript_path: null,
+      turn_id: "turn-repos-identity",
+    }, { env: { HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_TASK_ID: "OPE61-00004", PATH: `${bin}:${process.env.PATH}` } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    expect(result.json.reason).toContain(join(worktreesRoot, "open-hooks", "OPE61-00004"));
+    expect(result.json.reason).toContain("origin/trunk");
+    expect(result.json.reason).not.toContain(join(worktreesRoot, "hooks", "OPE61-00004"));
+  });
+
+  test("worktree-guard ignores a repos CLI row that is itself a worktree directory", async () => {
+    // The index holds worktree dirs as rows, so an exact remote match can return a
+    // worktree name and that worktree's branch. Both are wrong for the canonical path.
+    const worktreesRoot = join(tmp, "worktrees");
+    const repo = join(tmp, "checkout");
+    initGitRepo(repo);
+    Bun.spawnSync(["git", "remote", "add", "origin", "https://github.com/hasna/instructions.git"], { cwd: repo });
+
+    const bin = join(tmp, "stub-bin-wt");
+    mkdirSync(bin, { recursive: true });
+    const rowPath = join(worktreesRoot, "open-instructions", "task-bb544906-managed-guard");
+    writeFileSync(join(bin, "repos"), [
+      "#!/bin/sh",
+      `printf '{"name":"task-bb544906-managed-guard","default_branch":"task/bb544906","path":"${rowPath}"}'`,
+    ].join("\n"));
+    chmodSync(join(bin, "repos"), 0o755);
+
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-repos-worktree-row",
+      cwd: repo,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "git commit -m test" },
+      tool_use_id: "tool-repos-worktree-row",
+      transcript_path: null,
+      turn_id: "turn-repos-worktree-row",
+    }, { env: { HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_TASK_ID: "OPE61-00004", PATH: `${bin}:${process.env.PATH}` } });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.json.reason).toContain(join(worktreesRoot, "open-instructions", "OPE61-00004"));
+    expect(result.json.reason).toContain("origin/<default-branch>");
+    expect(result.json.reason).not.toContain("task-bb544906-managed-guard/OPE61-00004");
+  });
+
+  test("worktree-guard still answers when the repos CLI hangs", async () => {
+    const worktreesRoot = join(tmp, "worktrees");
+    const repo = join(tmp, "checkout");
+    initGitRepo(repo);
+    Bun.spawnSync(["git", "remote", "add", "origin", "https://github.com/hasna/hooks.git"], { cwd: repo });
+
+    const bin = join(tmp, "stub-bin-hang");
+    mkdirSync(bin, { recursive: true });
+    // Forks a child that holds the pipe open, which a plain child-kill does not bound.
+    writeFileSync(join(bin, "repos"), ["#!/bin/sh", "sleep 60 &", "sleep 60"].join("\n"));
+    chmodSync(join(bin, "repos"), 0o755);
+
+    const started = Date.now();
+    const result = await runHook("worktree-guard", {
+      hook_event_name: "PreToolUse",
+      session_id: "sess-repos-hang",
+      cwd: repo,
+      model: "gpt-test",
+      permission_mode: "default",
+      tool_name: "Bash",
+      tool_input: { command: "git commit -m test" },
+      tool_use_id: "tool-repos-hang",
+      transcript_path: null,
+      turn_id: "turn-repos-hang",
+    }, { env: { HASNA_REPOS_WORKTREES_ROOT: worktreesRoot, HASNA_TASK_ID: "OPE61-00004", PATH: `${bin}:${process.env.PATH}` } });
+
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(result.exitCode).toBe(0);
+    expect(result.json.decision).toBe("block");
+    // Degraded to local information rather than stalling the PreToolUse path.
+    expect(result.json.reason).toContain("Confirm <repo-name> with an exact repos CLI lookup");
+  }, 20_000);
+
   // Migration shim: these worktrees are non-compliant and must be re-homed, but they
   // are live, so the guard warns instead of blocking rather than stranding in-flight
   // work with edits it can never land. Remove once the layout is gone.
   test("worktree-guard warns but does not block git commit in the deprecated lease layout", async () => {
     const worktreesRoot = join(tmp, "worktrees");
+    const shared = join(tmp, "shared-checkout");
     const lease = join(worktreesRoot, "station01", "open-hooks-a55c105a", "wt_2ab04216a30ef5ece642792e");
+    initGitRepo(shared);
+    addGitWorktree(shared, lease);
 
-    for (const [index, cwd] of [lease, join(lease, "repo", "src")].entries()) {
+    for (const [index, cwd] of [lease, join(lease, "src")].entries()) {
       mkdirSync(cwd, { recursive: true });
       const result = await runHook("worktree-guard", {
         hook_event_name: "PreToolUse",

@@ -128,4 +128,9 @@ export async function run(): Promise<void> {
 
 if (import.meta.main) {
   await run();
+  // The verdict is written, so the hook is done. Exit rather than waiting for the
+  // event loop to drain: an optional CLI consulted during evaluation may have left a
+  // grandchild holding a pipe open, and a hook that has already answered must never
+  // keep the caller's PreToolUse path waiting on it.
+  process.exit(0);
 }

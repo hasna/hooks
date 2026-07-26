@@ -1185,22 +1185,78 @@ export function canonicalWorktreeTemplate(root: string = defaultWorktreesRoot())
 }
 
 /**
- * Verify that `<root>/<repo>/<worktree>` is a real, non-symlinked git worktree root.
+ * Prove that `worktreeRoot` owns its own git history, synchronously.
+ *
+ * Shape is not evidence and neither is the mere presence of `.git`. A `.git` file is
+ * two lines of text: pointing it at a shared checkout's `.git` grafts a second working
+ * tree onto that checkout, so `git commit`/`git push` from the forged directory lands
+ * on the shared checkout — the exact outcome rule 10 forbids. So a `.git` file must
+ * carry real linked-worktree provenance:
+ *
+ *   - its `gitdir:` target must live under `<common-dir>/worktrees/`, and
+ *   - that target's `gitdir` back-pointer must resolve to this very control file.
+ *
+ * This mirrors the async verifiedLinkedWorktreeRoot() proof used for the write
+ * carve-out. Forging it requires write access inside the victim repository's own
+ * `.git`, at which point the repository is already owned.
+ *
+ * A `.git` directory is accepted only as a self-contained repository — a `commondir`
+ * inside it would likewise graft it onto another repository's history.
+ */
+function worktreeProvenanceReason(worktreeRoot: string): string | null {
+  const controlPath = join(worktreeRoot, ".git");
+  let control;
+  try {
+    control = lstatSync(controlPath);
+  } catch {
+    return `${worktreeRoot} is not a git worktree root (no .git)`;
+  }
+  if (control.isSymbolicLink()) return `worktree .git is a symlink at ${worktreeRoot}`;
+
+  if (control.isDirectory()) {
+    if (existsSync(join(controlPath, "commondir"))) {
+      return `worktree .git is grafted onto another repository at ${worktreeRoot}`;
+    }
+    if (!existsSync(join(controlPath, "HEAD"))) return `worktree .git is not a repository at ${worktreeRoot}`;
+    return null;
+  }
+  if (!control.isFile()) return `worktree .git is not a file or directory at ${worktreeRoot}`;
+
+  try {
+    const pointer = readFileSync(controlPath, "utf-8").trim();
+    const match = pointer.match(/^gitdir:\s*(.+)$/);
+    if (!match?.[1]) return `worktree .git is not a git worktree pointer at ${worktreeRoot}`;
+    const gitDir = resolveFrom(worktreeRoot, match[1].trim());
+    const commonDir = resolveFrom(gitDir, readFileSync(join(gitDir, "commondir"), "utf-8").trim());
+    const physicalGitDir = realpathSync(gitDir);
+    const physicalWorktreesDir = realpathSync(join(commonDir, "worktrees"));
+    if (physicalGitDir === physicalWorktreesDir || !isInsidePath(physicalGitDir, physicalWorktreesDir)) {
+      return `worktree .git points outside its repository's worktrees directory at ${worktreeRoot}`;
+    }
+    const backPointer = resolveFrom(gitDir, readFileSync(join(gitDir, "gitdir"), "utf-8").trim());
+    if (realpathSync(backPointer) !== realpathSync(controlPath)) {
+      return `worktree .git is not registered by its repository at ${worktreeRoot}`;
+    }
+  } catch {
+    return `worktree .git provenance could not be verified at ${worktreeRoot}`;
+  }
+  return null;
+}
+
+/**
+ * Verify that `<root>/<repo>/<worktree>` is a real, non-symlinked, provenance-checked
+ * git worktree root.
  *
  * Path shape alone is not evidence: `<root>/<flat-worktree>/<subdir>` has exactly the
  * same shape as `<root>/<repo>/<worktree>`, so without this check a `cd` into any
  * subdirectory of a flat worktree would launder it into a compliant-looking path.
  * Symlinks are refused at every level (hence lstat, not existsSync, which follows
  * them) because a symlinked segment can aim a canonical-looking path at a shared
- * checkout, which rule 10 forbids mutating.
- *
- * A `.git` directory is accepted alongside a `.git` file: rule 8 governs where the
- * checkout lives, not whether it is a linked worktree. The stricter linked-worktree
- * proof stays in verifiedLinkedWorktreeRoot(), which gates the write carve-out.
+ * checkout.
  */
-function canonicalWorktreeRootReason(root: string, repo: string, worktree: string): string | null {
+function groundedWorktreeRootReason(root: string, segments: string[]): string | null {
   let probe = resolve(root);
-  for (const segment of [repo, worktree]) {
+  for (const segment of segments) {
     probe = join(probe, segment);
     let metadata;
     try {
@@ -1211,12 +1267,7 @@ function canonicalWorktreeRootReason(root: string, repo: string, worktree: strin
     if (metadata.isSymbolicLink()) return `worktree path traverses a symlink at ${probe}`;
     if (!metadata.isDirectory()) return `worktree path is not a directory at ${probe}`;
   }
-  try {
-    if (lstatSync(join(probe, ".git")).isSymbolicLink()) return `worktree .git is a symlink at ${probe}`;
-  } catch {
-    return `${probe} is not a git worktree root (no .git)`;
-  }
-  return null;
+  return worktreeProvenanceReason(probe);
 }
 
 /**
@@ -1257,7 +1308,7 @@ export function managedWorktreeInfo(cwd: string): ManagedWorktreeInfo {
   // of a forbidden flat worktree, and at any depth it is ambiguous with an invented
   // or symlinked path.
   const worktreeRoot = resolve(root, repo!, worktree!);
-  const rootReason = canonicalWorktreeRootReason(root, repo!, worktree!);
+  const rootReason = groundedWorktreeRootReason(root, [repo!, worktree!]);
   if (!rootReason) {
     return { managed: true, root, layout: "canonical", repo, worktree, worktreeRoot };
   }
@@ -1269,17 +1320,29 @@ export function managedWorktreeInfo(cwd: string): ManagedWorktreeInfo {
   // Recognised at or inside a legacy lease root, mirroring how a canonical worktree
   // covers its own subdirectories — an agent cwd'd into `src/` of a legacy worktree
   // is in the same non-compliant worktree, and must get the same migration message.
+  //
+  // The migration tolerance grants a weaker verdict than "blocked", so it has to clear
+  // the same grounding as the canonical branch. Otherwise the lease name pattern is a
+  // forgery kit: two directories named to match would launder a symlinked or grafted
+  // path into a warn-and-allow.
   if (parts.length >= LEGACY_LEASE_WORKTREE_SEGMENTS
     && LEGACY_LEASE_REPO_PATTERN.test(parts[1]!)
     && LEGACY_LEASE_ID_PATTERN.test(parts[2]!)) {
-    return {
-      managed: false,
-      root,
-      layout: "legacy-station-lease",
-      deprecated: true,
-      worktreeRoot: resolve(root, ...parts.slice(0, LEGACY_LEASE_WORKTREE_SEGMENTS)),
-      reason: `deprecated station-id lease layout <station-id>/<repo-slug>-<hex>/wt_<hex>; rule 8 forbids a station-id or machine segment — re-home to ${canonical}`,
-    };
+    // The layout has two historical variants: the checkout sits at the lease dir, or
+    // one level below it in a `repo/` child. Try both, nothing deeper.
+    for (const depth of [LEGACY_LEASE_WORKTREE_SEGMENTS, LEGACY_LEASE_WORKTREE_SEGMENTS + 1]) {
+      if (parts.length < depth) break;
+      const segments = parts.slice(0, depth);
+      if (groundedWorktreeRootReason(root, segments)) continue;
+      return {
+        managed: false,
+        root,
+        layout: "legacy-station-lease",
+        deprecated: true,
+        worktreeRoot: resolve(root, ...segments),
+        reason: `deprecated station-id lease layout <station-id>/<repo-slug>-<hex>/wt_<hex>; rule 8 forbids a station-id or machine segment — re-home to ${canonical}`,
+      };
+    }
   }
 
   return {
@@ -1346,14 +1409,33 @@ export async function canonicalRepoIdentity(cwd: string): Promise<CanonicalRepoI
   if (!commandExists("repos")) return empty;
   const remote = await gitRemoteHostSlug(cwd);
   if (!remote) return empty;
-  const result = await runCommand(["repos", "repo", "--remote", remote, "--json"], { cwd, timeoutMs: 2000 });
-  if (result.exitCode !== 0) return empty;
+  // Hard ceiling on the lookup. runCommand's timeout kills the direct child but still
+  // awaits its pipes, which a forking CLI can hold open indefinitely; this hook sits on
+  // the PreToolUse path, so it must degrade to local information rather than stall.
+  const result = await Promise.race([
+    runCommand(["repos", "repo", "--remote", remote, "--json"], { cwd, timeoutMs: 1000 }),
+    new Promise<null>((done) => setTimeout(() => done(null), 1500).unref?.()),
+  ]);
+  if (!result || result.exitCode !== 0) return empty;
   try {
-    const parsed = JSON.parse(result.stdout) as { name?: unknown; default_branch?: unknown };
-    return {
-      name: typeof parsed.name === "string" && parsed.name ? parsed.name : null,
-      defaultBranch: typeof parsed.default_branch === "string" && parsed.default_branch ? parsed.default_branch : null,
-    };
+    const parsed = JSON.parse(result.stdout) as { name?: unknown; default_branch?: unknown; path?: unknown };
+    const name = typeof parsed.name === "string" && parsed.name ? parsed.name : null;
+    const defaultBranch = typeof parsed.default_branch === "string" && parsed.default_branch
+      ? parsed.default_branch
+      : null;
+
+    // The index holds worktree directories as first-class rows, so an exact remote
+    // match can resolve to a worktree rather than the repo. Such a row's name is a
+    // worktree name and its default_branch is that worktree's branch — both wrong for
+    // the canonical path. When the row lives under the worktrees root, the real repo
+    // name is its first segment there; the branch is not recoverable, so drop it.
+    const worktreesRoot = resolve(defaultWorktreesRoot());
+    const rowPath = typeof parsed.path === "string" && parsed.path ? resolve(parsed.path) : null;
+    if (rowPath && isInsidePath(rowPath, worktreesRoot) && rowPath !== worktreesRoot) {
+      const segment = relative(worktreesRoot, rowPath).split(sep).filter(Boolean)[0];
+      return { name: segment || null, defaultBranch: null };
+    }
+    return { name, defaultBranch };
   } catch {
     return empty;
   }
@@ -1368,13 +1450,24 @@ export async function canonicalRepoIdentity(cwd: string): Promise<CanonicalRepoI
  *
  * `repo` must be a canonical repo name (see canonicalRepoIdentity) — never a
  * remote slug, which names a different directory for most repos.
+ *
+ * This is the boundary where names become a command an operator may paste, so every
+ * interpolated value is validated here rather than trusted from its source: a repo
+ * name is attacker-influenced via the remote, and a task id is unvalidated hook input.
+ * Anything unsafe degrades to the explicit placeholder instead of being emitted.
  */
+const SAFE_COMMAND_VALUE = /^[a-zA-Z0-9_][a-zA-Z0-9_.\/-]{0,120}$/;
+
 export function claimCommand(repo: string | null, taskId: string | null, defaultBranch: string | null = null): string {
-  const repoName = repo || "<repo-name>";
-  const worktreeName = taskId || "<worktree-name>";
+  // A repo name is one path segment: a slug would silently add a third segment.
+  const safeRepo = repo && SAFE_COMMAND_VALUE.test(repo) && !repo.includes("/") ? repo : null;
+  const safeTask = taskId && SAFE_COMMAND_VALUE.test(taskId) ? taskId : null;
+  const safeBase = defaultBranch && SAFE_COMMAND_VALUE.test(defaultBranch) ? defaultBranch : null;
+
+  const repoName = safeRepo || "<repo-name>";
+  const worktreeName = safeTask || "<worktree-name>";
   const path = join(defaultWorktreesRoot(), repoName, worktreeName);
-  const base = defaultBranch || "<default-branch>";
-  return `git worktree add -b ${worktreeName} ${path} origin/${base} && repos scan`;
+  return `git worktree add -b ${worktreeName} ${path} origin/${safeBase || "<default-branch>"} && repos scan`;
 }
 
 export function taskIdFrom(input: CodewithHookInput): string | null {
