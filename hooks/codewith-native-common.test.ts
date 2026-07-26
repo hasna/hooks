@@ -1015,6 +1015,106 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     expect(performance.now() - started).toBeLessThan(2000);
   });
 
+  // -------------------------------------------------------------------------------------
+  // Adversarial review round 4. Three of these were regressions introduced by round 3's own
+  // fixes. Kept as one block and replayed whole - subsetting is how the last four rounds of
+  // regressions got through.
+  // -------------------------------------------------------------------------------------
+
+  test("bracket-class globs are compiled, not escaped", async () => {
+    // `[e]tc` was escaped to the literal \[e\]tc, which no directory can equal, so the
+    // component was classified as a glob and then matched as an impossible literal. One
+    // character defeated every rule, every tool and every wrapper.
+    for (const command of [
+      "rm -rf /[e]tc",
+      "rm -rf /[!x]*",
+      "rm -rf /[^x]*",
+      "rm -rf /[a-z]*",
+      "rm -rf /home/[h]asna",
+      "rm -rf /?tc",
+      "find /[e]tc -delete",
+      "rsync -a --delete src/ /[e]tc",
+      "ssh station02 rm -rf /[e]tc",
+      `bash -c "rm -rf /[!x]*"`,
+      `rm -rf "$(bun pm cache)"/[a-z]*`,
+      "rm -rf /home/hasna/.[h]asna",
+      "rm -rf /home/hasna/.h*/repos",
+    ]) {
+      await expectBlocked(command);
+    }
+    // A bounded class deeper than any protected root stays allowed.
+    await expectAllowed("rm -rf /var/log/[0-9]*.gz");
+  });
+
+  test("a sibling subshell does not inherit the previous subshell's cd", async () => {
+    // Regression from the per-depth frame stack: two siblings are both depth 1, so the second
+    // inherited the first's `cd`. bash discards it, so the guard was aimed at an
+    // attacker-chosen directory while the delete hit the real cwd.
+    const repo = mkdtempSync(join(tmpdir(), "hooks-sibling-"));
+    const elsewhere = mkdtempSync(join(tmpdir(), "hooks-elsewhere-"));
+    try {
+      mkdirSync(join(repo, "src"), { recursive: true });
+      Bun.spawnSync(["git", "init", "-q", repo]);
+      for (const command of [
+        `(cd ${elsewhere}); (rm -rf *)`,
+        `(cd ${elsewhere}) && (rm -rf *)`,
+        `(cd ${elsewhere}); (cd src); (rm -rf *)`,
+        `echo hi | (cd ${elsewhere}); (rm -rf *)`,
+        `(cd ${elsewhere}); (rm -rf .)`,
+        `(cd ${elsewhere}); (git clean -xfd)`,
+        `(cd ${elsewhere}); (find . -delete)`,
+        `true; (cd ${elsewhere}); (rm -rf *)`,
+      ]) {
+        await expectBlocked(command, { cwd: repo });
+      }
+      // The same-subshell case must keep working.
+      await expectBlocked("(cd / && rm -rf *)", { cwd: repo });
+    } finally {
+      for (const dir of [repo, elsewhere]) {
+        try { rmSync(dir, { recursive: true, force: true }); } catch {}
+      }
+    }
+  });
+
+  test("a delete nested past the parameter-expansion cap is refused, not dropped", async () => {
+    // The hardcoded depth-4 cap abandoned the scan without setting `truncated`, so the
+    // refusal path never fired and the delete was never classified at all.
+    for (const depth of [1, 4, 5, 8, 40]) {
+      await expectBlocked(`echo ${"${x:-".repeat(depth)}$(rm -rf /*)${"}".repeat(depth)}`);
+    }
+  });
+
+  test("$PWD stands for the directory the guard is already tracking", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "hooks-pwd-"));
+    try {
+      Bun.spawnSync(["git", "init", "-q", repo]);
+      for (const command of [`rm -rf "$PWD"/*`, `rm -rf "$(pwd)"/*`, "rm -rf ${PWD}/*"]) {
+        await expectBlocked(command, { cwd: repo });
+      }
+      await expectBlocked(`cd / && rm -rf "$PWD"/*`);
+    } finally {
+      try { rmSync(repo, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  test("unset withdraws a non-empty guarantee", async () => {
+    await expectBlocked(`X=/tmp; unset X; rm -rf "$X"/*`);
+    await expectBlocked(`X=/tmp; unset X; rm -rf "$X"/etc`);
+    await expectAllowed(`X=/tmp/build; rm -rf "$X"/*`);
+  });
+
+  test("segment-count padding cannot stall the hook into failing open", async () => {
+    // The per-segment assignment scan re-split the whole command on every chunk - O(n²).
+    // 36 KB of `:; ` padding took 25.6s against a 20s timeout, and a timed-out hook fails
+    // open, so padding alone unguarded the delete. Varies SEGMENT COUNT, which the earlier
+    // "deeply nested expansion" test never did.
+    const command = `${":; ".repeat(12000)}rm -rf /*`;
+    const started = performance.now();
+    const result = await classify(command);
+    expect(result.block).toBe(true);
+    expect(performance.now() - started).toBeLessThan(3000);
+  });
+
   test("a quoted paren inside a substitution does not disable the collapse rule", async () => {
     // The unterminated-substitution fallback turned an ordinary awk field separator into a
     // bypass, because the quoted "(" was counted as structure.

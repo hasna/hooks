@@ -142,10 +142,11 @@ export interface GitCommandInfo {
 function splitShellSegmentsPass(
   command: string,
   atomicSubstitutions: boolean
-): { segments: string[]; isolation: boolean[]; depths: number[]; piped: boolean[]; unterminated: boolean } {
+): { segments: string[]; isolation: boolean[]; depths: number[]; groups: number[]; piped: boolean[]; unterminated: boolean } {
   const segments: string[] = [];
   const isolation: boolean[] = [];
   const depths: number[] = [];
+  const groups: number[] = [];
   const pipedFlags: boolean[] = [];
   let current = "";
   let quote: "'" | '"' | null = null;
@@ -155,6 +156,10 @@ function splitShellSegmentsPass(
   let inBacktick = false;
   let parenDepth = 0;
   let pipedFromPrevious = false;
+  // Every `(` opens a NEW shell. Two siblings are both depth 1 but are different processes,
+  // so depth alone cannot identify a frame.
+  let groupCounter = 0;
+  const groupStack: number[] = [0];
 
   const flush = (nextSeparator: string | null) => {
     if (current.trim()) {
@@ -162,6 +167,7 @@ function splitShellSegmentsPass(
       // A stage of a pipeline runs in its own process, as does anything inside `( … )`.
       isolation.push(parenDepth > 0 || pipedFromPrevious || nextSeparator === "|");
       depths.push(parenDepth);
+      groups.push(groupStack[groupStack.length - 1] ?? 0);
       pipedFlags.push(pipedFromPrevious || nextSeparator === "|");
     }
     current = "";
@@ -221,8 +227,14 @@ function splitShellSegmentsPass(
       const doubled = (ch === "|" || ch === "&") && command[i + 1] === ch;
       // `||` and `&&` are sequencing, not a pipe.
       flush(ch === "|" && !doubled ? "|" : null);
-      if (ch === "(") parenDepth += 1;
-      else if (ch === ")") parenDepth = Math.max(0, parenDepth - 1);
+      if (ch === "(") {
+        parenDepth += 1;
+        groupCounter += 1;
+        groupStack.push(groupCounter);
+      } else if (ch === ")") {
+        parenDepth = Math.max(0, parenDepth - 1);
+        if (groupStack.length > 1) groupStack.pop();
+      }
       if (doubled) i += 1;
       continue;
     }
@@ -230,7 +242,7 @@ function splitShellSegmentsPass(
   }
 
   flush(null);
-  return { segments, isolation, depths, piped: pipedFlags, unterminated: substitutionDepth > 0 || inBacktick };
+  return { segments, isolation, depths, groups, piped: pipedFlags, unterminated: substitutionDepth > 0 || inBacktick };
 }
 
 function splitShellSegments(command: string): string[] {
@@ -242,6 +254,8 @@ interface ShellSegment {
   text: string;
   /** Subshell nesting depth of this segment; a `cd` applies to this depth and deeper. */
   depth: number;
+  /** Identity of the subshell this segment runs in; siblings at one depth differ. */
+  group: number;
   /** This segment is a pipeline stage, so its `cd` affects nothing outside the stage. */
   piped: boolean;
   /**
@@ -252,12 +266,28 @@ interface ShellSegment {
   isolated: boolean;
 }
 
+const segmentCache = new Map<string, ShellSegment[]>();
+const MAX_SEGMENT_CACHE = 16;
+
 function splitShellSegmentsDetailed(command: string): ShellSegment[] {
+  const cached = segmentCache.get(command);
+  if (cached) return cached;
+  const computed = splitShellSegmentsUncached(command);
+  if (segmentCache.size >= MAX_SEGMENT_CACHE) {
+    const oldest = segmentCache.keys().next().value;
+    if (oldest !== undefined) segmentCache.delete(oldest);
+  }
+  segmentCache.set(command, computed);
+  return computed;
+}
+
+function splitShellSegmentsUncached(command: string): ShellSegment[] {
   const pass = splitShellSegmentsPass(command, true);
   const chosen = pass.unterminated ? splitShellSegmentsPass(command, false) : pass;
   return chosen.segments.map((text, index) => ({
     text,
     depth: chosen.depths[index] ?? 0,
+    group: chosen.groups[index] ?? 0,
     piped: chosen.piped[index] ?? false,
     isolated: chosen.isolation[index] ?? false,
   }));
@@ -669,13 +699,43 @@ function mutatesProtectedPath(targetPath: string, rule: ProtectedPathRule): bool
 // A trailing glob that matches every entry, so `dir/*` destroys all of `dir`.
 const CATCH_ALL_GLOB = /^(?:\*|\*\*|\.\*|\.\[!\.\]\*)$/;
 
+/**
+ * Compile one glob path component to a regular expression.
+ *
+ * Bracket classes must be COMPILED, not escaped. Escaping them made `[e]tc` compile to the
+ * literal `\[e\]tc`, which can never equal a real directory name - so `rm -rf /[e]tc`, which
+ * bash expands to `/etc`, matched no protected root and was allowed. That one character
+ * defeated every rule, every tool and every wrapper, including the realized incident shape
+ * `rm -rf "$(bun pm cache)"/[a-z]*`.
+ */
 function globComponentToRegExp(component: string): RegExp {
   let source = "";
   for (let i = 0; i < component.length; i += 1) {
     const ch = component[i];
-    if (ch === "*") source += "[^/]*";
-    else if (ch === "?") source += "[^/]";
-    else source += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+
+    if (ch === "*") { source += "[^/]*"; continue; }
+    if (ch === "?") { source += "[^/]"; continue; }
+
+    if (ch === "[") {
+      // A `]` immediately after `[`, `[!` or `[^` is a literal member, not the terminator.
+      let end = i + 1;
+      if (component[end] === "!" || component[end] === "^") end += 1;
+      if (component[end] === "]") end += 1;
+      while (end < component.length && component[end] !== "]") end += 1;
+      if (end >= component.length) {
+        // Unterminated class: bash treats the `[` literally.
+        source += "\\[";
+        continue;
+      }
+      const body = component.slice(i + 1, end);
+      const negated = body.startsWith("!") || body.startsWith("^");
+      const members = (negated ? body.slice(1) : body).replace(/\\/g, "\\\\");
+      source += `[${negated ? "^" : ""}${members}]`;
+      i = end;
+      continue;
+    }
+
+    source += ch.replace(/[.+^${}()|\]\\]/g, "\\$&");
   }
   return new RegExp(`^${source}$`);
 }
@@ -728,11 +788,24 @@ function globThreatensRule(targetPath: string, rule: ProtectedPathRule): boolean
   const parts = resolve(targetPath).split(sep);
   const rootParts = resolve(rule.root).split(sep);
 
-  if (rule.mode === "tree" && isInsidePath(literalPrefixOf(parts), rule.root)) return true;
+  if (rule.mode === "tree") {
+    if (isInsidePath(literalPrefixOf(parts), rule.root)) return true;
+    // A pattern deeper than the root can still land inside it: `~/.h*/repos` matches
+    // ~/.hasna/repos. literalPrefixOf stops before the first glob, so it misses this.
+    if (parts.length > rootParts.length && globPatternCovers(parts.slice(0, rootParts.length), rootParts)) {
+      return true;
+    }
+  }
   if (globPatternCovers(parts, rootParts)) return true;
 
   const last = parts[parts.length - 1];
   if (CATCH_ALL_GLOB.test(last) && globPatternCovers(parts.slice(0, -1), rootParts)) return true;
+
+  // A glob in the last component sweeps the contents of its own parent. When that parent IS
+  // the protected root, the sweep guts the root even though the glob is bounded:
+  // `rm -rf [a-z]*` at a repo root deletes almost all of it. d8c0e8a blocked this via the
+  // narrow-glob check; the precise-component rewrite dropped it.
+  if (/[*?[]/.test(last) && mutatesProtectedPath(parts.slice(0, -1).join(sep) || sep, rule)) return true;
 
   // A catch-all in the FIRST component sweeps every top-level directory: `/*/bin` deletes
   // /usr/bin, /var/bin and the rest, and a trailing literal makes the pattern deeper than any
@@ -1035,45 +1108,66 @@ export function emptyExpansionCollapse(
 }
 
 /**
- * Variables that are provably non-empty at the point `segmentIndex` runs.
+ * One set per segment: the variables provably non-empty at the moment that segment runs.
  *
- * Every relaxation here is a way to get a delete past the guard, so each condition is a
- * guarantee rather than a heuristic. Recomputed per segment because the naive version - one
- * set for the whole command - was defeated six different ways:
+ * Built in a SINGLE forward pass. The previous version recomputed the whole segmentation and
+ * rescanned every preceding segment on each call, and was called once per chunk - O(segments²).
+ * 36 KB of `:; ` padding took 25.6s against this hook's 20s timeout, and a timed-out hook fails
+ * open, so padding alone turned a blocked `rm -rf /*` into an unguarded one. That is the same
+ * fail-open the wrapper caps were written to stop, reopened along a different axis.
+ *
+ * Every relaxation here is a way past the guard, so each condition is a guarantee:
  *
  *   X=/tmp/build rm -rf "$X"/*        a PREFIX assignment applies to the command's own
  *                                     environment, not to the expansion, which bash performs
  *                                     first; `$X` is still empty
  *   rm -rf "$X"/* ; X=/tmp/build      an assignment AFTER the delete counted
- *   X=/tmp/build; X=$(cmd); rm …      a later reassignment to something collapsible did not
- *                                     invalidate the earlier literal
- *   X=/tmp/build; X=; rm …            an explicit empty reassignment did not either
- *   (X=/tmp/build); rm …              a subshell-scoped assignment escaped its subshell
- *   X=/tmp/build | cat; rm …          a pipeline-stage assignment did the same
+ *   X=/tmp/build; X=$(cmd); rm …      a later reassignment to something collapsible
+ *   X=/tmp/build; X=; rm …            an explicit empty reassignment
+ *   X=/tmp/build; unset X; rm …       an unset
+ *   (X=/tmp/build); rm …              a subshell-scoped assignment escaping its subshell
+ *   X=/tmp/build | cat; rm …          a pipeline-stage assignment doing the same
  */
-function nonEmptyAssignedNames(command: string, segmentIndex: number): Set<string> {
-  const names = new Set<string>();
-  const segments = splitShellSegmentsDetailed(command);
+function assignmentTimeline(command: string): Array<ReadonlySet<string>> {
+  const timeline: Array<ReadonlySet<string>> = [];
+  let current = new Set<string>();
 
-  segments.forEach(({ text, depth, isolated }, index) => {
-    // Only assignments that already ran, in the parent shell, in their own right.
-    if (index >= segmentIndex || depth > 0 || isolated) return;
+  for (const { text, depth, isolated } of splitShellSegmentsDetailed(command)) {
+    // The set as it stands BEFORE this segment runs.
+    timeline.push(current);
+
+    // Only assignments in the parent shell, in their own right, change it.
+    if (depth > 0 || isolated) continue;
 
     const tokens = shellWords(text);
+    if (tokens.length === 0) continue;
+
+    if (tokens[0] === "unset") {
+      const next = new Set(current);
+      for (const name of tokens.slice(1)) {
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) next.delete(name);
+      }
+      current = next;
+      continue;
+    }
+
+    let next: Set<string> | null = null;
     for (const [position, token] of tokens.entries()) {
       const assignment = token.match(/^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/);
       if (!assignment) break;
       const [, name, value] = assignment;
-      const isPrefixAssignment = position < tokens.length - 1 && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[position + 1] ?? "");
-      // A later assignment always invalidates an earlier guarantee.
-      names.delete(name);
-      if (name === "PWD") names.add("\u0000PWD-REASSIGNED");
+      const isPrefixAssignment = position < tokens.length - 1
+        && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[position + 1] ?? "");
+      next ??= new Set(current);
+      next.delete(name);
+      if (name === "PWD") next.add("\u0000PWD-REASSIGNED");
       if (isPrefixAssignment) continue;
-      if (value.length > 0 && !/[$`]/.test(value)) names.add(name);
+      if (value.length > 0 && !/[$`]/.test(value)) next.add(name);
     }
-  });
+    if (next) current = next;
+  }
 
-  return names;
+  return timeline;
 }
 
 function shouldSkipHasnaTreeRule(targetPath: string, rule: ProtectedPathRule, currentManagedRepoRoot: string | null): boolean {
@@ -1285,6 +1379,16 @@ interface DestructiveShellTarget {
   remote?: boolean;
   /** Working directory in effect for this target, after any `cd` earlier in the command. */
   baseCwd?: string;
+}
+
+// `$PWD`, `${PWD}`, `$(pwd)` and `` `pwd` `` all stand for the working directory the guard is
+// already tracking. They are certified non-empty, so no collapse fires - which left them as
+// opaque path components matching no protected root, and `rm -rf "$PWD"/*` was allowed where
+// the identical `rm -rf *` blocked.
+const PWD_EXPANSION = /\$\{PWD\}|\$PWD|\$\(\s*pwd\s*\)|`\s*pwd\s*`/g;
+
+function substituteWorkingDirectory(path: string, cwd: string): string {
+  return PWD_EXPANSION.test(path) ? path.replace(PWD_EXPANSION, cwd) : path;
 }
 
 function destructiveTarget(
@@ -1616,10 +1720,15 @@ function interpreterScriptFrom(tokens: string[], shellIndex: number, allowedOper
  * them whole. Without feeding the bodies back in, `echo $(rm -rf /*)` contains no `rm` token
  * at all and every rule misses it - the delete runs, its output is simply discarded.
  */
-function substitutionBodies(segment: string): string[] {
+function substitutionBodies(segment: string, onTruncated?: () => void): string[] {
   const bodies: string[] = [];
   const visit = (text: string, depth: number): void => {
-    if (depth > 4) return;
+    // Exhausting this bound must not silently drop a delete: `${x:-${x:- … $(rm -rf /*)}}`
+    // nested past the old hardcoded 4 was never classified at all.
+    if (depth > MAX_EXPANSION_NESTING) {
+      onTruncated?.();
+      return;
+    }
     for (const expansion of findExpansions(text)) {
       if (expansion.text.startsWith("$(") || expansion.text.startsWith("`")) {
         const body = (expansion.text.startsWith("`")
@@ -1666,7 +1775,7 @@ function isSshToken(token: string): boolean {
   return token === "ssh" || token.endsWith("/ssh");
 }
 
-function wrappedShellLayers(command: string, remote: boolean): ShellCommandLayer[] {
+function wrappedShellLayers(command: string, remote: boolean, onTruncated?: () => void): ShellCommandLayer[] {
   const layers: ShellCommandLayer[] = [];
   for (const segment of splitShellSegments(command)) {
     const tokens = shellWords(segment);
@@ -1694,7 +1803,7 @@ function wrappedShellLayers(command: string, remote: boolean): ShellCommandLayer
 
     // A substitution body executes wherever it appears, including in assignments and in
     // arguments to commands that do nothing with the result.
-    for (const body of substitutionBodies(segment)) {
+    for (const body of substitutionBodies(segment, onTruncated)) {
       layers.push({ command: body, remote: remote || sshSeen });
     }
   }
@@ -1713,7 +1822,7 @@ function shellCommandLayers(command: string): { layers: ShellCommandLayer[]; tru
   for (let depth = 0; depth < MAX_WRAPPER_DEPTH; depth += 1) {
     const next: ShellCommandLayer[] = [];
     for (const layer of frontier) {
-      for (const inner of wrappedShellLayers(layer.command, layer.remote)) {
+      for (const inner of wrappedShellLayers(layer.command, layer.remote, () => { truncated = true; })) {
         if (seen.has(inner.command)) continue;
         if (layers.length + next.length >= MAX_SHELL_LAYERS) {
           truncated = true;
@@ -1796,22 +1905,30 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
   // that subshell - it just does not escape to the parent - so skipping isolated `cd`
   // outright left `(cd / && rm -rf *)`, the standard "cd without moving my shell" idiom,
   // completely unguarded. Depth 0 is the parent shell.
-  let stack: Array<{ cwds: string[]; previous: string[]; explicit: boolean }> = [
-    { cwds: [baseCwd], previous: [baseCwd], explicit: false },
+  let stack: Array<{ group: number; cwds: string[]; previous: string[]; explicit: boolean }> = [
+    { group: 0, cwds: [baseCwd], previous: [baseCwd], explicit: false },
   ];
 
-  const frameFor = (depth: number) => {
-    while (stack.length <= depth) {
-      const parent = stack[stack.length - 1];
-      stack.push({ cwds: parent.cwds, previous: parent.previous, explicit: parent.explicit });
-    }
+  const frameFor = (depth: number, group: number) => {
     // Leaving a subshell discards everything it did.
     if (stack.length > depth + 1) stack = stack.slice(0, depth + 1);
+    while (stack.length <= depth) {
+      const parent = stack[stack.length - 1];
+      stack.push({ group, cwds: parent.cwds, previous: parent.previous, explicit: parent.explicit });
+    }
+    // A DIFFERENT group at the same depth is a sibling subshell - a separate process that
+    // never saw the previous one's `cd`. Reusing the frame let `(cd /elsewhere); (rm -rf *)`
+    // point the guard at an attacker-chosen directory while bash deleted the real cwd.
+    const frame = stack[depth];
+    if (frame.group !== group) {
+      const parent = stack[depth - 1] ?? stack[0];
+      stack[depth] = { group, cwds: parent.cwds, previous: parent.previous, explicit: parent.explicit };
+    }
     return stack[depth];
   };
 
-  splitShellSegmentsDetailed(command).forEach(({ text: segment, depth, piped }, segmentIndex) => {
-    const frame = frameFor(depth);
+  splitShellSegmentsDetailed(command).forEach(({ text: segment, depth, group, piped }, segmentIndex) => {
+    const frame = frameFor(depth, group);
     // A leading `{` from a brace group is not part of the command.
     const tokens = shellWords(segment).filter((token, index) => !(index === 0 && (token === "{" || token === "}")));
     const verb = tokens[0];
@@ -1881,8 +1998,10 @@ function destructiveShellTargets(command: string, cwd: string): DestructiveShell
   for (const layer of shellCommandLayers(command).layers) {
     const bindings = forLoopBindings(layer.command);
 
+    const timeline = assignmentTimeline(layer.command);
+
     for (const chunk of cwdTrackedSegments(layer.command, cwd, new Set())) {
-      const nonEmptyNames = nonEmptyAssignedNames(layer.command, chunk.segmentIndex);
+      const nonEmptyNames = timeline[chunk.segmentIndex] ?? new Set<string>();
       const raw = [
         ...rmCommandTargets(chunk.segment),
         ...rsyncDeleteTargets(chunk.segment),
@@ -1899,7 +2018,11 @@ function destructiveShellTargets(command: string, cwd: string): DestructiveShell
       });
 
       const chunkTargets = expanded.flatMap((target) =>
-        chunk.cwds.map((chunkCwd) => ({ ...target, baseCwd: chunkCwd }))
+        chunk.cwds.map((chunkCwd) => ({
+          ...target,
+          path: substituteWorkingDirectory(target.path, chunkCwd),
+          baseCwd: chunkCwd,
+        }))
       );
 
       if (!layer.remote) {
