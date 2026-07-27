@@ -726,9 +726,17 @@ function bracketExpressionEnd(pattern: string, open: number): number {
     if (ch === "\\") { i += 2; continue; }
     if (ch === "[" && (pattern[i + 1] === ":" || pattern[i + 1] === "=" || pattern[i + 1] === ".")) {
       const kind = pattern[i + 1];
-      const close = pattern.indexOf(`${kind}]`, i + 2);
-      if (close === -1) return -1;
-      i = close + 2;
+      const classClose = pattern.indexOf(`${kind}]`, i + 2);
+      const plainClose = pattern.indexOf("]", i + 2);
+      // The `:]` must come before the next plain `]`, or this is not a class and that `]`
+      // closes the bracket. Searching to end-of-component let a `:]` belonging to a LATER
+      // bracket be taken as this one's, swallowing the real terminator - so `[u[:]` absorbed
+      // the next expression and `/[u[:][[:alpha:]]r`, which bash expands to /usr, matched
+      // nothing at all. 158 commands onto live system roots were allowed by that one line.
+      if (classClose === -1 || (plainClose !== -1 && plainClose < classClose)) {
+        return plainClose;
+      }
+      i = classClose + 2;
       continue;
     }
     if (ch === "]") return i;
@@ -838,12 +846,15 @@ function globMatches(pattern: string, name: string): boolean {
  */
 function isUnanchoredGlob(pattern: string): boolean {
   if (!/[*?[]/.test(pattern)) return false;
+  // Computed once, not per bracket: a `[` with no `]` anywhere is a literal character, so a
+  // directory named `backup[2026` is anchored by its own name and is not a sweep.
+  const bracketsArePatterns = pattern.includes("]");
   let residue = "";
   for (let i = 0; i < pattern.length; i += 1) {
     const ch = pattern[i];
     if (ch === "\\" && i + 1 < pattern.length) { residue += pattern[i + 1]; i += 1; continue; }
     if (ch === "*" || ch === "?") continue;
-    if (ch === "[") {
+    if (ch === "[" && bracketsArePatterns) {
       const close = bracketExpressionEnd(pattern, i);
       // Unparseable: the rest matches anything, so nothing after it can anchor. Returning
       // here also keeps this linear - re-scanning to end-of-pattern from every `[` was
@@ -862,6 +873,10 @@ function isUnanchoredGlob(pattern: string): boolean {
 
 function globComponentMatches(pattern: string, literal: string): boolean {
   if (!/[*?[]/.test(pattern)) return pattern === literal;
+  // `[` with no `]` anywhere and no other wildcard is a literal bracket, not an expression.
+  // Without this, a directory genuinely named `backup[2026` was escalated to "wipes the
+  // repository root" - fail-closed matching has to stop where bash stops globbing.
+  if (!pattern.includes("]") && !/[*?]/.test(pattern)) return pattern === literal;
   if (CATCH_ALL_GLOB.test(pattern)) return true;
   return globMatches(pattern, literal);
 }
@@ -1054,6 +1069,12 @@ const MAX_EXPANSION_NESTING = 32;
 // non-empty while the shell had already emptied it.
 const OPAQUE_BUILTINS = new Set(["eval", "source", ".", "trap", "coproc", "exec"]);
 
+// Compound-command keywords that can precede an assignment in the same segment.
+const COMPOUND_KEYWORDS = new Set(["{", "}", "then", "do", "else", "elif", "fi", "done", "!"]);
+
+// Sentinel marking PWD as reassigned, so $PWD stops being treated as shell-maintained.
+const PWD_REASSIGNED = "\u0000PWD-REASSIGNED";
+
 // Builtins that bind a BARE name, with no `=` in sight: `read D`, `getopts o D`.
 const NAME_BINDING_BUILTINS = new Set(["read", "getopts", "mapfile", "readarray"]);
 
@@ -1143,7 +1164,7 @@ function expansionCannotBeEmpty(text: string, nonEmptyNames: ReadonlySet<string>
   // covers unset, so a set-but-empty VAR still yields "".
   // $PWD and $(pwd) are maintained by the shell, but only while nothing reassigns PWD.
   if (text === "$PWD" || text === "${PWD}" || /^\$\(\s*pwd\s*\)$/.test(text) || /^`\s*pwd\s*`$/.test(text)) {
-    return !nonEmptyNames.has("\u0000PWD-REASSIGNED");
+    return !nonEmptyNames.has(PWD_REASSIGNED);
   }
 
   // Assigned a non-empty literal earlier in this same command.
@@ -1272,7 +1293,16 @@ function assignmentTimeline(command: string): Array<ReadonlySet<string>> {
     // Only assignments in the parent shell, in their own right, change it.
     if (depth > 0 || isolated) continue;
 
-    const tokens = shellWords(text);
+    // `{ X=; }`, `then X=`, `do X=` - strip the compound-command keyword so the assignment
+    // inside is seen. cwdTrackedSegments already did this; this scan did not, so
+    // `X=/tmp/build; { X=; }; rm -rf "$X"/*` kept X certified while bash emptied it.
+    const rawTokens = shellWords(text);
+    const tokens = rawTokens.filter((token, index) => !(index === 0 && COMPOUND_KEYWORDS.has(token)));
+    // A function body runs later and elsewhere, so nothing in it can be relied on.
+    if (/^[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)/.test(text) || rawTokens[0] === "function") {
+      current = new Set();
+      continue;
+    }
     if (tokens.length === 0) continue;
 
     if (tokens[0] === "unset") {
@@ -1286,70 +1316,85 @@ function assignmentTimeline(command: string): Array<ReadonlySet<string>> {
 
     // Any construct that can rebind a name withdraws the guarantee. Scanned across ALL
     // tokens, not just the first: `IFS= read -r D` hides the builtin behind a prefix
-    // assignment, and `while read D` behind a keyword, and both kept D certified non-empty.
-    if (tokens.some((token) => OPAQUE_BUILTINS.has(token)) || /\(\(/.test(text)) {
-      current = new Set();
-      continue;
-    }
+    // assignment and `while read D` behind a keyword, and both kept D certified non-empty.
+    //
+    // Single pass, no slicing. Allocating `tokens.slice(position + 1)` per token made this
+    // O(tokens^2): 20k `export A=1 ` took 20.9s against the 20s timeout, and a timed-out hook
+    // fails open - the fourth time a bound in this file reopened that same hole.
+    //
+    // WITHDRAWAL is scanned at any position, because a rebinding can hide anywhere.
+    // CERTIFICATION is granted only from token 0, because a mention is not an execution:
+    // `# export CACHE=/tmp/x` in a comment certified CACHE as non-empty, which is the realized
+    // incident shape exactly - a documented cleanup script is the likeliest way to write it.
+    let next: Set<string> | null = null;
+    const withdraw = (name: string) => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return;
+      next ??= new Set(current);
+      next.delete(name);
+    };
 
-    {
-      let next: Set<string> | null = null;
-      const withdraw = (name: string) => {
-        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return;
-        next ??= new Set(current);
-        next.delete(name);
-      };
+    let pendingNameBinder = false;
+    let pendingValueBinder = false;
+    let valueBinderIsCommand = false;
+    let sawNameref = false;
+    let opaque = false;
+    let sawNonAssignment = false;
 
-      for (const [position, token] of tokens.entries()) {
-        if (NAME_BINDING_BUILTINS.has(token)) {
-          for (const operand of tokens.slice(position + 1)) {
-            if (!operand.startsWith("-")) withdraw(operand);
-          }
-          continue;
-        }
-        if (token === "printf") {
-          const flag = tokens.indexOf("-v", position);
-          if (flag !== -1) withdraw(tokens[flag + 1] ?? "");
-          continue;
-        }
-        if (VALUE_BINDING_BUILTINS.has(token)) {
-          // `declare -n D=E` makes D an alias for E, so D's value is E's - not the literal.
-          const nameref = tokens.slice(position + 1).some((operand) => operand === "-n");
-          for (const operand of tokens.slice(position + 1)) {
-            const assignment = operand.match(/^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/);
-            if (!assignment) continue;
-            withdraw(assignment[1]);
-            if (!nameref && assignment[2].length > 0 && !/[$`]/.test(assignment[2])) {
-              next ??= new Set(current);
-              next.add(assignment[1]);
-            }
-          }
-          continue;
-        }
-        if (token === "for" && position + 1 < tokens.length) {
-          withdraw(tokens[position + 1]);
-        }
-      }
+    for (const [position, token] of tokens.entries()) {
+      if (OPAQUE_BUILTINS.has(token)) { opaque = true; break; }
 
-      if (next) {
-        current = next;
+      if (NAME_BINDING_BUILTINS.has(token) || token === "for") {
+        pendingNameBinder = true;
+        pendingValueBinder = false;
+        sawNonAssignment = true;
         continue;
       }
-    }
+      if (VALUE_BINDING_BUILTINS.has(token)) {
+        pendingValueBinder = true;
+        pendingNameBinder = false;
+        // Only a builtin in command position can actually bind anything.
+        valueBinderIsCommand = position === 0;
+        sawNameref = false;
+        sawNonAssignment = true;
+        continue;
+      }
+      if (token === "printf") { sawNonAssignment = true; continue; }
+      if (token === "-v") { pendingNameBinder = true; continue; }
+      if (token === "-n" && pendingValueBinder) { sawNameref = true; continue; }
 
-    let next: Set<string> | null = null;
-    for (const [position, token] of tokens.entries()) {
+      if (pendingNameBinder) {
+        if (!token.startsWith("-")) withdraw(token);
+        continue;
+      }
+      if (pendingValueBinder) {
+        if (token.startsWith("-")) continue;
+        const bound = token.match(/^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/);
+        if (!bound) continue;
+        withdraw(bound[1]);
+        // `declare -n D=E` aliases D to E, so D's value is E's, not this literal.
+        if (valueBinderIsCommand && !sawNameref && bound[2].length > 0 && !/[$`]/.test(bound[2])) {
+          next ??= new Set(current);
+          next.add(bound[1]);
+        }
+        continue;
+      }
+
+      // Plain `NAME=value`, only while still in the command's assignment prefix.
       const assignment = token.match(/^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/);
-      if (!assignment) break;
+      if (!assignment) { sawNonAssignment = true; continue; }
+      if (sawNonAssignment) continue;
       const [, name, value] = assignment;
+      // A PREFIX assignment applies to the command's environment, not to this expansion.
       const isPrefixAssignment = position < tokens.length - 1
         && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[position + 1] ?? "");
       next ??= new Set(current);
       next.delete(name);
-      if (name === "PWD") next.add("\u0000PWD-REASSIGNED");
+      if (name === "PWD") next.add(PWD_REASSIGNED);
       if (isPrefixAssignment) continue;
       if (value.length > 0 && !/[$`]/.test(value)) next.add(name);
     }
+
+    if (opaque) { current = new Set(); continue; }
     if (next) current = next;
   }
 

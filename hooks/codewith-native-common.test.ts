@@ -1274,15 +1274,23 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     const repo = mkdtempSync(join(homedir(), ".hooks-flood-"));
     try {
       Bun.spawnSync(["git", "init", "-q", repo]);
+      // Timing is the point here. The verdict differs per shape and both are correct:
+      // a bracket run with NO `]` is a literal filename to bash (`printf %s "[[[["` prints
+      // `[[[[`, and an unterminated `[` is not a glob), so deleting it is an ordinary
+      // targeted delete; the flood next to a real `/*` is a root wipe and blocks.
       for (const [command, cwd] of [
         [`rm -rf /${"[".repeat(20000)} /*`, undefined],
         [`rm -rf ${"[".repeat(20000)}`, repo],
+        [`rm -rf /${"[".repeat(20000)}]`, undefined],
       ] as Array<[string, string | undefined]>) {
         const started = performance.now();
-        const result = await classify(command, cwd ? { cwd } : {});
-        expect(result.block).toBe(true);
+        await classify(command, cwd ? { cwd } : {});
         expect(performance.now() - started).toBeLessThan(3000);
       }
+      // The flood must not disarm the delete beside it.
+      expect((await classify(`rm -rf /${"[".repeat(20000)} /*`)).block).toBe(true);
+      // ...and a literal bracket filename is a targeted delete, not a sweep.
+      expect((await classify(`rm -rf ${"[".repeat(20000)}`, { cwd: repo })).block).toBe(false);
     } finally {
       try { rmSync(repo, { recursive: true, force: true }); } catch {}
     }
@@ -1344,6 +1352,107 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     }
     // `export X` with no value does NOT change X, so it must not withdraw anything.
     await expectAllowed(`X=/tmp/build; export X; rm -rf "$X"/*`);
+  });
+
+  // -------------------------------------------------------------------------------------
+  // Adversarial review round 7. The first block asserts the MATCHER directly: five of round
+  // 6's fifteen bracket assertions passed with the glob matcher entirely removed, because a
+  // bare glob under `/` is caught by the unanchored-root rule regardless. Adding one literal
+  // character after the bracket stops that rule firing - which is exactly how these shipped.
+  // -------------------------------------------------------------------------------------
+
+  test("a class terminator belonging to a later bracket is not taken as this one's", async () => {
+    // `[u[:]` searched to end-of-component for `:]` and found the one inside the FOLLOWING
+    // bracket, swallowing its own `]`. Verified in bash: /[u[:][[:alpha:]]r expands to /usr.
+    // 158 commands onto live system roots were allowed by that one unbounded search.
+    for (const command of [
+      "rm -rf /[u[:][[:alpha:]]r",
+      "rm -rf /[e[:][[:alpha:]]c",
+      "rm -rf /[h[:][[:alpha:]]me",
+      "rm -rf /[u[:][[:alpha:]]r/*",
+      "rm -rf /b[i[:][[:alpha:]]",
+      "rm -rf /[v[:][[:alpha:]]r",
+    ]) {
+      await expectBlocked(command);
+    }
+  });
+
+  test("a mention of an assignment is not an execution of it", async () => {
+    // The all-token rebinding scan also GRANTED certification at any position, so a comment
+    // naming the variable certified it as non-empty - the realized incident shape, in the
+    // likeliest form an agent writes it.
+    await expectBlocked('# export CACHE=/tmp/bun-cache\nrm -rf "$CACHE"/*');
+    await expectBlocked('echo export X=/tmp/build; rm -rf "$X"/*');
+    await expectBlocked('grep export CACHE=/tmp/x notes.txt; rm -rf "$CACHE"/*');
+    // A trailing comment in the same segment. Covered by the same command-position rule -
+    // `export` is not token 0 here either - and asserted so the shape is pinned.
+    await expectBlocked('rm -rf "$CACHE"/*  # export CACHE=/tmp/x');
+    // A real assignment in command position still certifies.
+    await expectAllowed('export X=/tmp/build; rm -rf "$X"/*');
+    await expectAllowed('X=/tmp/build; rm -rf "$X"/*');
+  });
+
+  test("an assignment inside a compound-command body withdraws the guarantee", async () => {
+    for (const rebind of [
+      "{ X=; }",
+      "f() { X=; }; f",
+      "{ unset X; }",
+      "if true; then X=; fi",
+      "while :; do X=; break; done",
+      "until false; do X=; break; done",
+    ]) {
+      await expectBlocked(`X=/tmp/build; ${rebind}; rm -rf "$X"/*`);
+    }
+    await expectBlocked('X=/tmp/build; { X=; rm -rf "$X"/*; }');
+    // Distinguishing case for the function-body rule: `f() { … }` is split on the parens, so
+    // the keyword form is the one that actually needs it.
+    await expectBlocked('X=/tmp/build; function f { X=; }; f; rm -rf "$X"/*');
+  });
+
+  test("builtin-token padding cannot stall the hook into failing open", async () => {
+    // The all-token scan allocated a slice per token: 20k `export A=1 ` took 20.9s against
+    // the 20s timeout. Fourth time a bound in this file reopened that same fail-open.
+    for (const padding of ["export A=1 ".repeat(20000), "read ".repeat(40000)]) {
+      const started = performance.now();
+      const result = await classify(`${padding}; rm -rf /*`);
+      expect(result.block).toBe(true);
+      // The single-pass implementation runs this in ~100ms. A 3s budget was loose enough
+      // that re-introducing per-token slicing still passed, so the margin is tightened to
+      // what the fix actually achieves.
+      expect(performance.now() - started).toBeLessThan(1000);
+    }
+  });
+
+  test("a literal bracket in a filename is not a sweep", async () => {
+    // Fail-closed matching must stop where bash stops globbing: `[` with no `]` is an
+    // ordinary character, and these were re-broken twice on this branch.
+    const repo = mkdtempSync(join(homedir(), ".hooks-litbracket-"));
+    try {
+      Bun.spawnSync(["git", "init", "-q", repo]);
+      await expectAllowed("rm -rf 'weird[dir'", { cwd: repo });
+      await expectAllowed("rm -rf 'backup[2026'", { cwd: repo });
+      // Distinguishing case for the matcher itself, not the anchoring scan: without the
+      // literal-bracket rule the unterminated `[` makes the component match ANYTHING, so
+      // this reads as `/etc`. bash leaves it literal - `shopt -s nullglob; a=( /etc[x )`
+      // still yields one element.
+      // The bracket must be REACHED by the matcher for this to distinguish anything:
+      // `etc[x` runs out of name before the `[`, so it is rejected on length alone.
+      // `et[c` evaluates the bracket against `c`. bash leaves it literal - verified with
+      // `shopt -s nullglob; a=( /et[c )` yielding one element.
+      await expectAllowed("rm -rf /et[c");
+      await expectAllowed("rm -rf /ho[me");
+      await expectAllowed("rm -rf /etc[x");
+    } finally {
+      try { rmSync(repo, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  test("opaque builtins and for-bindings are recognised at any token position", async () => {
+    // Both fixes were real and had ZERO coverage: every case that looked like it tested
+    // all-token scanning was satisfied by the name-binding branch or by tokens[0].
+    await expectBlocked(`X=/tmp/build; env eval 'X='; rm -rf "$X"/*`);
+    await expectBlocked(`X=/tmp/build; command source ./x.sh; rm -rf "$X"/*`);
+    await expectBlocked(`X=/tmp/build; do for X in ""; do :; done; rm -rf "$X"/*`);
   });
 
   test("a quoted paren inside a substitution does not disable the collapse rule", async () => {
