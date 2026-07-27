@@ -67,10 +67,21 @@ hooks install session-start prompt-guard pre-bash worktree-guard stop-sync knowl
 ```
 
 The scoped destructive-operation guard does not block every cleanup command. It
-blocks resolved shell/file-tool targets that threaten `~/.hasna`, configured
-workspace roots, Hasna division/scope roots, or active repo/worktree roots,
-including recursive `rm`, `rsync --delete`, destructive `find`, and destructive
-`git clean` / `git reset --hard` forms.
+blocks resolved shell/file-tool targets that threaten `/` or a system root
+(`/usr`, `/etc`, `/bin`, `/lib`, `/var`, `/boot`, `/home`, `/Users`, and the
+other FHS and macOS equivalents), `~/.hasna`, configured workspace roots, Hasna
+division/scope roots, or active repo/worktree roots, including recursive `rm`,
+`rsync --delete`, destructive `find`, and destructive `git clean` / `git reset
+--hard` forms.
+
+It also blocks by *shape*: a destructive target containing a command
+substitution or variable expansion immediately followed by `/` is checked as the
+shell would render it if that expansion returned empty, so
+`rm -rf "$(anything)"/*` and `rm -rf "$VAR"/*` are refused whatever the
+expansion is. Wrapped forms (`bash -c`, `su -c`, `eval`, `ssh host '…'`) are
+unwrapped first. See [`hooks/pre-bash/README.md`](hooks/pre-bash/README.md) for
+the full rules, the deliberate exemptions (`${VAR:?}`, bare `"$(cmd)"` with no
+trailing separator), and the recommended safe form.
 
 Apply that fragment through `open-configs` or the managed config renderer. A
 direct write path exists only for explicit local/test use:

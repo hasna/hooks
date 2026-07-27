@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`pre-bash` / `worktree-guard` destructive-shell guard no longer lets a filesystem-root wipe through.** `rm -rf /*` and `rm -rf "$(cmd)"/*` both returned `{"continue":true}` before this change; only `rm -rf /` blocked, and only incidentally, because `~/.hasna` sits under it. Two complementary rules close the class:
+  - **System roots are protected.** `/` and the FHS/macOS system directories (`/usr`, `/etc`, `/bin`, `/lib`, `/var`, `/boot`, `/home`, `/Users`, …) are now protected roots in `root` mode, so wiping a root or its contents blocks while a targeted delete beneath one (`rm -rf /usr/local/lib/my-build`) still passes. Extend per machine with `HASNA_PROTECTED_SYSTEM_ROOTS`. `/tmp` is deliberately excluded.
+  - **Expansions that can collapse to empty are blocked by shape.** Every destructive target containing a command substitution, backtick substitution or variable expansion is re-checked as the shell would render it if the expansion came back empty. `rm -rf "$(anything)"/*`, `` rm -rf `cmd`/* ``, `rm -rf "$VAR"/*` and `rm -rf "${VAR}"/*` all block regardless of what the expansion is. `${VAR:?}` is exempt — POSIX guarantees it non-empty. The bare `rm -rf "$(cmd)"` form (no trailing separator) stays allowed: it degrades to `rm -rf ""`, which rm rejects without deleting anything.
+  - A wholesale content glob (`dir/*`) is now matched against protected roots nested *under* `dir`, not just against `dir` itself. This is the asymmetry that let `rm -rf /*` through while `rm -rf /` blocked. Narrower globs (`dir/build-*`) keep their previous, weaker check.
+  - Wrapped and relocated commands are unwrapped before scanning: `bash -c`/`sh -c`/`zsh -c`, `su -c`, `runuser -c`, `eval`, and `ssh host '…'` including nested combinations. Remote layers only consider absolute targets, since a remote relative path cannot be resolved locally.
+  - `cd` is tracked within a command, so `cd / && rm -rf *` and `cd "$(cmd)"/ && rm -rf ./*` block.
+  - A `for VAR in <root-glob>` binding is followed into `rm -rf "$VAR"`.
+  - Block messages now name a safe alternative instead of only refusing.
+  - Glob targets are matched per path component, so a trailing literal bounds the delete: `rm -rf */node_modules` at a monorepo root is allowed while `rm -rf /*/*`, `rm -rf /*/bin` and `rm -rf /home/*/.hasna` are not. A glob directly under a protected root is refused only when *unanchored* — no literal text survives once wildcards are removed — so `[a-z]*`, `?*`, `.??*` and `*.*` block while `*.log`, `tmp-*`, `.turbo*` and `snapshot-[0-9]*` are allowed.
+  - Bracket expressions the matcher does not model exactly (POSIX `[:class:]`, `[=equiv=]`, `[.collate.]`, backslash escapes, unterminated) are treated as matching rather than as not-matching. An under-match leaves a protected root unmatched and allows the delete.
+  - Working-directory tracking covers `cd`, `cd -`, `pushd`, `pushd -n`, `popd` and a per-subshell directory stack; a `cd` in a subshell or pipeline stage no longer escapes it.
+  - The non-empty guarantee used by the expansion rule is withdrawn by `unset`, by `export`/`declare`/`typeset`/`readonly`/`local` assignments, by `read`/`getopts`/`mapfile`/`printf -v`, by `for NAME in`, by `declare -n` namerefs, and entirely by `eval`/`source`/`.`/`trap`/`coproc` and arithmetic assignment. `export X` with no value does not withdraw it.
+  - A glob in **any** path component counts, not only the last: `rm -rf /*/*` destroys `/usr/*`, `/etc/*` and `/home/*` and is now blocked. A bounded glob (`~/proj*/dist`, `/var/log/*.gz`) keeps its narrower check and stays allowed.
+  - Brace alternations are expanded, so `rm -rf /{bin,etc,home}` is seen as the root deletes it performs.
+  - Command-substitution **bodies** are scanned as scripts: `echo $(rm -rf /)` runs the delete and discards only its output.
+  - `cd` inside `( … )` or a pipeline stage no longer moves the guard's working directory, and `cd -` returns to the previous one.
+  - Expansion nesting has no depth limit (`$(dirname "$(dirname "$(cmd)")")`, `${A:-${B}}`), and expansions the shell cannot return empty — `$(pwd)`, `$PWD`, `${VAR:-nonempty}`, and variables assigned a non-empty literal earlier in the same command — are not treated as collapsible.
+
+  Remediates the 2026-07-24 data-destruction incident in which `rm -rf "$(bun pm cache)"/*`, sent over ssh inside `bash -c`, ran as `rm -rf /*` (`bun pm cache` exits non-zero with empty stdout when no `package.json` is found walking up from cwd), freeing ~700 GB and permanently destroying one repository's only source copy.
+
 ## [0.4.1] - 2026-07-26
 
 ### Fixed

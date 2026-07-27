@@ -134,11 +134,48 @@ export interface GitCommandInfo {
   workTree?: string;
 }
 
-function splitShellSegments(command: string): string[] {
+// `$( ... )` and backtick substitutions are one operand of the surrounding command:
+// their inner `;`, `|` and whitespace are not separators. Tokenizing them atomically is
+// what lets the expansion-collapse rule below see `$(cmd)/*` as a single target token.
+// If a substitution is left unterminated the command is malformed, so both tokenizers
+// re-run with substitution tracking disabled rather than swallow the rest of the input.
+function splitShellSegmentsPass(
+  command: string,
+  atomicSubstitutions: boolean
+): { segments: string[]; isolation: boolean[]; depths: number[]; groups: number[]; piped: boolean[]; shortCircuit: boolean[]; unterminated: boolean } {
   const segments: string[] = [];
+  const isolation: boolean[] = [];
+  const depths: number[] = [];
+  const groups: number[] = [];
+  const pipedFlags: boolean[] = [];
+  const shortCircuitFlags: boolean[] = [];
+  let precededByShortCircuit = false;
   let current = "";
   let quote: "'" | '"' | null = null;
   let escaped = false;
+  let substitutionDepth = 0;
+  let substitutionQuote: "'" | '"' | null = null;
+  let inBacktick = false;
+  let parenDepth = 0;
+  let pipedFromPrevious = false;
+  // Every `(` opens a NEW shell. Two siblings are both depth 1 but are different processes,
+  // so depth alone cannot identify a frame.
+  let groupCounter = 0;
+  const groupStack: number[] = [0];
+
+  const flush = (nextSeparator: string | null) => {
+    if (current.trim()) {
+      segments.push(current.trim());
+      // A stage of a pipeline runs in its own process, as does anything inside `( … )`.
+      isolation.push(parenDepth > 0 || pipedFromPrevious || nextSeparator === "|");
+      depths.push(parenDepth);
+      groups.push(groupStack[groupStack.length - 1] ?? 0);
+      pipedFlags.push(pipedFromPrevious || nextSeparator === "|");
+      shortCircuitFlags.push(precededByShortCircuit);
+    }
+    current = "";
+    pipedFromPrevious = nextSeparator === "|";
+  };
 
   for (let i = 0; i < command.length; i += 1) {
     const ch = command[i];
@@ -152,6 +189,33 @@ function splitShellSegments(command: string): string[] {
       current += ch;
       continue;
     }
+    if (atomicSubstitutions && substitutionDepth > 0) {
+      current += ch;
+      // Quotes inside the body are tracked so a quoted paren is not read as structure.
+      if (substitutionQuote) {
+        if (ch === substitutionQuote) substitutionQuote = null;
+      } else if (ch === "'" || ch === '"') {
+        substitutionQuote = ch;
+      } else if (ch === "(") substitutionDepth += 1;
+      else if (ch === ")") substitutionDepth -= 1;
+      continue;
+    }
+    if (atomicSubstitutions && inBacktick) {
+      current += ch;
+      if (ch === "`") inBacktick = false;
+      continue;
+    }
+    if (atomicSubstitutions && quote !== "'" && ch === "$" && command[i + 1] === "(") {
+      current += "$(";
+      substitutionDepth = 1;
+      i += 1;
+      continue;
+    }
+    if (atomicSubstitutions && quote !== "'" && ch === "`") {
+      current += ch;
+      inBacktick = true;
+      continue;
+    }
     if (quote) {
       current += ch;
       if (ch === quote) quote = null;
@@ -163,23 +227,88 @@ function splitShellSegments(command: string): string[] {
       continue;
     }
     if (ch === ";" || ch === "|" || ch === "&" || ch === "(" || ch === ")" || ch === "\n") {
-      if (current.trim()) segments.push(current.trim());
-      current = "";
-      if ((ch === "|" || ch === "&") && command[i + 1] === ch) i += 1;
+      const doubled = (ch === "|" || ch === "&") && command[i + 1] === ch;
+      // `||` and `&&` are sequencing, not a pipe.
+      flush(ch === "|" && !doubled ? "|" : null);
+      // `a && X=1` and `a || X=1` run X= only if the left side decided so.
+      precededByShortCircuit = doubled && (ch === "|" || ch === "&");
+      if (ch === "(") {
+        parenDepth += 1;
+        groupCounter += 1;
+        groupStack.push(groupCounter);
+      } else if (ch === ")") {
+        parenDepth = Math.max(0, parenDepth - 1);
+        if (groupStack.length > 1) groupStack.pop();
+      }
+      if (doubled) i += 1;
       continue;
     }
     current += ch;
   }
 
-  if (current.trim()) segments.push(current.trim());
-  return segments;
+  flush(null);
+  return { segments, isolation, depths, groups, piped: pipedFlags, shortCircuit: shortCircuitFlags, unterminated: substitutionDepth > 0 || inBacktick };
 }
 
-function shellWords(segment: string): string[] {
+function splitShellSegments(command: string): string[] {
+  return splitShellSegmentsDetailed(command).map((segment) => segment.text);
+}
+
+/** A segment plus whether a `cd` in it changes the working directory of later segments. */
+interface ShellSegment {
+  text: string;
+  /** Subshell nesting depth of this segment; a `cd` applies to this depth and deeper. */
+  depth: number;
+  /** Identity of the subshell this segment runs in; siblings at one depth differ. */
+  group: number;
+  /** This segment is a pipeline stage, so its `cd` affects nothing outside the stage. */
+  piped: boolean;
+  /** Reached only via `&&` / `||`, so whether it ran depends on the previous command. */
+  shortCircuit: boolean;
+  /**
+   * True when the segment runs in a subshell `( … )` or as a stage of a pipeline. A `cd`
+   * there affects only that child process, so treating it as persistent silently moves the
+   * guard's idea of cwd away from the directory the later `rm` actually runs in.
+   */
+  isolated: boolean;
+}
+
+const segmentCache = new Map<string, ShellSegment[]>();
+const MAX_SEGMENT_CACHE = 16;
+
+function splitShellSegmentsDetailed(command: string): ShellSegment[] {
+  const cached = segmentCache.get(command);
+  if (cached) return cached;
+  const computed = splitShellSegmentsUncached(command);
+  if (segmentCache.size >= MAX_SEGMENT_CACHE) {
+    const oldest = segmentCache.keys().next().value;
+    if (oldest !== undefined) segmentCache.delete(oldest);
+  }
+  segmentCache.set(command, computed);
+  return computed;
+}
+
+function splitShellSegmentsUncached(command: string): ShellSegment[] {
+  const pass = splitShellSegmentsPass(command, true);
+  const chosen = pass.unterminated ? splitShellSegmentsPass(command, false) : pass;
+  return chosen.segments.map((text, index) => ({
+    text,
+    depth: chosen.depths[index] ?? 0,
+    group: chosen.groups[index] ?? 0,
+    piped: chosen.piped[index] ?? false,
+    shortCircuit: chosen.shortCircuit[index] ?? false,
+    isolated: chosen.isolation[index] ?? false,
+  }));
+}
+
+function shellWordsPass(segment: string, atomicSubstitutions: boolean): { words: string[]; unterminated: boolean } {
   const words: string[] = [];
   let current = "";
   let quote: "'" | '"' | null = null;
   let escaped = false;
+  let substitutionDepth = 0;
+  let substitutionQuote: "'" | '"' | null = null;
+  let inBacktick = false;
 
   const push = () => {
     if (current.length > 0) {
@@ -191,12 +320,46 @@ function shellWords(segment: string): string[] {
   for (let i = 0; i < segment.length; i += 1) {
     const ch = segment[i];
     if (escaped) {
-      current += ch;
+      // A backslash before a glob metacharacter is part of the pattern, not shell quoting.
+      current += /[[\]*?]/.test(ch) ? `\\${ch}` : ch;
       escaped = false;
+      continue;
+    }
+    // Substitution bodies are copied verbatim - quotes, spaces AND backslashes. Consuming the
+    // escape here strips the backslash, and findExpansions then re-counts `\'` or `\(` as
+    // structure on the de-escaped text, which reopened the bug the quote fix closed.
+    if (atomicSubstitutions && substitutionDepth > 0) {
+      current += ch;
+      if (ch === "\\") {
+        current += segment[i + 1] ?? "";
+        i += 1;
+      } else if (substitutionQuote) {
+        if (ch === substitutionQuote) substitutionQuote = null;
+      } else if (ch === "'" || ch === '"') {
+        substitutionQuote = ch;
+      } else if (ch === "(") substitutionDepth += 1;
+      else if (ch === ")") substitutionDepth -= 1;
+      continue;
+    }
+    if (atomicSubstitutions && inBacktick) {
+      current += ch;
+      if (ch === "\\") { current += segment[i + 1] ?? ""; i += 1; }
+      else if (ch === "`") inBacktick = false;
       continue;
     }
     if (ch === "\\" && quote !== "'") {
       escaped = true;
+      continue;
+    }
+    if (atomicSubstitutions && quote !== "'" && ch === "$" && segment[i + 1] === "(") {
+      current += "$(";
+      substitutionDepth = 1;
+      i += 1;
+      continue;
+    }
+    if (atomicSubstitutions && quote !== "'" && ch === "`") {
+      current += ch;
+      inBacktick = true;
       continue;
     }
     if (quote) {
@@ -218,13 +381,22 @@ function shellWords(segment: string): string[] {
     current += ch;
   }
   push();
-  return words;
+  return { words, unterminated: substitutionDepth > 0 || inBacktick };
+}
+
+function shellWords(segment: string): string[] {
+  const atomic = shellWordsPass(segment, true);
+  if (!atomic.unterminated) return atomic.words;
+  return shellWordsPass(segment, false).words;
 }
 
 function expandHome(path: string): string {
+  // One home for every form. `~` used homedir() while `$HOME` and every protected root used
+  // process.env.HOME, so wherever the two differ the target and the rule were resolved against
+  // different directories and `rm -rf ~/.hasna` missed the ~/.hasna rule entirely.
   const home = process.env.HOME || homedir();
-  if (path === "~") return homedir();
-  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+  if (path === "~") return home;
+  if (path.startsWith("~/")) return join(home, path.slice(2));
   if (path === "$HOME" || path === "${HOME}") return home;
   if (path.startsWith("$HOME/")) return join(home, path.slice("$HOME/".length));
   if (path.startsWith("${HOME}/")) return join(home, path.slice("${HOME}/".length));
@@ -418,6 +590,59 @@ function activeRootsFor(input: CodewithHookInput, cwd: string): string[] {
   return uniqueResolved(candidates, cwd);
 }
 
+/**
+ * Filesystem roots a recursive delete must never target wholesale: the FHS system
+ * directories plus their macOS equivalents, and `/` itself.
+ *
+ * `/` is here because of the 2026-07-24 station02 incident: `rm -rf "$(bun pm cache)"/*`
+ * ran as `rm -rf /*` after the substitution collapsed to empty, freed ~700 GB and
+ * permanently destroyed one repository's only source copy. Every entry is matched in
+ * "root" mode, so `rm -rf /usr` and `rm -rf /usr/*` block while `rm -rf /usr/local/lib/mine`
+ * stays allowed - the guard is about wholesale wipes, not targeted deletes.
+ *
+ * `/tmp` is deliberately absent: scratch cleanup there is routine and bounded.
+ * Machine-specific additions come from HASNA_PROTECTED_SYSTEM_ROOTS (colon-separated).
+ */
+export const SYSTEM_PROTECTED_ROOTS: readonly string[] = [
+  "/",
+  "/bin",
+  "/boot",
+  "/dev",
+  "/etc",
+  "/home",
+  "/lib",
+  "/lib32",
+  "/lib64",
+  "/libx32",
+  "/opt",
+  "/proc",
+  "/root",
+  "/run",
+  "/sbin",
+  "/srv",
+  "/sys",
+  "/usr",
+  "/var",
+  "/Applications",
+  "/Library",
+  "/System",
+  "/Users",
+  "/Volumes",
+  "/private",
+];
+
+function systemProtectedRulesFor(cwd: string): ProtectedPathRule[] {
+  const roots = uniqueResolved(
+    [...SYSTEM_PROTECTED_ROOTS, ...splitPathList(process.env.HASNA_PROTECTED_SYSTEM_ROOTS)],
+    cwd
+  );
+  return roots.map((root) => ({
+    root,
+    label: root === sep ? "filesystem root /" : `system root ${root}`,
+    mode: "root" as const,
+  }));
+}
+
 function hasnaDivisionRuleFor(target: string, workspaceRoot: string): ProtectedPathRule | null {
   const rel = relative(resolve(workspaceRoot), resolve(target));
   if (!rel || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
@@ -435,6 +660,10 @@ function hasnaDivisionRuleFor(target: string, workspaceRoot: string): ProtectedP
 async function protectedPathContextFor(input: CodewithHookInput, cwd: string): Promise<ProtectedPathContext> {
   const home = process.env.HOME || homedir();
   const rules: ProtectedPathRule[] = [
+    // System roots first so a root wipe is reported as the root wipe it is, rather than as
+    // whichever Hasna path happened to sit underneath it. Overlapping paths are deduplicated
+    // below with the Hasna rule's more specific label winning.
+    ...systemProtectedRulesFor(cwd),
     { root: join(home, ".hasna"), label: "Hasna state root ~/.hasna", mode: "tree" },
   ];
   const workspaceRoots = workspaceRootsFor(input, cwd);
@@ -479,11 +708,794 @@ function mutatesProtectedPath(targetPath: string, rule: ProtectedPathRule): bool
   return target === root;
 }
 
-function broadContentWipeBase(targetPath: string): string | null {
-  const target = resolve(targetPath);
-  const last = basename(target);
-  if (!/[*?\[]/.test(last)) return null;
-  return dirname(target);
+// A trailing glob that matches every entry, so `dir/*` destroys all of `dir`.
+const CATCH_ALL_GLOB = /^(?:\*|\*\*|\.\*|\.\[!\.\]\*)$/;
+
+/**
+ * Match one glob path component against one literal name, without a regular expression.
+ *
+ * Written as a linear matcher on purpose, for two reasons that both bit this branch:
+ *
+ *  - Regex ESCAPING of `[`/`]` made `[e]tc` compile to a literal no directory can equal, so
+ *    `rm -rf /[e]tc` - which bash expands to `/etc` - matched no protected root.
+ *  - Regex COMPILATION of `*` as `[^/]*` backtracked exponentially: a ~70-character protected
+ *    root component with a dozen `*b` groups took over 45s against this hook's 20s timeout,
+ *    and a timed-out hook fails open. Two fail-opens in the same helper.
+ *
+ * A two-pointer wildcard match is O(pattern x name) worst case with no backtracking blowup,
+ * and bracket handling is explicit rather than delegated to regex syntax that does not mean
+ * the same thing. Unmatched constructs fall back to "matches", never to "does not match":
+ * an under-match is silent and fails open, which is exactly how `[e]tc` got through.
+ */
+function bracketExpressionEnd(pattern: string, open: number): number {
+  let i = open + 1;
+  if (pattern[i] === "!" || pattern[i] === "^") i += 1;
+  // A `]` in first position is a literal member, not the terminator.
+  if (pattern[i] === "]") i += 1;
+  while (i < pattern.length) {
+    const ch = pattern[i];
+    if (ch === "\\") { i += 2; continue; }
+    if (ch === "[" && (pattern[i + 1] === ":" || pattern[i + 1] === "=" || pattern[i + 1] === ".")) {
+      const kind = pattern[i + 1];
+      const classClose = pattern.indexOf(`${kind}]`, i + 2);
+      const plainClose = pattern.indexOf("]", i + 2);
+      // The `:]` must come before the next plain `]`, or this is not a class and that `]`
+      // closes the bracket. Searching to end-of-component let a `:]` belonging to a LATER
+      // bracket be taken as this one's, swallowing the real terminator - so `[u[:]` absorbed
+      // the next expression and `/[u[:][[:alpha:]]r`, which bash expands to /usr, matched
+      // nothing at all. 158 commands onto live system roots were allowed by that one line.
+      if (classClose === -1 || (plainClose !== -1 && plainClose < classClose)) {
+        return plainClose;
+      }
+      i = classClose + 2;
+      continue;
+    }
+    if (ch === "]") return i;
+    i += 1;
+  }
+  return -1;
+}
+
+/**
+ * Does this bracket expression match `ch`?
+ *
+ * Returns TRUE whenever the expression contains anything this matcher does not model exactly.
+ * That direction is the entire design, and it is the correction for six consecutive rounds of
+ * one defect: every bracket bug on this branch has been an UNDER-match, and an under-match
+ * means a protected root goes unmatched and the delete is allowed. `[e]tc`, `[[:lower:]]`,
+ * `[e[:]tc`, `[![:foo:]]` and `[a\]e]` each named a real path in bash while the guard held a
+ * pattern that could match nothing at all.
+ *
+ * Over-matching costs a false block on a construct almost nobody writes. Under-matching costs
+ * a filesystem. So POSIX classes, equivalence and collating classes, and backslash escapes are
+ * all treated as matching rather than as not-matching.
+ */
+function bracketMatches(pattern: string, open: number, close: number, ch: string): boolean {
+  const body = pattern.slice(open + 1, close);
+  const negated = body.startsWith("!") || body.startsWith("^");
+  const members = negated ? body.slice(1) : body;
+
+  // Anything not modelled exactly: fail closed by matching.
+  if (/\\|\[[:=.]/.test(members)) return true;
+
+  let matched = false;
+  let first = true;
+  for (let i = 0; i < members.length; i += 1) {
+    const member = members[i];
+    if (member === "]" && !first) break;
+    if (members[i + 1] === "-" && i + 2 < members.length && members[i + 2] !== "]") {
+      if (ch >= member && ch <= members[i + 2]) matched = true;
+      i += 2;
+    } else if (ch === member) {
+      matched = true;
+    }
+    first = false;
+  }
+  return negated ? !matched : matched;
+}
+
+/**
+ * Two-pointer wildcard match. Backtracking is limited to the last `*`, so it stays linear in
+ * practice - the compiled-regex version it replaced backtracked exponentially and blew past
+ * this hook's 20s timeout, which fails open.
+ *
+ * An unterminated or unparseable bracket makes the REST of the component match anything,
+ * rather than degrading `[` to a literal. The literal reading is an under-match, and
+ * `rm -rf /[e[:]tc` - which bash expands to `/etc` - slipped through on exactly that path.
+ */
+function globMatches(pattern: string, name: string): boolean {
+  let p = 0;
+  let n = 0;
+  let starPattern = -1;
+  let starName = 0;
+
+  while (n < name.length) {
+    const ch = pattern[p];
+
+    if (p < pattern.length && ch === "*") {
+      starPattern = p;
+      starName = n;
+      p += 1;
+      continue;
+    }
+    if (p < pattern.length && ch === "?") {
+      p += 1;
+      n += 1;
+      continue;
+    }
+    if (p < pattern.length && ch === "[") {
+      const close = bracketExpressionEnd(pattern, p);
+      if (close === -1) return true;
+      if (bracketMatches(pattern, p, close, name[n])) {
+        p = close + 1;
+        n += 1;
+        continue;
+      }
+    } else if (p < pattern.length) {
+      const literal = ch === "\\" && p + 1 < pattern.length ? pattern[p + 1] : ch;
+      const width = ch === "\\" && p + 1 < pattern.length ? 2 : 1;
+      if (literal === name[n]) {
+        p += width;
+        n += 1;
+        continue;
+      }
+    }
+
+    if (starPattern === -1) return false;
+    starName += 1;
+    n = starName;
+    p = starPattern + 1;
+  }
+
+  while (pattern[p] === "*") p += 1;
+  return p >= pattern.length;
+}
+
+/**
+ * Does this glob keep no literal text that anchors it, so it can match essentially any name?
+ * `[a-z]*`, `?*`, `.??*` and `*.*` are unanchored; `*.log` and `tmp-*` are anchored.
+ */
+function isUnanchoredGlob(pattern: string): boolean {
+  if (!/[*?[]/.test(pattern)) return false;
+  // Computed once, not per bracket: a `[` with no `]` anywhere is a literal character, so a
+  // directory named `backup[2026` is anchored by its own name and is not a sweep.
+  const bracketsArePatterns = pattern.includes("]");
+  let residue = "";
+  for (let i = 0; i < pattern.length; i += 1) {
+    const ch = pattern[i];
+    if (ch === "\\" && i + 1 < pattern.length) { residue += pattern[i + 1]; i += 1; continue; }
+    if (ch === "*" || ch === "?") continue;
+    if (ch === "[" && bracketsArePatterns) {
+      const close = bracketExpressionEnd(pattern, i);
+      // Unparseable: the rest matches anything, so nothing after it can anchor. Returning
+      // here also keeps this linear - re-scanning to end-of-pattern from every `[` was
+      // quadratic, and a 20k-bracket flood took 22s against the 20s timeout, failing open.
+      if (close === -1) return true;
+      i = close;
+      continue;
+    }
+    residue += ch;
+  }
+  // A leading dot does not anchor: `.??*` sweeps a directory just as `*` does. Nor does
+  // punctuation alone: `*.*` takes every dotted entry at the root.
+  return residue.replace(/^\./, "").replace(/[.\-_]/g, "").length === 0;
+}
+
+
+/** Does this component actually glob, or is it a literal that merely contains a bracket? */
+function componentIsPattern(component: string): boolean {
+  if (/[*?]/.test(component)) return true;
+  return component.includes("[") && component.includes("]");
+}
+
+export function globComponentMatches(pattern: string, literal: string): boolean {
+  if (!/[*?[]/.test(pattern)) return pattern === literal;
+  // `[` with no `]` anywhere and no other wildcard is a literal bracket, not an expression.
+  // Without this, a directory genuinely named `backup[2026` was escalated to "wipes the
+  // repository root" - fail-closed matching has to stop where bash stops globbing.
+  if (!pattern.includes("]") && !/[*?]/.test(pattern)) return pattern === literal;
+  // Fail closed on an ambiguous BOUNDARY, not just ambiguous contents.
+  //
+  // This is the defect that survived eight review rounds. Bracket CONTENTS already failed
+  // closed, but the boundary was still computed exactly - and every disagreement with bash
+  // about where a bracket ENDS misaligns the rest of the component and silently reports "no
+  // match", which allows the delete. Round 6 searched to end-of-component for the class
+  // terminator and swallowed later brackets; round 7 stopped at the first plain `]`, which is
+  // backwards (inside `[:`, a plain `]` does not terminate) and reopened the class net worse:
+  // 220 -> 380 live root-wipe escapes.
+  //
+  // Every one of those 380 contained `[:`, `[=` or `[.`. Plain brackets, ranges, negation,
+  // `*`, `?` and backslash escapes were measured clean across 44,867 dangerous patterns. So
+  // the guard stops trying to locate a boundary it cannot pin down: a component containing a
+  // POSIX class, equivalence class or collating symbol matches anything.
+  if (/\[[:=.]/.test(pattern)) return true;
+  if (CATCH_ALL_GLOB.test(pattern)) return true;
+  return globMatches(pattern, literal);
+}
+
+/**
+ * Could this glob pattern match `root` itself, or an ancestor of it?
+ *
+ * If it can, every expansion that lands there takes `root` with it. A pattern DEEPER than
+ * `root` cannot: `*​/node_modules` from a repo root deletes `<child>/node_modules`, never the
+ * repo root, which is why matching only on "the first glob's parent directory" wrongly blocked
+ * `rm -rf *​/node_modules` - a daily monorepo command, and exactly the kind of false positive
+ * that gets a guard switched off.
+ */
+function globPatternCovers(patternParts: string[], rootParts: string[]): boolean {
+  if (patternParts.length > rootParts.length) return false;
+  return patternParts.every((part, index) => globComponentMatches(part, rootParts[index]));
+}
+
+/** Components of the pattern up to, but not including, its first glob component. */
+function literalPrefixOf(parts: string[]): string {
+  const globIndex = parts.findIndex((part) => /[*?[]/.test(part));
+  return (globIndex === -1 ? parts : parts.slice(0, globIndex)).join(sep) || sep;
+}
+
+function pathHasGlob(targetPath: string): boolean {
+  return /[*?[]/.test(resolve(targetPath));
+}
+
+/**
+ * Does a glob delete threaten this rule?
+ *
+ * Two ways, and both are needed:
+ *  (a) the pattern can match the protected root or an ancestor of it - `rm -rf /*` matches
+ *      `/home`, `rm -rf /*​/*` matches `/home/hasna`;
+ *  (b) the pattern is a wholesale wipe of the root's own contents - `rm -rf /home/*`, whose
+ *      last component is a catch-all and whose prefix covers `/home`.
+ * For a tree rule, a pattern sitting inside the tree also threatens it.
+ */
+function globThreatensRule(targetPath: string, rule: ProtectedPathRule): boolean {
+  const parts = resolve(targetPath).split(sep);
+  const rootParts = resolve(rule.root).split(sep);
+
+  if (rule.mode === "tree") {
+    if (isInsidePath(literalPrefixOf(parts), rule.root)) return true;
+    // A pattern deeper than the root can still land inside it: `~/.h*/repos` matches
+    // ~/.hasna/repos. literalPrefixOf stops before the first glob, so it misses this.
+    if (parts.length > rootParts.length && globPatternCovers(parts.slice(0, rootParts.length), rootParts)) {
+      return true;
+    }
+  }
+  if (globPatternCovers(parts, rootParts)) return true;
+
+  const last = parts[parts.length - 1];
+  if (CATCH_ALL_GLOB.test(last) && globPatternCovers(parts.slice(0, -1), rootParts)) return true;
+
+  // A glob in the last component sweeps the contents of its own parent. When that parent IS
+  // the protected root AND the pattern is unanchored, the sweep guts the root: `rm -rf [a-z]*`
+  // or `?*` at a repo root take almost everything.
+  //
+  // "Unanchored" means no literal character survives once wildcards are removed. That
+  // distinction is the whole point: `*.log`, `tmp-*`, `.turbo*` and `snapshot-[0-9]*` are
+  // anchored by their literal text and cannot take the root, and blocking them - which the
+  // blunt any-metacharacter version did - re-broke twelve everyday repo-root cleanups. A
+  // guard that blocks routine work gets switched off.
+  if (isUnanchoredGlob(last) && mutatesProtectedPath(parts.slice(0, -1).join(sep) || sep, rule)) return true;
+
+  // A catch-all in the FIRST component sweeps every top-level directory: `/*/bin` deletes
+  // /usr/bin, /var/bin and the rest, and a trailing literal makes the pattern deeper than any
+  // single root, so component matching alone misses it. Scoped to the filesystem root so
+  // ordinary sweeps deeper down - `/opt/*/logs`, `/var/*/tmp`, `*/node_modules` - stay allowed.
+  // At the filesystem root, ANY glob in the first component reaches several top-level
+  // directories: `/*r*/lib` matched 11 of 25 entries on the reference machine, and `/?*/bin`
+  // and `/[a-z]*/bin` reach /usr/bin exactly as `/*/bin` does. A single literal character is
+  // not an anchor at this depth, so the sweep rule does not ask for one. The cost is refusing
+  // `rm -rf /tmp*/x`, which is rare and safe to spell out literally.
+  if (rule.root === sep && parts.length > 1 && componentIsPattern(parts[1])) return true;
+
+  return false;
+}
+
+const MAX_BRACE_EXPANSIONS = 64;
+const MAX_BRACE_ROUNDS = 16;
+
+/** Expand only the leftmost brace group of a token; null when there is none to expand. */
+function expandLeftmostBrace(token: string): string[] | null {
+  // Skip `${…}` parameter expansions when looking for an alternation: their brace is not a
+  // brace group, and treating it as one abandoned expansion for the whole token, so
+  // `rm -rf "${HOME}"/{,.hasna}` was never expanded at all.
+  let open = -1;
+  for (let i = 0; i < token.length; i += 1) {
+    if (token[i] !== "{") continue;
+    if (i > 0 && token[i - 1] === "$") {
+      let depth = 0;
+      for (; i < token.length; i += 1) {
+        if (token[i] === "{") depth += 1;
+        else if (token[i] === "}") { depth -= 1; if (depth === 0) break; }
+      }
+      continue;
+    }
+    open = i;
+    break;
+  }
+  if (open === -1) return null;
+
+  let depth = 0;
+  let close = -1;
+  const parts: string[] = [];
+  let current = "";
+  for (let i = open; i < token.length; i += 1) {
+    const ch = token[i];
+    if (ch === "\\") { current += ch + (token[i + 1] ?? ""); i += 1; continue; }
+    if (ch === "{") {
+      depth += 1;
+      if (depth === 1) continue;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) { close = i; break; }
+    } else if (ch === "," && depth === 1) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (close === -1 || parts.length === 0) return null;
+  parts.push(current);
+
+  const prefix = token.slice(0, open);
+  const suffix = token.slice(close + 1);
+  return parts.map((part) => `${prefix}${part}${suffix}`);
+}
+
+/**
+ * Expand `{a,b}` alternations, so `rm -rf /{bin,etc,home}` is seen as the three root deletes
+ * it performs rather than as one literal path.
+ *
+ * Expansion is breadth-first and abandoned the moment it exceeds the cap, because brace
+ * expansion is combinatorial: `/{a,b}` repeated 26 times is 2^26 paths. A recursive version
+ * that capped only the finished list took 19.75s on that input, past this hook's 20s timeout
+ * - and a hook that times out fails open, so a long enough brace string would have switched
+ * the guard off and then run the delete.
+ *
+ * Abandoning does NOT return the raw token. Doing that was itself a bypass:
+ * `rm -rf /{a0,…,a69,etc}` exceeded the cap and the unexpanded token resolved to a literal
+ * path matching no protected root. Instead the brace-free prefix is returned as a catch-all
+ * wipe, which is what an unbounded alternation under that prefix actually is - every
+ * expansion is necessarily a child of it.
+ */
+function braceAbandonFallback(token: string): string[] {
+  const open = token.indexOf("{");
+  const prefix = open === -1 ? token : token.slice(0, open);
+  const base = prefix.endsWith(sep) || prefix === "" ? prefix : `${prefix}${sep}`;
+  const fallback = [`${base}*`];
+  // An alternative that is itself absolute is NOT a child of the prefix: `rm -rf {/etc,a0,…}`
+  // expands to `rm -rf /etc a0 …`, so the prefix-based fallback would miss `/etc` entirely.
+  if (/[{,]\s*\//.test(token)) fallback.push(`${sep}*`);
+  return fallback;
+}
+
+function expandBraces(token: string): string[] {
+  if (!token.includes("{")) return [token];
+
+  let frontier = [token];
+  for (let round = 0; round < MAX_BRACE_ROUNDS; round += 1) {
+    const next: string[] = [];
+    let expandedAny = false;
+    for (const item of frontier) {
+      const parts = expandLeftmostBrace(item);
+      if (parts === null) {
+        next.push(item);
+        continue;
+      }
+      expandedAny = true;
+      for (const part of parts) {
+        if (next.length >= MAX_BRACE_EXPANSIONS) return braceAbandonFallback(token);
+        next.push(part);
+      }
+    }
+    if (!expandedAny) return next;
+    frontier = next;
+  }
+  return braceAbandonFallback(token);
+}
+
+// `${VAR:?}` / `${VAR:?message}` aborts the shell when VAR is unset *or* empty, so this
+// form cannot collapse. It is the POSIX way to assert a path is present, and blocking it
+// would punish exactly the defensive code this guard asks for. `${VAR?}` without the colon
+// is NOT exempt: it permits an empty value, which is the whole hazard.
+const GUARDED_EXPANSION = /^\$\{[A-Za-z_][A-Za-z0-9_]*:\?/;
+const NON_EMPTY_PLACEHOLDER = "__hooks_guarded_expansion__";
+const MAX_EXPANSION_NESTING = 32;
+
+// Builtins whose effect on a variable this scan cannot follow at all. Any of them clears
+// every guarantee, because guessing in the permissive direction is how `$X` stayed certified
+// non-empty while the shell had already emptied it.
+const OPAQUE_BUILTINS = new Set(["eval", "source", ".", "trap", "coproc", "exec"]);
+
+// Compound-command keywords that can precede an assignment in the same segment.
+const COMPOUND_KEYWORDS = new Set(["{", "}", "then", "do", "else", "elif", "fi", "done", "!"]);
+
+// Sentinel marking PWD as reassigned, so $PWD stops being treated as shell-maintained.
+const PWD_REASSIGNED = "\u0000PWD-REASSIGNED";
+
+// Builtins that bind a BARE name, with no `=` in sight: `read D`, `getopts o D`.
+const NAME_BINDING_BUILTINS = new Set(["read", "getopts", "mapfile", "readarray"]);
+
+// Builtins that take `NAME=value` operands. A BARE name here does not change the variable -
+// `export X` merely exports the existing value - so bare names must not withdraw anything.
+const VALUE_BINDING_BUILTINS = new Set(["export", "declare", "typeset", "readonly", "local", "let"]);
+
+/** One shell expansion found in a token, with its exact source span. */
+interface FoundExpansion {
+  text: string;
+  start: number;
+  end: number;
+}
+
+/**
+ * Locate shell expansions by scanning with a depth counter rather than by regex.
+ *
+ * A regex has to fix a nesting depth, and every fixed depth is a bypass:
+ * `$(dirname "$(dirname "$(bun pm cache)")")` is three deep, and `${A:-${B}}` nests braces.
+ */
+function findExpansions(token: string): FoundExpansion[] {
+  const found: FoundExpansion[] = [];
+  for (let i = 0; i < token.length; i += 1) {
+    if (token[i] === "\\") {
+      i += 1;
+      continue;
+    }
+    if (token[i] === "`") {
+      const end = token.indexOf("`", i + 1);
+      if (end === -1) break;
+      found.push({ text: token.slice(i, end + 1), start: i, end: end + 1 });
+      i = end;
+      continue;
+    }
+    if (token[i] !== "$") continue;
+
+    const next = token[i + 1];
+    if (next === "(" || next === "{") {
+      const open = next;
+      const close = open === "(" ? ")" : "}";
+      let depth = 0;
+      let quote: "'" | '"' | null = null;
+      let j = i + 1;
+      for (; j < token.length; j += 1) {
+        const ch = token[j];
+        // An escaped character is data whether or not a quote is open: `$(echo \')`.
+        if (ch === "\\") { j += 1; continue; }
+        // A paren inside quotes is data, not structure: `awk -F'(' '{print $2}'`.
+        if (quote) {
+          if (ch === quote) quote = null;
+          continue;
+        }
+        if (ch === "'" || ch === '"') { quote = ch; continue; }
+        if (ch === open) depth += 1;
+        else if (ch === close) {
+          depth -= 1;
+          if (depth === 0) break;
+        }
+      }
+      if (depth !== 0) break;
+      found.push({ text: token.slice(i, j + 1), start: i, end: j + 1 });
+      i = j;
+      continue;
+    }
+    const simple = token.slice(i).match(/^\$(?:[A-Za-z_][A-Za-z0-9_]*|[0-9@*?#$!-])/);
+    if (simple) {
+      found.push({ text: simple[0], start: i, end: i + simple[0].length });
+      i += simple[0].length - 1;
+    }
+  }
+  return found;
+}
+
+/**
+ * True when the shell cannot hand this expansion back empty.
+ *
+ * Every entry is a guarantee, not a guess. Getting this wrong in the permissive direction
+ * reopens the incident; getting it wrong in the strict direction blocks routine cleanup,
+ * which gets the guard switched off. Both failures are real, so only provable cases qualify.
+ */
+function expansionCannotBeEmpty(text: string, nonEmptyNames: ReadonlySet<string>): boolean {
+  // ${VAR:?} / ${VAR:?message} - POSIX aborts on unset or empty.
+  if (GUARDED_EXPANSION.test(text)) return true;
+
+  // ${VAR:-default} with a non-empty default. `:-` substitutes the default when VAR is unset
+  // OR empty, so the result is non-empty. Plain `${VAR-default}` does NOT qualify: it only
+  // covers unset, so a set-but-empty VAR still yields "".
+  // $PWD and $(pwd) are maintained by the shell, but only while nothing reassigns PWD.
+  if (text === "$PWD" || text === "${PWD}" || /^\$\(\s*pwd\s*\)$/.test(text) || /^`\s*pwd\s*`$/.test(text)) {
+    return !nonEmptyNames.has(PWD_REASSIGNED);
+  }
+
+  // Assigned a non-empty literal earlier in this same command.
+  const name = text.match(/^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/);
+  return name !== null && nonEmptyNames.has(name[1]);
+}
+
+/**
+ * Value an expansion is guaranteed to take when the variable is unset or empty, or null when
+ * there is no such guarantee.
+ *
+ * `${VAR:-default}` substitutes the default whenever VAR is unset OR empty, so the worst case
+ * is the default itself - and the default is used verbatim rather than assumed harmless.
+ * `${A:-/}` therefore collapses to `/` and blocks, where treating "has a default" as "is safe"
+ * let it through. Plain `${VAR-default}` does NOT qualify: it only covers unset, so a
+ * set-but-empty VAR still yields "".
+ */
+function expansionFallbackValue(
+  text: string,
+  nonEmptyNames: ReadonlySet<string>,
+  depth = 0
+): string | null {
+  const withDefault = text.match(/^\$\{[A-Za-z_][A-Za-z0-9_]*:-([\s\S]*)\}$/);
+  if (!withDefault) return null;
+  // Bounded because this recurses once per nesting level while re-scanning the remainder:
+  // `${A:-${A:- … }}` 40k deep overflowed the stack, the hook caught it and answered
+  // {"continue":true}, and the `rm -rf /*` in the same command was never classified at all.
+  // Past the cap there is no guarantee left to prove, so the value is treated as collapsible,
+  // which blocks rather than allows.
+  if (depth >= MAX_EXPANSION_NESTING) return "";
+  const fallback = withDefault[1];
+  if (fallback.length === 0) return "";
+
+  let value = "";
+  let cursor = 0;
+  for (const inner of findExpansions(fallback)) {
+    value += fallback.slice(cursor, inner.start);
+    const nested = expansionFallbackValue(inner.text, nonEmptyNames, depth + 1);
+    if (nested !== null) value += nested;
+    else if (expansionCannotBeEmpty(inner.text, nonEmptyNames)) value += NON_EMPTY_PLACEHOLDER;
+    cursor = inner.end;
+  }
+  value += fallback.slice(cursor);
+  return value;
+}
+
+/**
+ * The shape that destroyed station02 on 2026-07-24.
+ *
+ * `bun pm cache` writes its path to stdout on success, but exits 1 with an empty stdout
+ * when no package.json is found walking up from cwd. `rm -rf "$(bun pm cache)"/*` therefore
+ * became `rm -rf /*`. Redirecting stderr does not help: the redirect discards the
+ * diagnostic, not the path. The hazard is not this command - it is any expansion the shell
+ * may hand back empty, immediately followed by a path separator.
+ *
+ * Returns the token with every expansion replaced by the empty string, i.e. the worst case
+ * the shell can produce. Returns null when:
+ *  - the token contains no expansion; or
+ *  - the collapse is not absolute. A bare `rm -rf "$(cmd)"` collapses to `rm -rf ""`, which
+ *    POSIX rm rejects with "cannot remove ''" and a non-zero exit without deleting anything,
+ *    and blocking it would break routine `rm -rf "$tmpdir"` cleanup for no safety gain. A
+ *    relative collapse stays inside cwd and is already covered by the ordinary target check.
+ *    The whole catastrophic class is the one where the collapse leaves a leading `/`.
+ */
+export function emptyExpansionCollapse(
+  token: string,
+  nonEmptyNames: ReadonlySet<string> = new Set()
+): string | null {
+  if (!/[$`]/.test(token)) return null;
+  const expansions = findExpansions(token);
+  if (expansions.length === 0) return null;
+
+  let sawCollapsible = false;
+  let collapsed = "";
+  let cursor = 0;
+  for (const expansion of expansions) {
+    collapsed += token.slice(cursor, expansion.start);
+    const fallback = expansionFallbackValue(expansion.text, nonEmptyNames);
+    if (fallback !== null) {
+      // The default IS the worst case, so the resulting path still has to be checked -
+      // `${A:-/}` yields `/`, which is the whole hazard, not a reason to skip the check.
+      collapsed += fallback;
+      sawCollapsible = true;
+    } else if (expansionCannotBeEmpty(expansion.text, nonEmptyNames)) {
+      collapsed += NON_EMPTY_PLACEHOLDER;
+    } else {
+      sawCollapsible = true;
+    }
+    cursor = expansion.end;
+  }
+  collapsed += token.slice(cursor);
+
+  if (!sawCollapsible || !collapsed.startsWith("/")) return null;
+  return collapsed;
+}
+
+/**
+ * One set per segment: the variables provably non-empty at the moment that segment runs.
+ *
+ * Built in a SINGLE forward pass. The previous version recomputed the whole segmentation and
+ * rescanned every preceding segment on each call, and was called once per chunk - O(segments²).
+ * 36 KB of `:; ` padding took 25.6s against this hook's 20s timeout, and a timed-out hook fails
+ * open, so padding alone turned a blocked `rm -rf /*` into an unguarded one. That is the same
+ * fail-open the wrapper caps were written to stop, reopened along a different axis.
+ *
+ * Every relaxation here is a way past the guard, so each condition is a guarantee:
+ *
+ *   X=/tmp/build rm -rf "$X"/*        a PREFIX assignment applies to the command's own
+ *                                     environment, not to the expansion, which bash performs
+ *                                     first; `$X` is still empty
+ *   rm -rf "$X"/* ; X=/tmp/build      an assignment AFTER the delete counted
+ *   X=/tmp/build; X=$(cmd); rm …      a later reassignment to something collapsible
+ *   X=/tmp/build; X=; rm …            an explicit empty reassignment
+ *   X=/tmp/build; unset X; rm …       an unset
+ *   (X=/tmp/build); rm …              a subshell-scoped assignment escaping its subshell
+ *   X=/tmp/build | cat; rm …          a pipeline-stage assignment doing the same
+ */
+function assignmentWalker(command: string): { at: (segmentIndex: number) => ReadonlySet<string> } {
+  const segments = splitShellSegmentsDetailed(command);
+  let cursor = 0;
+  let current = new Set<string>();
+
+  // Advances a SINGLE set forward and hands it out only when a segment actually contains a
+  // delete. Materialising one snapshot per segment was O(segments x names): 30k distinct
+  // names took 24.4s against the 20s timeout, and a timed-out hook fails open. Almost every
+  // command has one delete, so almost every command now copies nothing.
+  const at = (segmentIndex: number): ReadonlySet<string> => {
+    while (cursor < segmentIndex && cursor < segments.length) {
+      applySegment(segments[cursor]);
+      cursor += 1;
+    }
+    return current;
+  };
+
+  // Depth of open `if` / `while` / `until` / `case` blocks. Everything inside one may not run.
+  let conditionalDepth = 0;
+  // Brace-group nesting, and the depth at which a `&&`/`||` right-hand side was entered.
+  let braceDepth = 0;
+  let conditionalBraceDepth = 0;
+
+  function applySegment({ text, depth, isolated, shortCircuit }: ShellSegment): void {
+
+
+    // `{ X=; }`, `then X=`, `do X=` - strip the compound-command keyword so the assignment
+    // inside is seen. cwdTrackedSegments already did this; this scan did not, so
+    // `X=/tmp/build; { X=; }; rm -rf "$X"/*` kept X certified while bash emptied it.
+    const rawTokens = shellWords(text);
+    const tokens = rawTokens.filter((token, index) => !(index === 0 && COMPOUND_KEYWORDS.has(token)));
+    // An assignment that may never execute must not CERTIFY, though it must still WITHDRAW -
+    // the branch might run. Conditionality is a property of context, so it is tracked across
+    // segments rather than read off the first token of this one. Deriving it from "a compound
+    // keyword was stripped from token 0" closed about 5% of the class: inserting one statement
+    // (`if false; then A=1; X=/tmp/build; fi`) or using `&&`/`||`/`case` restored certification,
+    // and 297 of those shapes were bash-proven `rm -rf /*`.
+    //
+    // A brace group `{ …; }` is NOT conditional - bash runs it in the current shell - so it is
+    // deliberately excluded here even though its keyword is stripped for tokenizing.
+    // `for` opens because `done` closes it - omitting it while keeping `done` a closer let any
+    // `for` loop inside a conditional zero the counter. `elif` does NOT open: `fi` closes an
+    // if/elif/else chain exactly once, so counting elif left the depth permanently above zero
+    // and nothing after the block could ever certify.
+    const OPENERS = new Set(["if", "while", "until", "case", "select", "for"]);
+    const CLOSERS = new Set(["fi", "done", "esac"]);
+    // Keywords that introduce the NEXT command rather than being one, so the real command
+    // token sits behind them: `then for f in …` opens a loop that `done` will close.
+    const INTRODUCERS = new Set(["then", "do", "else", "elif", "!", "{", "}", "("]);
+
+    // Only a keyword in COMMAND POSITION is a keyword. `echo done`, `touch fi` and a `fi`
+    // inside a heredoc body or after `#` are ordinary words, and treating them as closers
+    // decremented the counter and re-certified the branch.
+    let leadingIndex = 0;
+    while (leadingIndex < rawTokens.length && INTRODUCERS.has(rawTokens[leadingIndex])) leadingIndex += 1;
+    const leading = rawTokens[leadingIndex];
+    const introducer = rawTokens[0];
+
+    if (leading !== undefined) {
+      if (OPENERS.has(leading)) conditionalDepth += 1;
+      else if (CLOSERS.has(leading)) conditionalDepth = Math.max(0, conditionalDepth - 1);
+    }
+
+    // `&&`/`||` govern the WHOLE right-hand side, including a brace group. Marking only the
+    // first segment after the operator let `false && { A=1; X=/tmp/build; }` certify X.
+    if (introducer === "{") braceDepth += 1;
+    if (introducer === "}" || rawTokens[rawTokens.length - 1] === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      if (braceDepth < conditionalBraceDepth) conditionalBraceDepth = 0;
+    }
+    if (shortCircuit && braceDepth > 0 && conditionalBraceDepth === 0) conditionalBraceDepth = braceDepth;
+
+    // Keyword accounting happened above, deliberately BEFORE this return: `if ls /opt | grep
+    // -q node; then …; CACHE=…; fi` marks the `if` segment isolated (it is followed by `|`),
+    // so returning first swallowed the opener while its `fi` still decremented - and the
+    // assignment after it certified. That is the realized incident shape.
+    if (depth > 0 || isolated) return;
+
+    const conditional = conditionalDepth > 0
+      || shortCircuit
+      || conditionalBraceDepth > 0
+      || (leading !== undefined && OPENERS.has(leading))
+      || (introducer !== undefined && (introducer === "then" || introducer === "do" || introducer === "elif"));
+    // A function body runs later and elsewhere, so nothing in it can be relied on.
+    if (/^[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)/.test(text) || rawTokens[0] === "function") {
+      current = new Set();
+      return;
+    }
+    if (tokens.length === 0) return;
+
+    if (tokens[0] === "unset") {
+      for (const name of tokens.slice(1)) {
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) current.delete(name);
+      }
+      return;
+    }
+
+    // Any construct that can rebind a name withdraws the guarantee. Scanned across ALL
+    // tokens, not just the first: `IFS= read -r D` hides the builtin behind a prefix
+    // assignment and `while read D` behind a keyword, and both kept D certified non-empty.
+    //
+    // Single pass, no slicing. Allocating `tokens.slice(position + 1)` per token made this
+    // O(tokens^2): 20k `export A=1 ` took 20.9s against the 20s timeout, and a timed-out hook
+    // fails open - the fourth time a bound in this file reopened that same hole.
+    //
+    // WITHDRAWAL is scanned at any position, because a rebinding can hide anywhere.
+    // CERTIFICATION is granted only from token 0, because a mention is not an execution:
+    // `# export CACHE=/tmp/x` in a comment certified CACHE as non-empty, which is the realized
+    // incident shape exactly - a documented cleanup script is the likeliest way to write it.
+    const withdraw = (name: string) => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return;
+      current.delete(name);
+    };
+
+    let pendingNameBinder = false;
+    let pendingValueBinder = false;
+    let valueBinderIsCommand = false;
+    let sawNameref = false;
+    let opaque = false;
+    let sawNonAssignment = false;
+
+    for (const [position, token] of tokens.entries()) {
+      if (OPAQUE_BUILTINS.has(token)) { opaque = true; break; }
+
+      if (NAME_BINDING_BUILTINS.has(token) || token === "for") {
+        pendingNameBinder = true;
+        pendingValueBinder = false;
+        sawNonAssignment = true;
+        continue;
+      }
+      if (VALUE_BINDING_BUILTINS.has(token)) {
+        pendingValueBinder = true;
+        pendingNameBinder = false;
+        // Only a builtin in command position can actually bind anything.
+        valueBinderIsCommand = position === 0;
+        sawNameref = false;
+        sawNonAssignment = true;
+        continue;
+      }
+      if (token === "printf") { sawNonAssignment = true; continue; }
+      if (token === "-v") { pendingNameBinder = true; continue; }
+      if (token === "-n" && pendingValueBinder) { sawNameref = true; continue; }
+
+      if (pendingNameBinder) {
+        if (!token.startsWith("-")) withdraw(token);
+        continue;
+      }
+      if (pendingValueBinder) {
+        if (token.startsWith("-")) continue;
+        const bound = token.match(/^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/);
+        if (!bound) continue;
+        withdraw(bound[1]);
+        // `declare -n D=E` aliases D to E, so D's value is E's, not this literal.
+        if (!conditional && valueBinderIsCommand && !sawNameref && bound[2].length > 0 && !/[$`]/.test(bound[2])) {
+          current.add(bound[1]);
+        }
+        continue;
+      }
+
+      // Plain `NAME=value`, only while still in the command's assignment prefix.
+      const assignment = token.match(/^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/);
+      if (!assignment) { sawNonAssignment = true; continue; }
+      if (sawNonAssignment) continue;
+      const [, name, value] = assignment;
+      // A PREFIX assignment applies to the command's environment, not to this expansion.
+      const isPrefixAssignment = position < tokens.length - 1
+        && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[position + 1] ?? "");
+      current.delete(name);
+      if (name === "PWD") current.add(PWD_REASSIGNED);
+      if (isPrefixAssignment) continue;
+      if (!conditional && value.length > 0 && !/[$`]/.test(value)) current.add(name);
+    }
+
+    if (opaque) current = new Set();
+  }
+
+  return { at };
 }
 
 function shouldSkipHasnaTreeRule(targetPath: string, rule: ProtectedPathRule, currentManagedRepoRoot: string | null): boolean {
@@ -677,8 +1689,7 @@ async function verifiedManagedRepoRoot(
 
 function threatensRule(targetPath: string, rule: ProtectedPathRule, currentManagedRepoRoot: string | null): boolean {
   if (shouldSkipHasnaTreeRule(targetPath, rule, currentManagedRepoRoot)) return false;
-  const contentBase = broadContentWipeBase(targetPath);
-  if (contentBase && mutatesProtectedPath(contentBase, rule)) return true;
+  if (pathHasGlob(targetPath)) return globThreatensRule(targetPath, rule);
   return threatensProtectedPath(targetPath, rule);
 }
 
@@ -690,6 +1701,31 @@ function mutatesRule(targetPath: string, rule: ProtectedPathRule, currentManaged
 interface DestructiveShellTarget {
   path: string;
   operation: string;
+  /** Same target with every shell expansion collapsed to empty; see emptyExpansionCollapse. */
+  collapsed?: string;
+  /** Target of a command sent to another host, so relative paths cannot be resolved here. */
+  remote?: boolean;
+  /** Working directory in effect for this target, after any `cd` earlier in the command. */
+  baseCwd?: string;
+}
+
+// `$PWD`, `${PWD}`, `$(pwd)` and `` `pwd` `` all stand for the working directory the guard is
+// already tracking. They are certified non-empty, so no collapse fires - which left them as
+// opaque path components matching no protected root, and `rm -rf "$PWD"/*` was allowed where
+// the identical `rm -rf *` blocked.
+const PWD_EXPANSION = /\$\{PWD\}|\$PWD|\$\(\s*pwd\s*\)|`\s*pwd\s*`/g;
+
+function substituteWorkingDirectory(path: string, cwd: string): string {
+  return PWD_EXPANSION.test(path) ? path.replace(PWD_EXPANSION, cwd) : path;
+}
+
+function destructiveTarget(
+  path: string,
+  operation: string,
+  nonEmptyNames: ReadonlySet<string> = new Set()
+): DestructiveShellTarget {
+  const collapsed = emptyExpansionCollapse(path, nonEmptyNames);
+  return collapsed === null ? { path, operation } : { path, operation, collapsed };
 }
 
 function rmCommandTargets(command: string): DestructiveShellTarget[] {
@@ -724,7 +1760,7 @@ function rmCommandTargets(command: string): DestructiveShellTarget[] {
     }
 
     if (recursive) {
-      targets.push(...segmentTargets.map((path) => ({ path, operation: force ? "rm -rf" : "rm -r" })));
+      targets.push(...segmentTargets.map((path) => destructiveTarget(path, force ? "rm -rf" : "rm -r")));
     }
   }
   return targets;
@@ -785,7 +1821,7 @@ function rsyncDeleteTargets(command: string): DestructiveShellTarget[] {
     }
 
     if (hasDelete && operands.length > 0) {
-      targets.push({ path: operands[operands.length - 1], operation: "rsync --delete" });
+      targets.push(destructiveTarget(operands[operands.length - 1], "rsync --delete"));
     }
   }
   return targets;
@@ -823,10 +1859,10 @@ function findDestructiveTargets(command: string): DestructiveShellTarget[] {
     }
 
     if (hasDelete || hasExecRm) {
-      targets.push(...(roots.length > 0 ? roots : ["."]).map((path) => ({
+      targets.push(...(roots.length > 0 ? roots : ["."]).map((path) => destructiveTarget(
         path,
-        operation: hasDelete ? "find -delete" : "find -exec rm",
-      })));
+        hasDelete ? "find -delete" : "find -exec rm"
+      )));
     }
   }
   return targets;
@@ -953,13 +1989,477 @@ function gitDestructiveTargets(command: string, baseCwd: string): DestructiveShe
   return targets;
 }
 
-function destructiveShellTargets(command: string, cwd: string): DestructiveShellTarget[] {
+const SHELL_INTERPRETERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "busybox"]);
+
+// Also take a script via `-c`, but with a username operand in front of the flag.
+const USER_SWITCH_COMMANDS = new Set(["su", "runuser"]);
+
+// ssh options that consume the following argument, so the first bare operand really is the host.
+const SSH_OPTIONS_WITH_VALUE = new Set([
+  "-B", "-b", "-c", "-D", "-E", "-e", "-F", "-I", "-i", "-J", "-L", "-l", "-m",
+  "-O", "-o", "-P", "-p", "-Q", "-R", "-S", "-W", "-w",
+]);
+
+interface ShellCommandLayer {
+  command: string;
+  /** True once the layer is being executed on another host via ssh. */
+  remote: boolean;
+}
+
+function commandName(token: string): string {
+  return token.includes("/") ? token.slice(token.lastIndexOf("/") + 1) : token;
+}
+
+function isShellInterpreterToken(token: string): boolean {
+  return SHELL_INTERPRETERS.has(commandName(token));
+}
+
+// Shell options that consume the following word, so its value is not mistaken for the script
+// operand. Without this, `bash -o errexit -c '...'` reads `errexit` as the script file and the
+// `-c` script is never scanned.
+const SHELL_OPTIONS_WITH_VALUE = new Set(["-o", "+o", "--rcfile", "--init-file"]);
+
+/**
+ * Script passed via `-c`. For a shell, the first bare operand is the script *file* and the
+ * scan stops there; `su`/`runuser` take a username operand first, so one is skipped.
+ */
+function interpreterScriptFrom(tokens: string[], shellIndex: number, allowedOperands = 0): string | null {
+  let operands = 0;
+  for (let i = shellIndex + 1; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    // -c, and combined short forms such as -lc / -euxc.
+    if (/^-[A-Za-z]*c$/.test(token)) return tokens[i + 1] ?? null;
+    if (SHELL_OPTIONS_WITH_VALUE.has(token)) {
+      i += 1;
+      continue;
+    }
+    if (!token.startsWith("-")) {
+      operands += 1;
+      if (operands > allowedOperands) return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Bodies of `$( … )` and backtick substitutions, as scripts in their own right.
+ *
+ * Required because the tokenizer treats substitutions atomically so the collapse rule can see
+ * them whole. Without feeding the bodies back in, `echo $(rm -rf /*)` contains no `rm` token
+ * at all and every rule misses it - the delete runs, its output is simply discarded.
+ */
+function substitutionBodies(segment: string, onTruncated?: () => void): string[] {
+  const bodies: string[] = [];
+  const visit = (text: string, depth: number): void => {
+    // Exhausting this bound must not silently drop a delete: `${x:-${x:- … $(rm -rf /*)}}`
+    // nested past the old hardcoded 4 was never classified at all.
+    if (depth > MAX_EXPANSION_NESTING) {
+      onTruncated?.();
+      return;
+    }
+    for (const expansion of findExpansions(text)) {
+      if (expansion.text.startsWith("$(") || expansion.text.startsWith("`")) {
+        const body = (expansion.text.startsWith("`")
+          ? expansion.text.slice(1, -1)
+          : expansion.text.slice(2, -1)).trim();
+        if (body.length > 0) {
+          bodies.push(body);
+          visit(body, depth + 1);
+        }
+        continue;
+      }
+      // `${x:-$(rm -rf /*)}` runs the substitution when x is unset. findExpansions returns
+      // the outer ${...} and swallows the inner one, so the body has to be re-scanned.
+      if (expansion.text.startsWith("${")) visit(expansion.text.slice(2, -1), depth + 1);
+    }
+  };
+  visit(segment, 0);
+  return bodies;
+}
+
+function sshRemoteCommandFrom(tokens: string[], sshIndex: number): string | null {
+  for (let i = sshIndex + 1; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (token === "--") continue;
+    if (token.startsWith("-")) {
+      if (SSH_OPTIONS_WITH_VALUE.has(token)) i += 1;
+      continue;
+    }
+    // First bare operand is [user@]host; everything after it is the remote command.
+    const remote = tokens.slice(i + 1).join(" ").trim();
+    return remote.length > 0 ? remote : null;
+  }
+  return null;
+}
+
+/**
+ * Scripts this command hands to another interpreter or to another host.
+ *
+ * Required, not optional: the realized 2026-07-24 incident arrived as
+ * `ssh station02 bash -c '...'`, and the `rm` token only exists inside the quoted script.
+ * A scan of the outer command alone sees `ssh`, `bash` and a single opaque operand.
+ */
+function isSshToken(token: string): boolean {
+  return token === "ssh" || token.endsWith("/ssh");
+}
+
+function wrappedShellLayers(command: string, remote: boolean, onTruncated?: () => void): ShellCommandLayer[] {
+  const layers: ShellCommandLayer[] = [];
+  for (const segment of splitShellSegments(command)) {
+    const tokens = shellWords(segment);
+    // `ssh host bash -c '...'`: everything after the ssh token executes on the other machine.
+    let sshSeen = false;
+    for (let i = 0; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      if (isShellInterpreterToken(token) || USER_SWITCH_COMMANDS.has(commandName(token))) {
+        const allowedOperands = USER_SWITCH_COMMANDS.has(commandName(token)) ? 1 : 0;
+        const script = interpreterScriptFrom(tokens, i, allowedOperands);
+        if (script) layers.push({ command: script, remote: remote || sshSeen });
+        continue;
+      }
+      if (token === "eval") {
+        const script = tokens.slice(i + 1).join(" ").trim();
+        if (script) layers.push({ command: script, remote: remote || sshSeen });
+        continue;
+      }
+      if (isSshToken(token)) {
+        sshSeen = true;
+        const script = sshRemoteCommandFrom(tokens, i);
+        if (script) layers.push({ command: script, remote: true });
+      }
+    }
+
+    // A substitution body executes wherever it appears, including in assignments and in
+    // arguments to commands that do nothing with the result.
+    for (const body of substitutionBodies(segment, onTruncated)) {
+      layers.push({ command: body, remote: remote || sshSeen });
+    }
+  }
+  return layers;
+}
+
+const MAX_WRAPPER_DEPTH = 8;
+const MAX_SHELL_LAYERS = 256;
+
+function shellCommandLayers(command: string): { layers: ShellCommandLayer[]; truncated: boolean } {
+  const layers: ShellCommandLayer[] = [{ command, remote: false }];
+  const seen = new Set([command]);
+  let frontier: ShellCommandLayer[] = layers;
+  let truncated = false;
+
+  for (let depth = 0; depth < MAX_WRAPPER_DEPTH; depth += 1) {
+    const next: ShellCommandLayer[] = [];
+    for (const layer of frontier) {
+      for (const inner of wrappedShellLayers(layer.command, layer.remote, () => { truncated = true; })) {
+        if (seen.has(inner.command)) continue;
+        if (layers.length + next.length >= MAX_SHELL_LAYERS) {
+          truncated = true;
+          continue;
+        }
+        seen.add(inner.command);
+        next.push(inner);
+      }
+    }
+    if (next.length === 0) break;
+    layers.push(...next);
+    frontier = next;
+    // More wrappers remain below the depth limit.
+    if (depth === MAX_WRAPPER_DEPTH - 1 && next.some((layer) => wrappedShellLayers(layer.command, layer.remote).length > 0)) {
+      truncated = true;
+    }
+  }
+
+  return { layers, truncated };
+}
+
+// Verbs whose presence makes an unanalysable command unsafe to wave through.
+// `rm` followed ANYWHERE by a recursive flag. Anchoring it to the very next token missed
+// `rm -f -r /*`, `rm -v -f -r /*`, `rm --one-file-system -rf /*` and `rm <path> -rf`, each of
+// which sailed past the oversized-command gate unanalysed.
+const DESTRUCTIVE_VERB = /(?:^|[^\w.-])(?:[\w/.-]*\/)?(?:rm\b[^;&|\n]*?(?:\s-[A-Za-z]*[rR][A-Za-z]*(?=[\s=;&|]|$)|\s--recursive\b|\s--dir\b)|rsync\s[^;&|]*--delete|find\s[^;&|]*(?:-delete|-execdir?\s)|git\s[^;&|]*(?:clean\s+-\S*[fd]|reset\s+--hard))/;
+
+/**
+ * A command too deeply wrapped or too wide to analyse within the caps is refused when it
+ * contains a destructive verb, instead of being allowed by default.
+ *
+ * The caps exist so a pathological command cannot stall the hook past its 20s timeout - and
+ * a timed-out hook fails open. But dropping work silently turns "too complex to analyse"
+ * into "allowed", which is the same passes-silently-while-protecting-nothing failure this
+ * guard exists to prevent. Padding with 32 dummy `sh -c` wrappers pushed the real delete
+ * past the cap and it returned continue.
+ */
+function truncatedAnalysisBlockReason(command: string): string | null {
+  if (!DESTRUCTIVE_VERB.test(command)) return null;
   return [
-    ...rmCommandTargets(command),
-    ...rsyncDeleteTargets(command),
-    ...findDestructiveTargets(command),
-    ...gitDestructiveTargets(command, cwd),
+    "Blocked: this command nests more shell wrappers than the safety guard can analyse,",
+    "and it contains a recursive delete. The guard refuses rather than guess, because an",
+    "unanalysable delete is exactly the shape that destroyed a machine on 2026-07-24.",
+    "Run the delete directly instead of through nested bash -c / ssh / eval wrappers,",
+    "with a literal, non-empty target path.",
+  ].join(" ");
+}
+
+/**
+ * Remote layers run against another machine's filesystem, so a relative or cwd-derived
+ * target here would be a guess. Absolute targets (including `~` / `$HOME` forms, which the
+ * fleet shares) and empty-collapse targets (always absolute by construction) still apply.
+ */
+function keepRemoteTarget(target: DestructiveShellTarget): boolean {
+  return target.collapsed !== undefined || isAbsolute(expandHome(target.path));
+}
+
+interface CommandChunk {
+  segment: string;
+  /** Index of this segment in the layer, so assignment visibility can be ordered. */
+  segmentIndex: number;
+  /** Working directories this segment may run in: the tracked cwd, plus the cwd a `cd`
+   *  whose operand collapsed to empty would have left behind. */
+  cwds: string[];
+  /** An absolute `cd` inside this layer fixed the directory, so it is known even remotely. */
+  explicitCwd: boolean;
+}
+
+const MAX_CWD_VARIANTS = 4;
+// Linux PATH_MAX. A tracked cwd longer than this cannot correspond to a real directory.
+const MAX_TRACKED_CWD_LENGTH = 4096;
+// Beyond this many `cd`s the guard stops modelling the shell and fails closed; see below.
+const MAX_CD_OPERATIONS = 2000;
+// Far above any command a person or agent writes; below the size where tokenizing alone
+// exceeds the hook's 20s budget.
+// Measured on this file's own paths: 1 MB -> 264ms, 16 MB -> 3.5s, 64 MB -> 14.3s against a
+// 20s budget. The previous 1 MB threshold bought nothing and cost the fail-closed property.
+const MAX_ANALYSABLE_COMMAND_LENGTH = 32_000_000;
+
+/**
+ * Raised whenever the guard stops being able to model the command exactly.
+ *
+ * Every bound in this file must funnel through here. Three bounds added in one round each
+ * invented their own fallback - skip the operand, keep the last directory, add `/` to the
+ * candidate set - and all three turned into root wipes, because "I cannot model this" was
+ * quietly answered as "so carry on". A degraded analysis carrying a recursive delete is
+ * refused instead.
+ */
+interface AnalysisState {
+  degraded: boolean;
+}
+
+/**
+ * Segments of one layer paired with the working directories in effect when they run.
+ *
+ * Without this, `cd / && rm -rf *` reads as a glob over wherever the agent started, which is
+ * the cheapest possible way around a guard that only inspects the literal target. The
+ * collapsed variant covers `cd "$(cmd)"/ && rm -rf ./*`, which is the incident's shape moved
+ * one command to the left.
+ */
+function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: ReadonlySet<string>, analysis: AnalysisState): CommandChunk[] {
+  const chunks: CommandChunk[] = [];
+  const home = process.env.HOME || homedir();
+  // One entry per subshell nesting depth. A `cd` inside `( … )` DOES apply to the rest of
+  // that subshell - it just does not escape to the parent - so skipping isolated `cd`
+  // outright left `(cd / && rm -rf *)`, the standard "cd without moving my shell" idiom,
+  // completely unguarded. Depth 0 is the parent shell.
+  let cdOperations = 0;
+  let stack: Array<{ group: number; cwds: string[]; previous: string[]; dirStack: string[][]; explicit: boolean }> = [
+    { group: 0, cwds: [baseCwd], previous: [baseCwd], dirStack: [], explicit: false },
   ];
+
+  const frameFor = (depth: number, group: number) => {
+    // Leaving a subshell discards everything it did.
+    if (stack.length > depth + 1) stack = stack.slice(0, depth + 1);
+    while (stack.length <= depth) {
+      const parent = stack[stack.length - 1];
+      stack.push({ group, cwds: parent.cwds, previous: parent.previous, dirStack: [...parent.dirStack], explicit: parent.explicit });
+    }
+    // A DIFFERENT group at the same depth is a sibling subshell - a separate process that
+    // never saw the previous one's `cd`. Reusing the frame let `(cd /elsewhere); (rm -rf *)`
+    // point the guard at an attacker-chosen directory while bash deleted the real cwd.
+    const frame = stack[depth];
+    if (frame.group !== group) {
+      const parent = stack[depth - 1] ?? stack[0];
+      stack[depth] = { group, cwds: parent.cwds, previous: parent.previous, dirStack: [...parent.dirStack], explicit: parent.explicit };
+    }
+    return stack[depth];
+  };
+
+  splitShellSegmentsDetailed(command).forEach(({ text: segment, depth, group, piped, shortCircuit }, segmentIndex) => {
+    const frame = frameFor(depth, group);
+    // A leading `{` from a brace group is not part of the command.
+    const tokens = shellWords(segment).filter((token, index) => !(index === 0 && (token === "{" || token === "}")));
+    const verb = tokens[0];
+
+    // `popd` returns the shell to where `pushd` came from. It was unhandled, so the pushd
+    // target stayed as the tracked cwd for the rest of the command and
+    // `pushd /tmp; popd; rm -rf *` deleted the original directory unguarded.
+    if (verb === "popd") {
+      if (piped) return;
+      const restored = frame.dirStack.pop();
+      if (restored) {
+        frame.previous = frame.cwds;
+        frame.cwds = restored;
+        frame.explicit = restored.some((dir) => dir !== baseCwd);
+      }
+      return;
+    }
+
+    if (verb === "cd" || verb === "pushd") {
+      // A `cd` in a pipeline stage runs in its own process and moves nothing else. One
+      // reached via `&&`/`||` may not run at all: `cd /home/hasna; false && cd /tmp;
+      // rm -rf *` left the guard in /tmp while bash stayed in the home directory.
+      if (piped) return;
+      if (shortCircuit) {
+        analysis.degraded = true;
+        return;
+      }
+      // `pushd -n` records the directory WITHOUT moving the shell, so the tracked cwd must
+      // not follow it. Previously `-n` was read as the directory operand.
+      if (verb === "pushd" && tokens.includes("-n")) return;
+      // `pushd` saves the current directory before moving.
+      if (verb === "pushd") frame.dirStack.push(frame.cwds);
+      // Skip cd's own flags (-P, -L, --) to reach the directory operand.
+      let i = 1;
+      while (i < tokens.length && (tokens[i] === "-P" || tokens[i] === "-L" || tokens[i] === "-e" || tokens[i] === "-@" || tokens[i] === "--")) i += 1;
+      const operand = tokens[i];
+      const priorCwds = frame.cwds;
+      cdOperations += 1;
+      // Both cd bounds below mark the analysis degraded rather than inventing a fallback.
+      // Skipping an over-long operand allowed `cd ////…(4200); rm -rf *`, and adding `/` to
+      // the candidate set caught only sweep targets - `cd /home/hasna; cd .x2000; cd ..;
+      // rm -rf hasna` still destroyed the Hasna home.
+      // Once the budget is spent the guard can no longer model a chain of RELATIVE cds. It
+      // must not simply keep the last known directory - that was the fail-open the PATH_MAX
+      // cap produced - so `/` joins the candidate set and any relative delete is judged
+      // against the filesystem root too. `rm -rf *` then blocks; `rm -rf dist` still resolves
+      // to /dist and passes.
+      //
+      // An ABSOLUTE cd is never dropped: it is a real landing the guard can still model
+      // exactly, and skipping it lost `cd ~` after a flood, which allowed `rm -rf .hasna`.
+      if (cdOperations > MAX_CD_OPERATIONS && !isAbsolute(expandHome(operand ?? ""))) {
+        analysis.degraded = true;
+        return;
+      }
+
+      if (operand === undefined || operand === "~") {
+        frame.cwds = [home];
+        frame.explicit = true;
+      } else if (operand === "-" || operand === "$OLDPWD" || operand === "${OLDPWD}") {
+        frame.cwds = frame.previous;
+        frame.explicit = frame.previous.some((dir) => dir !== baseCwd);
+      } else {
+        const collapsed = emptyExpansionCollapse(operand, nonEmptyNames);
+        const next = new Set<string>();
+        for (const current of frame.cwds) {
+          // Only operands that can GROW the path are capped.
+          //
+          // `..` and `.` shrink or hold, and skipping them froze the model permanently: after
+          // one crossing, `cd d0 … cd d1999; cd ..x2100` left the guard on the long path while
+          // bash had walked back to `/`, so `rm -rf *` was allowed. That was a fail-open
+          // introduced by the cap itself - the seventh time a bound in this file produced one.
+          //
+          // An absolute operand replaces the path, but resolving a 4KB operand 70k times still
+          // took 24s against the 20s timeout, so its own length is capped too. No real
+          // directory exceeds PATH_MAX, which is why this is a correctness bound and not just
+          // a throttle.
+          const expanded = expandHome(operand);
+          const shrinksOnly = /^[./]+$/.test(expanded);
+          const wouldGrow = !shrinksOnly && !isAbsolute(expanded);
+          if (wouldGrow && current.length > MAX_TRACKED_CWD_LENGTH) {
+            analysis.degraded = true;
+            next.add(current);
+            continue;
+          }
+          if (expanded.length > MAX_TRACKED_CWD_LENGTH) {
+            analysis.degraded = true;
+            next.add(current);
+            continue;
+          }
+          next.add(resolveFrom(current, operand));
+          if (collapsed !== null) next.add(resolveFrom(current, collapsed));
+        }
+        frame.cwds = [...next].slice(0, MAX_CWD_VARIANTS);
+        if (isAbsolute(expandHome(operand)) || collapsed !== null) frame.explicit = true;
+      }
+      frame.previous = priorCwds;
+      return;
+    }
+
+    chunks.push({ segment, segmentIndex, cwds: frame.cwds, explicitCwd: frame.explicit });
+  });
+  return chunks;
+}
+
+/**
+ * `for d in /*; do rm -rf "$d"; done` deletes the filesystem root one entry at a time while
+ * the delete's own target is an innocuous `$d`. Only exact `$VAR` / `${VAR}` targets bound by
+ * a `for ... in` in the same layer are substituted, so this cannot fire on unrelated commands.
+ */
+function forLoopBindings(command: string): Map<string, string[]> {
+  const bindings = new Map<string, string[]>();
+  for (const segment of splitShellSegments(command)) {
+    const tokens = shellWords(segment);
+    const forIndex = tokens.indexOf("for");
+    if (forIndex === -1) continue;
+    const name = tokens[forIndex + 1];
+    if (!name || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) continue;
+    if (tokens[forIndex + 2] !== "in") continue;
+    const words = tokens.slice(forIndex + 3).filter((token) => token !== "do");
+    if (words.length > 0) bindings.set(name, words);
+  }
+  return bindings;
+}
+
+function loopBoundWords(path: string, bindings: Map<string, string[]>): string[] | null {
+  const match = path.match(/^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/);
+  if (!match) return null;
+  return bindings.get(match[1]) ?? null;
+}
+
+function destructiveShellTargets(command: string, cwd: string, analysis: AnalysisState): DestructiveShellTarget[] {
+  const targets: DestructiveShellTarget[] = [];
+  for (const layer of shellCommandLayers(command).layers) {
+    const bindings = forLoopBindings(layer.command);
+
+    const assignments = assignmentWalker(layer.command);
+
+    for (const chunk of cwdTrackedSegments(layer.command, cwd, new Set(), analysis)) {
+      const raw = [
+        ...rmCommandTargets(chunk.segment),
+        ...rsyncDeleteTargets(chunk.segment),
+        ...findDestructiveTargets(chunk.segment),
+        ...gitDestructiveTargets(chunk.segment, chunk.cwds[0]),
+      ];
+      if (raw.length === 0) continue;
+      // The walker advances one set IN PLACE - that is what removed the O(segments x names)
+      // copy, not this lookup being lazy.
+      const nonEmptyNames = assignments.at(chunk.segmentIndex);
+
+      const expanded = raw.flatMap((target) => {
+        const words = loopBoundWords(target.path, bindings);
+        const paths = words ?? expandBraces(target.path);
+        return paths.length === 1 && paths[0] === target.path && words === null
+          ? [destructiveTarget(target.path, target.operation, nonEmptyNames)]
+          : paths.map((word) => destructiveTarget(word, target.operation, nonEmptyNames));
+      });
+
+      const chunkTargets = expanded.flatMap((target) =>
+        chunk.cwds.map((chunkCwd) => ({
+          ...target,
+          path: substituteWorkingDirectory(target.path, chunkCwd),
+          baseCwd: chunkCwd,
+        }))
+      );
+
+      if (!layer.remote) {
+        targets.push(...chunkTargets);
+        continue;
+      }
+      targets.push(
+        ...chunkTargets
+          .filter((target) => chunk.explicitCwd || keepRemoteTarget(target))
+          .map((target) => ({ ...target, remote: true }))
+      );
+    }
+  }
+  return targets;
 }
 
 function isApplyPatchTool(toolName: string): boolean {
@@ -1006,11 +2506,45 @@ function extractFileToolPaths(input: CodewithHookInput): Array<{ path: string; o
   return paths;
 }
 
-function scopedBlockReason(operation: string, targetPath: string, rule: ProtectedPathRule): string {
+function scopedBlockReason(operation: string, targetPath: string, rule: ProtectedPathRule, remote?: boolean): string {
+  // A POSIX class, equivalence class or collating symbol makes the pattern's extent
+  // unpinnable, so the guard treats it as matching anything. Saying only "targets /" would be
+  // wrong and confusing when the command reads `rm -rf /var[.]log` - the operator needs to
+  // know it was refused for being unanalysable, not for naming the filesystem root.
+  const unpinnable = /\[[:=.]/.test(targetPath)
+    ? [
+      "This target contains a POSIX character class, equivalence class or collating symbol,",
+      "whose extent cannot be determined without replicating the shell exactly. It is therefore",
+      "treated as matching any name. Use a literal path, or a plain glob, if this was not intended.",
+    ]
+    : [];
   return [
-    `Blocked scoped dangerous operation: ${operation} targets ${targetPath}.`,
+    `Blocked scoped dangerous operation: ${operation} targets ${targetPath}${remote ? " on a remote host" : ""}.`,
     `Protected scope: ${rule.label} (${rule.root}).`,
+    ...unpinnable,
     "This guard is scoped; destructive commands outside protected roots are not blocked.",
+    "Delete a specific named subdirectory instead of the root or its contents.",
+  ].join(" ");
+}
+
+function collapseBlockReason(
+  operation: string,
+  rawTarget: string,
+  collapsedTarget: string,
+  rule: ProtectedPathRule,
+  remote?: boolean
+): string {
+  return [
+    `Blocked unsafe expansion in a destructive command: ${operation} target ${rawTarget}`,
+    `collapses to ${collapsedTarget}${remote ? " on a remote host" : ""} when the expansion returns empty`,
+    "(a command substitution that fails or prints nothing, or an unset variable),",
+    `which would destroy ${rule.label} (${rule.root}).`,
+    "This is the 2026-07-24 station02 failure: `bun pm cache` exits non-zero with empty stdout when no",
+    "package.json is found walking up from cwd, so `rm -rf \"$(bun pm cache)\"/*` ran as `rm -rf /*`.",
+    "Redirecting stderr does not help - it discards the diagnostic, not the path.",
+    "Safe alternative: resolve the path first, verify it is non-empty and not a protected root, then delete it,",
+    'e.g. `dir="$(bun pm cache)" || exit 1; case "$dir" in /|"") exit 1;; esac; rm -rf -- "$dir"`.',
+    "This guard blocks the shape, not the command: any expansion immediately followed by `/` can collapse to the filesystem root.",
   ].join(" ");
 }
 
@@ -1020,11 +2554,37 @@ export async function classifyDangerousOperation(input: CodewithHookInput): Prom
   const { rules, workspaceRoots, currentManagedRepoRoot } = await protectedPathContextFor(input, cwd);
 
   if (input.tool_name === "Bash") {
-    for (const target of destructiveShellTargets(getCommand(input), cwd)) {
-      const targetPath = resolveFrom(cwd, target.path);
-      const extraRule = workspaceRoots.map((root) => hasnaDivisionRuleFor(targetPath, root)).find((rule): rule is ProtectedPathRule => Boolean(rule));
-      const allRules = extraRule ? [...rules, extraRule] : rules;
-      for (const rule of allRules) {
+    const command = getCommand(input);
+    const analysis: AnalysisState = { degraded: false };
+
+    // A command large enough that merely tokenizing it blows the hook's 20s budget cannot be
+    // analysed at all, and a timed-out hook fails open. 70k repetitions of `cd /<4KB>` is a
+    // 280 MB string: no per-rule bound helps, because the cost is reading the input. Refuse it
+    // when it carries a recursive delete, rather than letting the timeout decide.
+    if (command.length > MAX_ANALYSABLE_COMMAND_LENGTH) {
+      // Decided here either way. Falling through to the full scan for a command with no
+      // delete in it still spent 46s tokenizing, which stalls every Bash call behind the
+      // hook's timeout for no benefit.
+      const reason = truncatedAnalysisBlockReason(command);
+      return reason ? { block: true, operation: "oversized command", reason } : { block: false };
+    }
+
+    if (shellCommandLayers(command).truncated) {
+      const reason = truncatedAnalysisBlockReason(command);
+      if (reason) {
+        return { block: true, operation: "unanalysable nested command", reason };
+      }
+    }
+
+    for (const target of destructiveShellTargets(command, cwd, analysis)) {
+      const targetCwd = target.baseCwd ?? cwd;
+      const targetPath = resolveFrom(targetCwd, target.path);
+      const rulesFor = (path: string) => {
+        const extraRule = workspaceRoots.map((root) => hasnaDivisionRuleFor(path, root)).find((rule): rule is ProtectedPathRule => Boolean(rule));
+        return extraRule ? [...rules, extraRule] : rules;
+      };
+
+      for (const rule of rulesFor(targetPath)) {
         if (threatensRule(targetPath, rule, currentManagedRepoRoot)) {
           return {
             block: true,
@@ -1032,9 +2592,37 @@ export async function classifyDangerousOperation(input: CodewithHookInput): Prom
             protectedPath: rule.root,
             protectedLabel: rule.label,
             operation: target.operation,
-            reason: scopedBlockReason(target.operation, targetPath, rule),
+            reason: scopedBlockReason(target.operation, targetPath, rule, target.remote),
           };
         }
+      }
+
+      // Second pass over the same target as the shell would produce it if every expansion
+      // came back empty. The managed-worktree escape hatch is not applied here: an empty
+      // collapse leaves the worktree entirely, so it can never be the intended target.
+      if (target.collapsed === undefined) continue;
+      const collapsedPath = resolveFrom(targetCwd, target.collapsed);
+      for (const rule of rulesFor(collapsedPath)) {
+        if (threatensRule(collapsedPath, rule, null)) {
+          return {
+            block: true,
+            targetPath: collapsedPath,
+            protectedPath: rule.root,
+            protectedLabel: rule.label,
+            operation: target.operation,
+            reason: collapseBlockReason(target.operation, target.path, collapsedPath, rule, target.remote),
+          };
+        }
+      }
+    }
+
+    // Raised during the scan above by any bound that stopped modelling the command
+    // exactly. Checked here rather than at each bound so there is ONE fail-closed answer:
+    // three bounds that each invented their own fallback all became root wipes.
+    if (analysis.degraded) {
+      const reason = truncatedAnalysisBlockReason(command);
+      if (reason) {
+        return { block: true, operation: "unanalysable command", reason };
       }
     }
   }
@@ -1126,7 +2714,9 @@ export function isTopLevelSession(input: CodewithHookInput): boolean {
 }
 
 export function defaultWorktreesRoot(): string {
-  return process.env.HASNA_REPOS_WORKTREES_ROOT || join(homedir(), ".hasna", "repos", "worktrees");
+  // Same home for every resolution in this file; see expandHome.
+  return process.env.HASNA_REPOS_WORKTREES_ROOT
+    || join(process.env.HOME || homedir(), ".hasna", "repos", "worktrees");
 }
 
 export function isInsidePath(child: string, parent: string): boolean {
