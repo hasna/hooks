@@ -206,8 +206,10 @@ export {
   parseStorageTables,
   resolveTables,
   runStorageMigrations,
+  storageExportRows,
+  storageImportRows,
   storagePull,
   storagePush,
   storageSync,
 } from "./storage.js";
-export type { StorageEnv, StorageMode, StorageStatus, SyncMeta, SyncResult } from "./storage.js";
+export type { StorageEnv, StorageMode, StorageRow, StorageRowsPayload, StorageStatus, SyncMeta, SyncResult } from "./storage.js";

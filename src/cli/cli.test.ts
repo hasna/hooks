@@ -1,10 +1,13 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { join } from "path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "fs";
+import { dirname, join } from "path";
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from "fs";
 import { homedir, tmpdir } from "os";
+import { Database } from "bun:sqlite";
+import { CREATE_HOOK_EVENTS_TABLE } from "../db/schema.js";
 
 const CLI = join(import.meta.dir, "index.tsx");
 const SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
+let nextTestPortValue = 24000 + (process.pid % 20000);
 
 let settingsBackup: string | null = null;
 
@@ -25,11 +28,32 @@ function restoreSettings(): void {
   settingsBackup = null;
 }
 
-async function run(...args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+function cliEnv(overrides: Record<string, string | undefined> = {}): Record<string, string> {
+  const env: Record<string, string> = {
+    ...process.env,
+    NO_COLOR: "1",
+    TMPDIR: process.env.TMPDIR ?? "/tmp",
+    TEMP: process.env.TEMP ?? "/tmp",
+    TMP: process.env.TMP ?? "/tmp",
+    BUN_INSTALL_CACHE_DIR: process.env.BUN_INSTALL_CACHE_DIR ?? "/tmp/bun-cache",
+  };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  return env;
+}
+
+async function runWithEnv(
+  args: string[],
+  env: Record<string, string | undefined> = {},
+  cwd?: string,
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = Bun.spawn(["bun", "run", CLI, ...args], {
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, NO_COLOR: "1" },
+    env: cliEnv(env),
+    cwd,
   });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -39,10 +63,89 @@ async function run(...args: string[]): Promise<{ stdout: string; stderr: string;
   return { stdout, stderr, exitCode };
 }
 
+async function run(...args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return runWithEnv(args);
+}
+
 async function runJson(...args: string[]): Promise<any> {
   const { stdout } = await run(...args, "--json");
   return JSON.parse(stdout.trim());
 }
+
+async function runJsonWithEnv(args: string[], env: Record<string, string | undefined> = {}): Promise<any> {
+  const { stdout } = await runWithEnv([...args, "--json"], env);
+  return JSON.parse(stdout.trim());
+}
+
+function seedHookEvent(dbPath: string, row: Partial<Record<string, string | number | null>> = {}): void {
+  const db = new Database(dbPath);
+  try {
+    db.exec(CREATE_HOOK_EVENTS_TABLE);
+    db.run(
+      `INSERT INTO hook_events
+        (id, timestamp, session_id, hook_name, event_type, tool_name, tool_input, result, error, duration_ms, project_dir, metadata)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        row.id ?? "evt_fixture_1",
+        row.timestamp ?? "2026-07-28T00:00:00.000Z",
+        row.session_id ?? "session-fixture",
+        row.hook_name ?? "gitguard",
+        row.event_type ?? "PreToolUse",
+        row.tool_name ?? "Bash",
+        row.tool_input ?? "git status",
+        row.result ?? "continue",
+        row.error ?? null,
+        row.duration_ms ?? 12,
+        row.project_dir ?? "/tmp/project",
+        row.metadata ?? null,
+      ],
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function nextTestPort(): number {
+  nextTestPortValue += 1;
+  return nextTestPortValue;
+}
+
+function isAddressInUse(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  return String((error as { code?: unknown }).code) === "EADDRINUSE";
+}
+
+function serveOnAvailablePort(
+  fetch: (request: Request) => Response | Promise<Response>,
+  attempts = 100,
+): ReturnType<typeof Bun.serve> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return Bun.serve({
+        hostname: "127.0.0.1",
+        port: nextTestPort(),
+        fetch,
+      });
+    } catch (error) {
+      if (!isAddressInUse(error)) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+function loopbackListenersAvailable(): boolean {
+  try {
+    const server = serveOnAvailablePort(() => new Response("ok"), 5);
+    server.stop(true);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const listenerTest = loopbackListenersAvailable() ? test : test.skip;
 
 describe("CLI", () => {
   describe("hooks --version", () => {
@@ -586,6 +689,211 @@ describe("CLI", () => {
       expect(stdout).toContain("--stdio");
       expect(stdout).toContain("--port");
       expect(stdout).toContain("MCP server");
+    });
+  });
+
+  describe("hooks log api parity", () => {
+    test("local log list reads the configured SQLite database", async () => {
+      const root = mkdtempSync(join(tmpdir(), "hooks-log-local-"));
+      try {
+        const dbPath = join(root, "hooks.db");
+        seedHookEvent(dbPath, { id: "evt_local", hook_name: "gitguard", tool_input: "git status" });
+
+        const data = await runJsonWithEnv(["log", "list"], {
+          HOME: root,
+          HASNA_HOOKS_DB_PATH: dbPath,
+          HASNA_HOOKS_STORAGE_MODE: "local",
+          HOOKS_STORAGE_MODE: undefined,
+          HASNA_HOOKS_API_URL: undefined,
+          HASNA_HOOKS_API_KEY: undefined,
+        });
+
+        expect(data).toHaveLength(1);
+        expect(data[0]).toMatchObject({ id: "evt_local", hook_name: "gitguard" });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    listenerTest("api log list uses HTTP and never opens the local database", async () => {
+      const requests: Array<{ path: string; authorization: string | null }> = [];
+      const server = serveOnAvailablePort(
+        (request) => {
+          const url = new URL(request.url);
+          requests.push({ path: url.pathname, authorization: request.headers.get("authorization") });
+          if (url.pathname === "/v1/log/events") {
+            return Response.json({
+              events: [{
+                id: "evt_api",
+                timestamp: "2026-07-28T00:00:00.000Z",
+                session_id: "session-api",
+                hook_name: "gitguard",
+                event_type: "PreToolUse",
+                tool_name: "Bash",
+                tool_input: "git status",
+                result: "continue",
+                error: null,
+                duration_ms: 10,
+                project_dir: "/tmp/project",
+                metadata: null,
+              }],
+            });
+          }
+          return Response.json({ error: "unexpected route" }, { status: 404 });
+        },
+      );
+      const root = mkdtempSync(join(tmpdir(), "hooks-log-api-"));
+      const dbPath = join(root, "must-not-exist", "hooks.db");
+      try {
+        const data = await runJsonWithEnv(["log", "list"], {
+          HOME: root,
+          HASNA_HOOKS_DB_PATH: dbPath,
+          HASNA_HOOKS_STORAGE_MODE: "api",
+          HASNA_HOOKS_API_URL: `http://127.0.0.1:${server.port}`,
+          HASNA_HOOKS_API_KEY: "fixture-api-key",
+        });
+
+        expect(data).toHaveLength(1);
+        expect(data[0]).toMatchObject({ id: "evt_api", hook_name: "gitguard" });
+        expect(requests).toEqual([{ path: "/v1/log/events", authorization: "Bearer fixture-api-key" }]);
+        expect(existsSync(dirname(dbPath))).toBe(false);
+      } finally {
+        server.stop(true);
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    test("api log list fails closed when the authority is incomplete", async () => {
+      const root = mkdtempSync(join(tmpdir(), "hooks-log-api-missing-"));
+      const dbPath = join(root, "must-not-exist", "hooks.db");
+      try {
+        const result = await runWithEnv(["log", "list", "--json"], {
+          HOME: root,
+          HASNA_HOOKS_DB_PATH: dbPath,
+          HASNA_HOOKS_STORAGE_MODE: "api",
+          HASNA_HOOKS_API_URL: undefined,
+          HASNA_HOOKS_API_KEY: "fixture-api-key",
+        });
+
+        expect(result.exitCode).toBe(1);
+        expect(JSON.parse(result.stdout).error).toContain("REMOTE_API_URL_MISSING");
+        expect(existsSync(dirname(dbPath))).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("hooks storage api parity", () => {
+    test("api storage status is diagnostic and never opens local SQLite", async () => {
+      const root = mkdtempSync(join(tmpdir(), "hooks-storage-api-status-"));
+      const dbPath = join(root, "must-not-exist", "hooks.db");
+      try {
+        const data = await runJsonWithEnv(["storage", "status"], {
+          HOME: root,
+          HASNA_HOOKS_DB_PATH: dbPath,
+          HASNA_HOOKS_STORAGE_MODE: "api",
+          HASNA_HOOKS_API_URL: "http://127.0.0.1:18888",
+          HASNA_HOOKS_API_KEY: "fixture-api-key",
+        });
+
+        expect(data).toMatchObject({
+          ok: true,
+          mode: "api",
+          transport: "http-v1",
+          local_fallback: false,
+          authority: { v1_base_url: "http://127.0.0.1:18888/v1" },
+        });
+        expect(existsSync(dirname(dbPath))).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    listenerTest("api storage pull imports remote rows through HTTP", async () => {
+      const requests: Array<{ method: string; path: string; authorization: string | null }> = [];
+      const server = serveOnAvailablePort(
+        (request) => {
+          const url = new URL(request.url);
+          requests.push({ method: request.method, path: url.pathname, authorization: request.headers.get("authorization") });
+          if (url.pathname === "/v1/storage/export") {
+            return Response.json({
+              tables: {
+                hook_events: [{
+                  id: "evt_pull",
+                  timestamp: "2026-07-28T00:00:00.000Z",
+                  session_id: "session-pull",
+                  hook_name: "gitguard",
+                  event_type: "PreToolUse",
+                  tool_name: "Bash",
+                  tool_input: "git status",
+                  result: "continue",
+                  error: null,
+                  duration_ms: 10,
+                  project_dir: "/tmp/project",
+                  metadata: null,
+                }],
+              },
+            });
+          }
+          return Response.json({ error: "unexpected route" }, { status: 404 });
+        },
+      );
+      const root = mkdtempSync(join(tmpdir(), "hooks-storage-api-pull-"));
+      const dbPath = join(root, "hooks.db");
+      try {
+        const result = await runJsonWithEnv(["storage", "pull", "--tables", "hook_events"], {
+          HOME: root,
+          HASNA_HOOKS_DB_PATH: dbPath,
+          HASNA_HOOKS_STORAGE_MODE: "api",
+          HASNA_HOOKS_API_URL: `http://127.0.0.1:${server.port}`,
+          HASNA_HOOKS_API_KEY: "fixture-api-key",
+        });
+        expect(result).toEqual([{ table: "hook_events", rowsRead: 1, rowsWritten: 1, errors: [] }]);
+
+        const listed = await runJsonWithEnv(["log", "list"], {
+          HOME: root,
+          HASNA_HOOKS_DB_PATH: dbPath,
+          HASNA_HOOKS_STORAGE_MODE: "local",
+        });
+        expect(listed[0]).toMatchObject({ id: "evt_pull", hook_name: "gitguard" });
+        expect(requests).toEqual([{ method: "GET", path: "/v1/storage/export", authorization: "Bearer fixture-api-key" }]);
+      } finally {
+        server.stop(true);
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    listenerTest("api storage push exports local rows through HTTP", async () => {
+      const imports: any[] = [];
+      const server = serveOnAvailablePort(
+        async (request) => {
+          const url = new URL(request.url);
+          if (url.pathname === "/v1/storage/import") {
+            imports.push(await request.json());
+            return Response.json({ results: [{ table: "hook_events", rowsRead: 1, rowsWritten: 1, errors: [] }] });
+          }
+          return Response.json({ error: "unexpected route" }, { status: 404 });
+        },
+      );
+      const root = mkdtempSync(join(tmpdir(), "hooks-storage-api-push-"));
+      const dbPath = join(root, "hooks.db");
+      try {
+        seedHookEvent(dbPath, { id: "evt_push", hook_name: "gitguard" });
+        const result = await runJsonWithEnv(["storage", "push", "--tables", "hook_events"], {
+          HOME: root,
+          HASNA_HOOKS_DB_PATH: dbPath,
+          HASNA_HOOKS_STORAGE_MODE: "api",
+          HASNA_HOOKS_API_URL: `http://127.0.0.1:${server.port}`,
+          HASNA_HOOKS_API_KEY: "fixture-api-key",
+        });
+
+        expect(result).toEqual([{ table: "hook_events", rowsRead: 1, rowsWritten: 1, errors: [] }]);
+        expect(imports[0].tables.hook_events[0]).toMatchObject({ id: "evt_push", hook_name: "gitguard" });
+      } finally {
+        server.stop(true);
+        rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 

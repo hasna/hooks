@@ -12,8 +12,8 @@ export const STORAGE_TABLES = [
 
 export const HOOKS_STORAGE_TABLES = STORAGE_TABLES;
 
-type StorageTable = (typeof STORAGE_TABLES)[number];
-type Row = Record<string, unknown>;
+export type StorageTable = (typeof STORAGE_TABLES)[number];
+export type StorageRow = Record<string, unknown>;
 
 export type StorageMode = "local" | "hybrid" | "remote";
 
@@ -32,6 +32,10 @@ export interface SyncMeta {
   table_name: string;
   last_synced_at: string | null;
   direction: "push" | "pull";
+}
+
+export interface StorageRowsPayload {
+  tables: Partial<Record<StorageTable, StorageRow[]>>;
 }
 
 export const HOOKS_STORAGE_ENV = "HASNA_HOOKS_DATABASE_URL";
@@ -144,6 +148,51 @@ export async function storageSync(options?: { tables?: string[] }): Promise<{ pu
   return { pull, push };
 }
 
+export function storageExportRows(options?: { tables?: string[] }, db: Database = getDb()): StorageRowsPayload {
+  const tables: Partial<Record<StorageTable, StorageRow[]>> = {};
+  for (const table of resolveTables(options?.tables)) {
+    tables[table] = tableExists(db, table)
+      ? db.query(`SELECT * FROM ${quoteIdent(table)}`).all() as StorageRow[]
+      : [];
+  }
+  return { tables };
+}
+
+export function storageImportRows(
+  payload: StorageRowsPayload,
+  options: { direction?: "push" | "pull" } = {},
+  db: Database = getDb(),
+): SyncResult[] {
+  const incomingTables = payload.tables ?? {};
+  const tableNames = Object.keys(incomingTables);
+  if (tableNames.length === 0) return [];
+  const tables = resolveTables(tableNames);
+  const results: SyncResult[] = [];
+  for (const table of tables) {
+    const result: SyncResult = { table, rowsRead: 0, rowsWritten: 0, errors: [] };
+    try {
+      if (!tableExists(db, table)) {
+        results.push(result);
+        continue;
+      }
+      const rows = incomingTables[table] ?? [];
+      if (!Array.isArray(rows)) {
+        throw new Error(`Invalid rows for ${table}: expected array`);
+      }
+      result.rowsRead = rows.length;
+      if (rows.length > 0) {
+        const columns = filterLocalColumns(db, table, Object.keys(rows[0]!));
+        result.rowsWritten = upsertSqlite(db, table, columns, rows);
+      }
+    } catch (error) {
+      result.errors.push(error instanceof Error ? error.message : String(error));
+    }
+    results.push(result);
+  }
+  recordSyncMeta(db, options.direction ?? "pull", results);
+  return results;
+}
+
 export function getSyncMetaAll(): SyncMeta[] {
   const db = getDb();
   ensureSyncMetaTable(db);
@@ -181,7 +230,7 @@ async function pushTable(db: Database, remote: PgAdapterAsync, table: StorageTab
   const result: SyncResult = { table, rowsRead: 0, rowsWritten: 0, errors: [] };
   try {
     if (!tableExists(db, table)) return result;
-    const rows = db.query(`SELECT * FROM ${quoteIdent(table)}`).all() as Row[];
+    const rows = db.query(`SELECT * FROM ${quoteIdent(table)}`).all() as StorageRow[];
     result.rowsRead = rows.length;
     if (rows.length === 0) return result;
     const remoteColumns = await getRemoteColumns(remote, table);
@@ -197,7 +246,7 @@ async function pullTable(remote: PgAdapterAsync, db: Database, table: StorageTab
   const result: SyncResult = { table, rowsRead: 0, rowsWritten: 0, errors: [] };
   try {
     if (!tableExists(db, table)) return result;
-    const rows = await remote.all(`SELECT * FROM ${quoteIdent(table)}`) as Row[];
+    const rows = await remote.all(`SELECT * FROM ${quoteIdent(table)}`) as StorageRow[];
     result.rowsRead = rows.length;
     if (rows.length === 0) return result;
     const columns = filterLocalColumns(db, table, Object.keys(rows[0]!));
@@ -227,7 +276,7 @@ function filterLocalColumns(db: Database, table: string, columns: string[]): str
   return columns.filter((column) => allowed.has(column));
 }
 
-async function upsertPg(remote: PgAdapterAsync, table: StorageTable, columns: string[], rows: Row[], remoteColumns: Map<string, string>): Promise<number> {
+async function upsertPg(remote: PgAdapterAsync, table: StorageTable, columns: string[], rows: StorageRow[], remoteColumns: Map<string, string>): Promise<number> {
   if (columns.length === 0) return 0;
   const primaryKeys = PRIMARY_KEYS[table];
   const columnList = columns.map(quoteIdent).join(", ");
@@ -249,7 +298,7 @@ async function upsertPg(remote: PgAdapterAsync, table: StorageTable, columns: st
   return rows.length;
 }
 
-function upsertSqlite(db: Database, table: StorageTable, columns: string[], rows: Row[]): number {
+function upsertSqlite(db: Database, table: StorageTable, columns: string[], rows: StorageRow[]): number {
   if (columns.length === 0) return 0;
   const primaryKeys = PRIMARY_KEYS[table];
   const columnList = columns.map(quoteIdent).join(", ");
@@ -264,7 +313,7 @@ function upsertSqlite(db: Database, table: StorageTable, columns: string[], rows
     `INSERT INTO ${quoteIdent(table)} (${columnList}) VALUES (${placeholders})
      ON CONFLICT (${keyList}) DO UPDATE SET ${setClause}`,
   );
-  const insert = db.transaction((batch: Row[]) => {
+  const insert = db.transaction((batch: StorageRow[]) => {
     for (const row of batch) statement.run(...columns.map((column) => coerceForSqlite(row[column])));
   });
   insert(rows);

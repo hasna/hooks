@@ -121,6 +121,16 @@ function printDisclosureHint(hidden: number, detailCommand: string, options: { i
   }
 }
 
+function failCommand(error: unknown, options: { json?: boolean } = {}): void {
+  const message = error instanceof Error ? error.message : String(error);
+  if (options.json) {
+    console.log(JSON.stringify({ error: message }));
+  } else {
+    console.error(chalk.red(`✗ ${message}`));
+  }
+  process.exitCode = 1;
+}
+
 /** Levenshtein distance for did-you-mean suggestions */
 function editDistance(a: string, b: string): number {
   const m = a.length, n = b.length;
@@ -1048,7 +1058,7 @@ program
 // Log command group — query hook events from SQLite
 const logCmd = program
   .command("log")
-  .description("Query hook event logs from SQLite (~/.hasna/hooks/hooks.db)");
+  .description("Query hook event logs from local SQLite or the configured Hooks API");
 
 logCmd
   .command("list")
@@ -1058,19 +1068,28 @@ logCmd
   .option("-n, --limit <n>", "Number of rows to show", "50")
   .option("-j, --json", "Output as JSON", false)
   .action(async (options: { hook?: string; session?: string; limit: string; json: boolean }) => {
-    const { getDb } = await import("../db/index.js");
-    const db = getDb();
-    const limit = parseInt(options.limit) || 50;
-
-    let sql = "SELECT * FROM hook_events WHERE 1=1";
-    const params: string[] = [];
-
-    if (options.hook) { sql += " AND hook_name = ?"; params.push(options.hook); }
-    if (options.session) { sql += " AND session_id LIKE ?"; params.push(`${options.session}%`); }
-    sql += " ORDER BY timestamp DESC LIMIT ?";
-    params.push(String(limit));
-
-    const rows = db.query(sql).all(...params) as any[];
+    let rows: any[];
+    try {
+      const { getHooksApiClient } = await import("./cloud-router.js");
+      const client = getHooksApiClient();
+      if (client) {
+        rows = await client.listHookEvents({
+          hook: options.hook,
+          session: options.session,
+          limit: parseInt(options.limit) || 50,
+        });
+      } else {
+        const { listHookEvents } = await import("../db/log-store.js");
+        rows = listHookEvents({
+          hook: options.hook,
+          session: options.session,
+          limit: parseInt(options.limit) || 50,
+        });
+      }
+    } catch (error) {
+      failCommand(error, options);
+      return;
+    }
 
     if (options.json) { console.log(JSON.stringify(rows, null, 2)); return; }
     if (rows.length === 0) { console.log(chalk.dim("No events found.")); return; }
@@ -1091,13 +1110,20 @@ logCmd
   .option("-n, --limit <n>", "Number of rows to show", "50")
   .option("-j, --json", "Output as JSON", false)
   .action(async (text: string, options: { limit: string; json: boolean }) => {
-    const { getDb } = await import("../db/index.js");
-    const db = getDb();
-    const limit = parseInt(options.limit) || 50;
-    const q = `%${text}%`;
-    const rows = db.query(
-      "SELECT * FROM hook_events WHERE tool_input LIKE ? OR error LIKE ? ORDER BY timestamp DESC LIMIT ?"
-    ).all(q, q, limit) as any[];
+    let rows: any[];
+    try {
+      const { getHooksApiClient } = await import("./cloud-router.js");
+      const client = getHooksApiClient();
+      if (client) {
+        rows = await client.searchHookEvents({ text, limit: parseInt(options.limit) || 50 });
+      } else {
+        const { searchHookEvents } = await import("../db/log-store.js");
+        rows = searchHookEvents({ text, limit: parseInt(options.limit) || 50 });
+      }
+    } catch (error) {
+      failCommand(error, options);
+      return;
+    }
 
     if (options.json) { console.log(JSON.stringify(rows, null, 2)); return; }
     if (rows.length === 0) { console.log(chalk.dim(`No events matching "${text}".`)); return; }
@@ -1117,12 +1143,20 @@ logCmd
   .option("-n <n>", "Number of rows", "20")
   .option("-j, --json", "Output as JSON", false)
   .action(async (options: { n: string; json: boolean }) => {
-    const { getDb } = await import("../db/index.js");
-    const db = getDb();
-    const limit = parseInt(options.n) || 20;
-    const rows = db.query(
-      "SELECT * FROM hook_events ORDER BY timestamp DESC LIMIT ?"
-    ).all(limit) as any[];
+    let rows: any[];
+    try {
+      const { getHooksApiClient } = await import("./cloud-router.js");
+      const client = getHooksApiClient();
+      if (client) {
+        rows = await client.tailHookEvents({ limit: parseInt(options.n) || 20 });
+      } else {
+        const { tailHookEvents } = await import("../db/log-store.js");
+        rows = tailHookEvents(parseInt(options.n) || 20);
+      }
+    } catch (error) {
+      failCommand(error, options);
+      return;
+    }
 
     if (options.json) { console.log(JSON.stringify(rows, null, 2)); return; }
     if (rows.length === 0) { console.log(chalk.dim("No events yet.")); return; }
@@ -1144,28 +1178,20 @@ logCmd
   .option("-n, --limit <n>", "Number of rows to show", "50")
   .option("-j, --json", "Output as JSON", false)
   .action(async (options: { since: string; limit: string; json: boolean }) => {
-    const { getDb } = await import("../db/index.js");
-    const db = getDb();
-    const limit = parseInt(options.limit) || 50;
-
-    // Parse duration string to milliseconds
-    function parseDuration(s: string): number {
-      const m = s.match(/^(\d+)(s|m|h|d)$/);
-      if (!m) return 24 * 60 * 60 * 1000;
-      const n = parseInt(m[1]);
-      switch (m[2]) {
-        case "s": return n * 1000;
-        case "m": return n * 60 * 1000;
-        case "h": return n * 60 * 60 * 1000;
-        case "d": return n * 24 * 60 * 60 * 1000;
-        default: return 24 * 60 * 60 * 1000;
+    let rows: any[];
+    try {
+      const { getHooksApiClient } = await import("./cloud-router.js");
+      const client = getHooksApiClient();
+      if (client) {
+        rows = await client.listHookErrors({ since: options.since, limit: parseInt(options.limit) || 50 });
+      } else {
+        const { listHookErrors } = await import("../db/log-store.js");
+        rows = listHookErrors({ since: options.since, limit: parseInt(options.limit) || 50 });
       }
+    } catch (error) {
+      failCommand(error, options);
+      return;
     }
-
-    const since = new Date(Date.now() - parseDuration(options.since)).toISOString();
-    const rows = db.query(
-      "SELECT * FROM hook_events WHERE error IS NOT NULL AND timestamp >= ? ORDER BY timestamp DESC LIMIT ?"
-    ).all(since, limit) as any[];
 
     if (options.json) { console.log(JSON.stringify(rows, null, 2)); return; }
     if (rows.length === 0) { console.log(chalk.dim(`No errors in the last ${options.since}.`)); return; }
@@ -1183,30 +1209,59 @@ logCmd
   .description("Delete hook event logs")
   .option("--hook <name>", "Only delete events for this hook")
   .option("-y, --yes", "Skip confirmation prompt", false)
-  .action(async (options: { hook?: string; yes: boolean }) => {
-    const { getDb } = await import("../db/index.js");
-    const db = getDb();
+  .option("-j, --json", "Output as JSON", false)
+  .action(async (options: { hook?: string; yes: boolean; json: boolean }) => {
+    let count: number;
+    try {
+      const { getHooksApiClient } = await import("./cloud-router.js");
+      const client = getHooksApiClient();
+      if (client) {
+        if (!options.yes) {
+          if (options.json) console.log(JSON.stringify({ cleared: 0, confirmed: false, hook: options.hook ?? null }));
+          else {
+            const scope = options.hook ? `hook "${options.hook}"` : "all hooks";
+            console.log(chalk.yellow(`About to delete event logs for ${scope} on the configured Hooks API.`));
+            console.log(chalk.dim("Re-run with --yes to confirm."));
+          }
+          return;
+        }
+        count = await client.clearHookEvents({ hook: options.hook });
+      } else {
+        const { clearHookEvents } = await import("../db/log-store.js");
+        if (!options.yes) {
+          const { getDb } = await import("../db/index.js");
+          const db = getDb();
+          const countRow = options.hook
+            ? db.query("SELECT COUNT(*) as n FROM hook_events WHERE hook_name = ?").get(options.hook) as any
+            : db.query("SELECT COUNT(*) as n FROM hook_events").get() as any;
+          count = countRow?.n ?? 0;
+        } else {
+          count = clearHookEvents({ hook: options.hook });
+        }
+      }
+    } catch (error) {
+      failCommand(error, options);
+      return;
+    }
 
-    const countRow = options.hook
-      ? db.query("SELECT COUNT(*) as n FROM hook_events WHERE hook_name = ?").get(options.hook) as any
-      : db.query("SELECT COUNT(*) as n FROM hook_events").get() as any;
-    const count = countRow?.n ?? 0;
-
-    if (count === 0) { console.log(chalk.dim("Nothing to clear.")); return; }
+    if (count === 0) {
+      if (options.json) console.log(JSON.stringify({ cleared: 0, hook: options.hook ?? null }));
+      else console.log(chalk.dim("Nothing to clear."));
+      return;
+    }
 
     if (!options.yes) {
+      if (options.json) {
+        console.log(JSON.stringify({ cleared: 0, confirmed: false, hook: options.hook ?? null, would_clear: count }));
+        return;
+      }
       const scope = options.hook ? `hook "${options.hook}"` : "all hooks";
       console.log(chalk.yellow(`About to delete ${count} event(s) for ${scope}.`));
       console.log(chalk.dim("Re-run with --yes to confirm."));
       return;
     }
 
-    if (options.hook) {
-      db.run("DELETE FROM hook_events WHERE hook_name = ?", [options.hook]);
-    } else {
-      db.run("DELETE FROM hook_events");
-    }
-
+    if (options.json) { console.log(JSON.stringify({ cleared: count, hook: options.hook ?? null })); return; }
     console.log(chalk.green(`✓ Cleared ${count} event(s).`));
   });
 
@@ -1219,6 +1274,33 @@ storageCmd
   .description("Show storage sync status")
   .option("-j, --json", "Output as JSON", false)
   .action(async (options: { json: boolean }) => {
+    const { getHooksApiAuthorityConfigStatus } = await import("./cloud-router.js");
+    const apiStatus = getHooksApiAuthorityConfigStatus();
+    if (apiStatus.selected) {
+      const status = {
+        configured: apiStatus.ok,
+        ok: apiStatus.ok,
+        mode: apiStatus.mode,
+        transport: "http-v1",
+        service: "hooks",
+        authority: apiStatus,
+        local_fallback: false,
+      };
+      if (options.json) {
+        console.log(JSON.stringify(status, null, 2));
+      } else {
+        console.log(chalk.bold("\n  Storage Status\n"));
+        console.log(`  Mode:       ${apiStatus.mode}`);
+        console.log("  Transport:  authenticated HTTP /v1");
+        console.log(`  Authority:  ${apiStatus.v1_base_url ?? "not configured"}`);
+        console.log(`  API key:    ${apiStatus.api_key_configured ? "configured" : "not configured"}`);
+        console.log("  Local fallback: disabled");
+        console.log("  Network:    not used (configuration diagnostic only)");
+        for (const issue of apiStatus.issues) console.error(chalk.red(`  ${issue}`));
+      }
+      if (!apiStatus.ok) process.exitCode = 1;
+      return;
+    }
     const { getStorageStatus } = await import("../storage.js");
     const status = getStorageStatus();
     if (options.json) {
@@ -1240,7 +1322,12 @@ storageCmd
   .action(async (options: { tables?: string; json: boolean }) => {
     try {
       const { parseStorageTables, storagePush } = await import("../storage.js");
-      const results = await storagePush({ tables: parseStorageTables(options.tables) });
+      const tables = parseStorageTables(options.tables);
+      const { getHooksApiClient } = await import("./cloud-router.js");
+      const client = getHooksApiClient();
+      const results = client
+        ? await client.storagePush({ tables })
+        : await storagePush({ tables });
       if (options.json) {
         console.log(JSON.stringify(results, null, 2));
         return;
@@ -1263,7 +1350,12 @@ storageCmd
   .action(async (options: { tables?: string; json: boolean }) => {
     try {
       const { parseStorageTables, storagePull } = await import("../storage.js");
-      const results = await storagePull({ tables: parseStorageTables(options.tables) });
+      const tables = parseStorageTables(options.tables);
+      const { getHooksApiClient } = await import("./cloud-router.js");
+      const client = getHooksApiClient();
+      const results = client
+        ? await client.storagePull({ tables })
+        : await storagePull({ tables });
       if (options.json) {
         console.log(JSON.stringify(results, null, 2));
         return;
@@ -1286,7 +1378,12 @@ storageCmd
   .action(async (options: { tables?: string; json: boolean }) => {
     try {
       const { parseStorageTables, storageSync } = await import("../storage.js");
-      const result = await storageSync({ tables: parseStorageTables(options.tables) });
+      const tables = parseStorageTables(options.tables);
+      const { getHooksApiClient } = await import("./cloud-router.js");
+      const client = getHooksApiClient();
+      const result = client
+        ? await client.storageSync({ tables })
+        : await storageSync({ tables });
       if (options.json) {
         console.log(JSON.stringify(result, null, 2));
         return;

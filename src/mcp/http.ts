@@ -50,6 +50,10 @@ export function startMcpHttpServer(options: {
       if (url.pathname === "/health" && req.method === "GET") {
         return Response.json(healthPayload(name));
       }
+      if (url.pathname.startsWith("/v1/")) {
+        const { handleHooksApiRequest } = await import("../server/api.js");
+        return handleHooksApiRequest(req, { name });
+      }
       if (url.pathname === "/mcp") {
         return handleMcpRequest(req, buildServer);
       }

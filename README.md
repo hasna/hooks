@@ -96,20 +96,30 @@ Hooks stores data locally by default in `~/.hasna/hooks/` and uses SQLite
 directly for hook event history. The package owns its database schema and
 migrations; it does not depend on the deprecated shared runtime or its CLI.
 The repo includes its own PostgreSQL migration definitions for optional remote
-storage deployments. Use the `hooks log` commands to inspect local hook event
-data.
+storage deployments. Use the `hooks log` commands to inspect hook event data.
+In local mode they read SQLite; in explicit API mode they use the authenticated
+Hooks `/v1` HTTP authority instead of falling back to local files.
 
 ```bash
 hooks storage status --json
 HASNA_HOOKS_DATABASE_URL=postgres://... hooks storage push --tables hook_events,feedback --json
 hooks storage pull --json
 hooks storage sync --json
+
+HASNA_HOOKS_STORAGE_MODE=api \
+HASNA_HOOKS_API_URL=https://hooks.example \
+HASNA_HOOKS_API_KEY=... \
+hooks log list --json
 ```
 
 Configure database storage with `HASNA_HOOKS_DATABASE_URL` or fallback
 `HOOKS_DATABASE_URL`. Optional storage mode env vars are
 `HASNA_HOOKS_STORAGE_MODE` and `HOOKS_STORAGE_MODE`, with `local`, `hybrid`, or
-`remote` values.
+`remote` values for SQLite/PostgreSQL sync. For the HTTP API backend, set
+`HASNA_HOOKS_STORAGE_MODE=api` (or `self_hosted`/`cloud`) plus
+`HASNA_HOOKS_API_URL` and `HASNA_HOOKS_API_KEY`. API mode disables local
+fallback for API-routed commands. The existing `hooks mcp --http` server exposes
+the shared MCP endpoint at `/mcp` and the Hooks API routes under `/v1`.
 
 ## Runtime model
 
