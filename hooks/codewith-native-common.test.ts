@@ -7,6 +7,7 @@ import {
   classifyDangerousOperation,
   emptyExpansionCollapse,
   globComponentMatches,
+  defaultWorktreesRoot,
   getAgentName,
   gitCommandInfo,
   gitRemoteHostSlug,
@@ -1511,7 +1512,10 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
       ["[h[.[::]]*", "home"],
       ["*[[:]:]c]", "etc"],
       ["[p[.].]]*", "proc"],
-      ["*[s[.].]]", "usr"],
+      // bash matches `sys` here, not `usr` - the original pair was asserted as verified and
+      // was not. It passed only because the blunt rule matches every literal, which is this
+      // branch's signature failure: a green assertion whose stated cause is not its cause.
+      ["*[s[.].]]", "sys"],
       ["*[[=a=]]r]", "var"],
       ["[e[:]tc", "etc"],
       ["[u[:][[:alpha:]]r", "usr"],
@@ -1579,6 +1583,94 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     await expectBlocked('X=/tmp/build; IFS= export X=$(cmd); rm -rf "$X"/*');
     await expectBlocked('X=/tmp/build; LC_ALL=C read X; rm -rf "$X"/*');
     await expectBlocked('X=/tmp/build; time for X in ""; do :; done; rm -rf "$X"/*');
+  });
+
+  // -------------------------------------------------------------------------------------
+  // Adversarial review round 9. The bracket class is confirmed closed (0 under-matches in
+  // 3.3M matcher cells against real bash). These cover what round 8's OTHER fix missed.
+  // -------------------------------------------------------------------------------------
+
+  test("conditionality is a property of context, not of the first token", async () => {
+    // Deriving it from "a compound keyword was stripped from token 0" closed ~5% of the
+    // class: one inserted statement, or `&&`/`||`/`case`, restored certification. 297 of
+    // those shapes were bash-proven `rm -rf /*`.
+    for (const guard of [
+      "if false; then A=1; X=/tmp/build; fi",
+      "if false; then :; X=/tmp/build; fi",
+      "false && X=/tmp/build",
+      "true || X=/tmp/build",
+      "[ -d /nonexistent ] && X=/tmp/build",
+      "test -d /nonexistent && X=/tmp/build",
+      "case x in y) X=/tmp/build;; esac",
+      "until true; do A=1; X=/tmp/build; done",
+      "grep -q zzz /dev/null && X=/tmp/build",
+    ]) {
+      await expectBlocked(`${guard}; rm -rf "$X"/*`);
+    }
+    await expectBlocked('if [ -d /nonexistent ]; then CACHE=/tmp/c; fi; rm -rf "$CACHE"/*');
+
+    // A brace group is NOT conditional - bash runs it in the current shell.
+    await expectAllowed('X=/tmp/build; { export X=/tmp/build; }; rm -rf "$X"/*');
+    await expectAllowed('X=/tmp/build; rm -rf "$X"/*');
+  });
+
+  test("any unanchored first component sweeps the filesystem root, not just a literal *", async () => {
+    // `/?*/bin` and `/[a-z]*/bin` expand to /usr/bin exactly as `/*/bin` does; the sweep rule
+    // tested for a literal `*` where the design says an unpinnable component is unbounded.
+    for (const command of [
+      "rm -rf /*/bin",
+      "rm -rf /?*/bin",
+      "rm -rf /[a-z]*/bin",
+      "rm -rf /[[:alpha:]]*/bin",
+      "rm -rf /[[:lower:]]*/lib",
+    ]) {
+      await expectBlocked(command);
+    }
+    // Anchored first components are still ordinary targeted deletes.
+    await expectAllowed("rm -rf /opt/*/logs");
+    await expectAllowed("rm -rf /var/*/tmp");
+    await expectAllowed("rm -rf /tmp*/x");
+  });
+
+  test("a long relative cd chain cannot stall the hook, and an absolute cd still lands", async () => {
+    // Resolving an ever-growing path per `cd` was quadratic: 70k took 19.6s against the 20s
+    // timeout. Capping at PATH_MAX fixed that but skipped a later absolute `cd`, which was
+    // itself a fail-open - the guard stayed on the long path and `rm -rf *` was allowed.
+    const flood = Array.from({ length: 70000 }, (_, i) => `cd d${i}`).join("; ");
+    for (const command of [
+      `${flood}; rm -rf /*`,
+      `${flood}; cd /; rm -rf *`,
+      `${flood}; cd ~; rm -rf .hasna`,
+    ]) {
+      const started = performance.now();
+      const result = await classify(command);
+      expect(result.block).toBe(true);
+      expect(performance.now() - started).toBeLessThan(3000);
+    }
+  });
+
+  test("an unpinnable target says why it was refused", async () => {
+    // Reporting only "targets /" for `rm -rf /var[.]log` is wrong and gets a guard switched
+    // off; the operator needs to know it was refused as unanalysable.
+    const result = await classify("rm -rf /var[.]log");
+    expect(result.block).toBe(true);
+    expect(result.reason).toContain("POSIX character class");
+  });
+
+  test("the worktrees root resolves through the same home as everything else", async () => {
+    // Same divergence as `~`, one function away: defaultWorktreesRoot used homedir() while
+    // every rule root used process.env.HOME.
+    const previous = process.env.HASNA_REPOS_WORKTREES_ROOT;
+    delete process.env.HASNA_REPOS_WORKTREES_ROOT;
+    const home = mkdtempSync(join(fixtureRoot, "wthome-"));
+    try {
+      process.env.HOME = home;
+      expect(defaultWorktreesRoot()).toBe(join(home, ".hasna", "repos", "worktrees"));
+    } finally {
+      if (previous === undefined) delete process.env.HASNA_REPOS_WORKTREES_ROOT;
+      else process.env.HASNA_REPOS_WORKTREES_ROOT = previous;
+      process.env.HOME = INCIDENT_HOME;
+    }
   });
 
   test("a quoted paren inside a substitution does not disable the collapse rule", async () => {

@@ -142,12 +142,14 @@ export interface GitCommandInfo {
 function splitShellSegmentsPass(
   command: string,
   atomicSubstitutions: boolean
-): { segments: string[]; isolation: boolean[]; depths: number[]; groups: number[]; piped: boolean[]; unterminated: boolean } {
+): { segments: string[]; isolation: boolean[]; depths: number[]; groups: number[]; piped: boolean[]; shortCircuit: boolean[]; unterminated: boolean } {
   const segments: string[] = [];
   const isolation: boolean[] = [];
   const depths: number[] = [];
   const groups: number[] = [];
   const pipedFlags: boolean[] = [];
+  const shortCircuitFlags: boolean[] = [];
+  let precededByShortCircuit = false;
   let current = "";
   let quote: "'" | '"' | null = null;
   let escaped = false;
@@ -169,6 +171,7 @@ function splitShellSegmentsPass(
       depths.push(parenDepth);
       groups.push(groupStack[groupStack.length - 1] ?? 0);
       pipedFlags.push(pipedFromPrevious || nextSeparator === "|");
+      shortCircuitFlags.push(precededByShortCircuit);
     }
     current = "";
     pipedFromPrevious = nextSeparator === "|";
@@ -227,6 +230,8 @@ function splitShellSegmentsPass(
       const doubled = (ch === "|" || ch === "&") && command[i + 1] === ch;
       // `||` and `&&` are sequencing, not a pipe.
       flush(ch === "|" && !doubled ? "|" : null);
+      // `a && X=1` and `a || X=1` run X= only if the left side decided so.
+      precededByShortCircuit = doubled && (ch === "|" || ch === "&");
       if (ch === "(") {
         parenDepth += 1;
         groupCounter += 1;
@@ -242,7 +247,7 @@ function splitShellSegmentsPass(
   }
 
   flush(null);
-  return { segments, isolation, depths, groups, piped: pipedFlags, unterminated: substitutionDepth > 0 || inBacktick };
+  return { segments, isolation, depths, groups, piped: pipedFlags, shortCircuit: shortCircuitFlags, unterminated: substitutionDepth > 0 || inBacktick };
 }
 
 function splitShellSegments(command: string): string[] {
@@ -258,6 +263,8 @@ interface ShellSegment {
   group: number;
   /** This segment is a pipeline stage, so its `cd` affects nothing outside the stage. */
   piped: boolean;
+  /** Reached only via `&&` / `||`, so whether it ran depends on the previous command. */
+  shortCircuit: boolean;
   /**
    * True when the segment runs in a subshell `( … )` or as a stage of a pipeline. A `cd`
    * there affects only that child process, so treating it as persistent silently moves the
@@ -289,6 +296,7 @@ function splitShellSegmentsUncached(command: string): ShellSegment[] {
     depth: chosen.depths[index] ?? 0,
     group: chosen.groups[index] ?? 0,
     piped: chosen.piped[index] ?? false,
+    shortCircuit: chosen.shortCircuit[index] ?? false,
     isolated: chosen.isolation[index] ?? false,
   }));
 }
@@ -965,7 +973,9 @@ function globThreatensRule(targetPath: string, rule: ProtectedPathRule): boolean
   // /usr/bin, /var/bin and the rest, and a trailing literal makes the pattern deeper than any
   // single root, so component matching alone misses it. Scoped to the filesystem root so
   // ordinary sweeps deeper down - `/opt/*/logs`, `/var/*/tmp`, `*/node_modules` - stay allowed.
-  if (rule.root === sep && parts.length > 1 && CATCH_ALL_GLOB.test(parts[1])) return true;
+  // Any UNANCHORED first component sweeps every top-level directory, not just a literal `*`:
+  // `/?*/bin` and `/[a-z]*/bin` expand to /usr/bin exactly as `/*/bin` does.
+  if (rule.root === sep && parts.length > 1 && isUnanchoredGlob(parts[1])) return true;
 
   return false;
 }
@@ -1317,7 +1327,10 @@ function assignmentWalker(command: string): { at: (segmentIndex: number) => Read
     return current;
   };
 
-  function applySegment({ text, depth, isolated }: ShellSegment): void {
+  // Depth of open `if` / `while` / `until` / `case` blocks. Everything inside one may not run.
+  let conditionalDepth = 0;
+
+  function applySegment({ text, depth, isolated, shortCircuit }: ShellSegment): void {
 
     // Only assignments in the parent shell, in their own right, change it.
     if (depth > 0 || isolated) return;
@@ -1327,10 +1340,24 @@ function assignmentWalker(command: string): { at: (segmentIndex: number) => Read
     // `X=/tmp/build; { X=; }; rm -rf "$X"/*` kept X certified while bash emptied it.
     const rawTokens = shellWords(text);
     const tokens = rawTokens.filter((token, index) => !(index === 0 && COMPOUND_KEYWORDS.has(token)));
-    // An assignment behind a compound keyword may never execute: `if false; then X=/tmp; fi`.
-    // Stripping the keyword is right for WITHDRAWAL - the branch might run - but it must not
-    // grant certification, which is a claim that the value IS set.
-    const conditional = rawTokens.length !== tokens.length;
+    // An assignment that may never execute must not CERTIFY, though it must still WITHDRAW -
+    // the branch might run. Conditionality is a property of context, so it is tracked across
+    // segments rather than read off the first token of this one. Deriving it from "a compound
+    // keyword was stripped from token 0" closed about 5% of the class: inserting one statement
+    // (`if false; then A=1; X=/tmp/build; fi`) or using `&&`/`||`/`case` restored certification,
+    // and 297 of those shapes were bash-proven `rm -rf /*`.
+    //
+    // A brace group `{ …; }` is NOT conditional - bash runs it in the current shell - so it is
+    // deliberately excluded here even though its keyword is stripped for tokenizing.
+    const OPENERS = new Set(["if", "elif", "while", "until", "case", "select"]);
+    const CLOSERS = new Set(["fi", "done", "esac"]);
+    for (const token of rawTokens) {
+      if (OPENERS.has(token)) conditionalDepth += 1;
+      else if (CLOSERS.has(token)) conditionalDepth = Math.max(0, conditionalDepth - 1);
+    }
+    const conditional = conditionalDepth > 0
+      || shortCircuit
+      || rawTokens.some((token) => OPENERS.has(token) || token === "then" || token === "do");
     // A function body runs later and elsewhere, so nothing in it can be relied on.
     if (/^[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)/.test(text) || rawTokens[0] === "function") {
       current = new Set();
@@ -2146,6 +2173,8 @@ interface CommandChunk {
 }
 
 const MAX_CWD_VARIANTS = 4;
+// Linux PATH_MAX. A tracked cwd longer than this cannot correspond to a real directory.
+const MAX_TRACKED_CWD_LENGTH = 4096;
 
 /**
  * Segments of one layer paired with the working directories in effect when they run.
@@ -2228,6 +2257,18 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
         const collapsed = emptyExpansionCollapse(operand, nonEmptyNames);
         const next = new Set<string>();
         for (const current of frame.cwds) {
+          // A chain of RELATIVE `cd`s grows the tracked path by a component each time, and
+          // resolving an ever-longer path n times is quadratic: 70k `cd d<i>` took 19.6s
+          // against the 20s timeout, and a timed-out hook fails open. No real directory can
+          // exceed PATH_MAX, so declining to grow past it is correct rather than a mere cap.
+          //
+          // An ABSOLUTE cd is always applied: it replaces the path rather than extending it,
+          // so it is cheap, and skipping it was itself a fail-open - a `cd /` after the flood
+          // left the guard pointing at the long path and `rm -rf *` was allowed.
+          if (!isAbsolute(expandHome(operand)) && current.length > MAX_TRACKED_CWD_LENGTH) {
+            next.add(current);
+            continue;
+          }
           next.add(resolveFrom(current, operand));
           if (collapsed !== null) next.add(resolveFrom(current, collapsed));
         }
@@ -2283,9 +2324,9 @@ function destructiveShellTargets(command: string, cwd: string): DestructiveShell
         ...findDestructiveTargets(chunk.segment),
         ...gitDestructiveTargets(chunk.segment, chunk.cwds[0]),
       ];
-      // Only a segment that actually deletes something needs the certified-name set, so the
-      // walker is advanced lazily and almost never has to copy.
       if (raw.length === 0) continue;
+      // The walker advances one set IN PLACE - that is what removed the O(segments x names)
+      // copy, not this lookup being lazy.
       const nonEmptyNames = assignments.at(chunk.segmentIndex);
 
       const expanded = raw.flatMap((target) => {
@@ -2363,9 +2404,21 @@ function extractFileToolPaths(input: CodewithHookInput): Array<{ path: string; o
 }
 
 function scopedBlockReason(operation: string, targetPath: string, rule: ProtectedPathRule, remote?: boolean): string {
+  // A POSIX class, equivalence class or collating symbol makes the pattern's extent
+  // unpinnable, so the guard treats it as matching anything. Saying only "targets /" would be
+  // wrong and confusing when the command reads `rm -rf /var[.]log` - the operator needs to
+  // know it was refused for being unanalysable, not for naming the filesystem root.
+  const unpinnable = /\[[:=.]/.test(targetPath)
+    ? [
+      "This target contains a POSIX character class, equivalence class or collating symbol,",
+      "whose extent cannot be determined without replicating the shell exactly. It is therefore",
+      "treated as matching any name. Use a literal path, or a plain glob, if this was not intended.",
+    ]
+    : [];
   return [
     `Blocked scoped dangerous operation: ${operation} targets ${targetPath}${remote ? " on a remote host" : ""}.`,
     `Protected scope: ${rule.label} (${rule.root}).`,
+    ...unpinnable,
     "This guard is scoped; destructive commands outside protected roots are not blocked.",
     "Delete a specific named subdirectory instead of the root or its contents.",
   ].join(" ");
@@ -2534,7 +2587,9 @@ export function isTopLevelSession(input: CodewithHookInput): boolean {
 }
 
 export function defaultWorktreesRoot(): string {
-  return process.env.HASNA_REPOS_WORKTREES_ROOT || join(homedir(), ".hasna", "repos", "worktrees");
+  // Same home for every resolution in this file; see expandHome.
+  return process.env.HASNA_REPOS_WORKTREES_ROOT
+    || join(process.env.HOME || homedir(), ".hasna", "repos", "worktrees");
 }
 
 export function isInsidePath(child: string, parent: string): boolean {
