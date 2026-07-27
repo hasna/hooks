@@ -1781,6 +1781,79 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     expect(performance.now() - started).toBeLessThan(15000);
   });
 
+  // -------------------------------------------------------------------------------------
+  // Adversarial review round 11. All three bounds added the round before turned into root
+  // wipes, each with its own improvised fallback. They now share ONE fail-closed answer:
+  // a bound that stops modelling the command marks the analysis degraded, and a degraded
+  // analysis carrying a recursive delete is refused.
+  // -------------------------------------------------------------------------------------
+
+  test("a cd operand too long to model fails closed", async () => {
+    // The operand-length cap dropped the cd entirely, so a single `cd` of 4200 slashes
+    // followed by `rm -rf *` was allowed - bash lands at `/`, where `*` is 27 entries.
+    // cwd is deliberately an ORDINARY directory, not a repo root: if the over-long cd is
+    // skipped the guard stays here, and here is not protected, so the verdict depends only on
+    // the cap failing closed. A repo-root cwd blocked either way and proved nothing.
+    const plain = mkdtempSync(join(fixtureRoot, "longcd-"));
+    for (const command of [
+      `cd ${"/".repeat(4200)}; rm -rf *`,
+      `cd ${"../".repeat(1400)}; rm -rf *`,
+      `cd /${"./".repeat(2100)}; rm -rf *`,
+      `cd ${"../".repeat(1400)}; rm -rf .*`,
+    ]) {
+      await expectBlocked(command, { cwd: plain });
+    }
+  });
+
+  test("an exhausted cd budget fails closed for named targets too", async () => {
+    // Adding `/` to the candidate set only caught targets that resolve to a protected root
+    // FROM `/`. A named relative target resolving against the real, unmodelled cwd is the
+    // same hole: this one destroys the entire Hasna home.
+    const dots = Array.from({ length: 2000 }, () => "cd .").join("; ");
+    await expectBlocked(`cd /home/hasna; ${dots}; cd ..; rm -rf hasna`);
+  });
+
+  test("an oversized command recognises a recursive delete in any flag position", async () => {
+    // The gate was anchored to the token right after `rm`, so seven ordinary spellings sailed
+    // past unanalysed once padded beyond the threshold.
+    // Must exceed MAX_ANALYSABLE_COMMAND_LENGTH, or the command is analysed normally and the
+    // oversized gate - the thing under test - is never consulted.
+    const pad = `; # ${"x".repeat(33_000_000)}`;
+    for (const command of [
+      "rm -f -r /*",
+      "rm -f -R /*",
+      "rm -v -f -r /*",
+      "rm -f --recursive /*",
+      "/bin/rm -f -r /*",
+      "rm --one-file-system -rf /*",
+      "rm /home/hasna/.hasna -rf",
+    ]) {
+      await expectBlocked(`${command}${pad}`);
+    }
+    // ...and does not fire on a non-recursive rm, which is what `--force` used to trip.
+    await expectAllowed(`rm --force /tmp/x${pad}`);
+  });
+
+  test("a pipeline in a compound head does not swallow its opener", async () => {
+    // The isolation early-return ran BEFORE keyword accounting, so `if … | …; then` lost the
+    // `if` while its `fi` still decremented, and the assignment after it certified. This is
+    // the realized incident shape.
+    await expectBlocked('if ls /opt | grep -q node; then echo yes; CACHE=/var/cache/app; fi; rm -rf "$CACHE"/*');
+    await expectBlocked('echo hi | while read -r l; do echo $l; X=/tmp/build; done; rm -rf "$X"/*');
+  });
+
+  test("a cd reached only through && or || does not move the guard", async () => {
+    // `cd /home/hasna; false && cd /tmp; rm -rf *` left the model in /tmp while bash stayed
+    // in the home directory. Allowed at every commit back to 2fe8426.
+    for (const command of [
+      "cd /home/hasna; false && cd /tmp; rm -rf *",
+      "cd /home/hasna; true || cd /tmp; rm -rf *",
+      "cd /etc; false && cd /tmp; rm -rf *",
+    ]) {
+      await expectBlocked(command);
+    }
+  });
+
   test("a quoted paren inside a substitution does not disable the collapse rule", async () => {
     // The unterminated-substitution fallback turned an ordinary awk field separator into a
     // bypass, because the quoted "(" was counted as structure.

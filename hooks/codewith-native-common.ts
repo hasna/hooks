@@ -1344,8 +1344,6 @@ function assignmentWalker(command: string): { at: (segmentIndex: number) => Read
 
   function applySegment({ text, depth, isolated, shortCircuit }: ShellSegment): void {
 
-    // Only assignments in the parent shell, in their own right, change it.
-    if (depth > 0 || isolated) return;
 
     // `{ X=; }`, `then X=`, `do X=` - strip the compound-command keyword so the assignment
     // inside is seen. cwdTrackedSegments already did this; this scan did not, so
@@ -1392,6 +1390,12 @@ function assignmentWalker(command: string): { at: (segmentIndex: number) => Read
       if (braceDepth < conditionalBraceDepth) conditionalBraceDepth = 0;
     }
     if (shortCircuit && braceDepth > 0 && conditionalBraceDepth === 0) conditionalBraceDepth = braceDepth;
+
+    // Keyword accounting happened above, deliberately BEFORE this return: `if ls /opt | grep
+    // -q node; then …; CACHE=…; fi` marks the `if` segment isolated (it is followed by `|`),
+    // so returning first swallowed the opener while its `fi` still decremented - and the
+    // assignment after it certified. That is the realized incident shape.
+    if (depth > 0 || isolated) return;
 
     const conditional = conditionalDepth > 0
       || shortCircuit
@@ -2169,7 +2173,10 @@ function shellCommandLayers(command: string): { layers: ShellCommandLayer[]; tru
 }
 
 // Verbs whose presence makes an unanalysable command unsafe to wave through.
-const DESTRUCTIVE_VERB = /(?:^|[^\w.-])(?:[\w/.-]*\/)?(?:rm\s+(?:-\S*[rR]|--recursive|--dir)|rsync\s[^;&|]*--delete|find\s[^;&|]*(?:-delete|-execdir?\s)|git\s[^;&|]*(?:clean\s+-\S*[fd]|reset\s+--hard))/;
+// `rm` followed ANYWHERE by a recursive flag. Anchoring it to the very next token missed
+// `rm -f -r /*`, `rm -v -f -r /*`, `rm --one-file-system -rf /*` and `rm <path> -rf`, each of
+// which sailed past the oversized-command gate unanalysed.
+const DESTRUCTIVE_VERB = /(?:^|[^\w.-])(?:[\w/.-]*\/)?(?:rm\b[^;&|\n]*?(?:\s-[A-Za-z]*[rR][A-Za-z]*(?=[\s=;&|]|$)|\s--recursive\b|\s--dir\b)|rsync\s[^;&|]*--delete|find\s[^;&|]*(?:-delete|-execdir?\s)|git\s[^;&|]*(?:clean\s+-\S*[fd]|reset\s+--hard))/;
 
 /**
  * A command too deeply wrapped or too wide to analyse within the caps is refused when it
@@ -2219,7 +2226,22 @@ const MAX_TRACKED_CWD_LENGTH = 4096;
 const MAX_CD_OPERATIONS = 2000;
 // Far above any command a person or agent writes; below the size where tokenizing alone
 // exceeds the hook's 20s budget.
-const MAX_ANALYSABLE_COMMAND_LENGTH = 1_000_000;
+// Measured on this file's own paths: 1 MB -> 264ms, 16 MB -> 3.5s, 64 MB -> 14.3s against a
+// 20s budget. The previous 1 MB threshold bought nothing and cost the fail-closed property.
+const MAX_ANALYSABLE_COMMAND_LENGTH = 32_000_000;
+
+/**
+ * Raised whenever the guard stops being able to model the command exactly.
+ *
+ * Every bound in this file must funnel through here. Three bounds added in one round each
+ * invented their own fallback - skip the operand, keep the last directory, add `/` to the
+ * candidate set - and all three turned into root wipes, because "I cannot model this" was
+ * quietly answered as "so carry on". A degraded analysis carrying a recursive delete is
+ * refused instead.
+ */
+interface AnalysisState {
+  degraded: boolean;
+}
 
 /**
  * Segments of one layer paired with the working directories in effect when they run.
@@ -2229,7 +2251,7 @@ const MAX_ANALYSABLE_COMMAND_LENGTH = 1_000_000;
  * collapsed variant covers `cd "$(cmd)"/ && rm -rf ./*`, which is the incident's shape moved
  * one command to the left.
  */
-function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: ReadonlySet<string>): CommandChunk[] {
+function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: ReadonlySet<string>, analysis: AnalysisState): CommandChunk[] {
   const chunks: CommandChunk[] = [];
   const home = process.env.HOME || homedir();
   // One entry per subshell nesting depth. A `cd` inside `( … )` DOES apply to the rest of
@@ -2259,7 +2281,7 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
     return stack[depth];
   };
 
-  splitShellSegmentsDetailed(command).forEach(({ text: segment, depth, group, piped }, segmentIndex) => {
+  splitShellSegmentsDetailed(command).forEach(({ text: segment, depth, group, piped, shortCircuit }, segmentIndex) => {
     const frame = frameFor(depth, group);
     // A leading `{` from a brace group is not part of the command.
     const tokens = shellWords(segment).filter((token, index) => !(index === 0 && (token === "{" || token === "}")));
@@ -2280,8 +2302,14 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
     }
 
     if (verb === "cd" || verb === "pushd") {
-      // A `cd` in a pipeline stage runs in its own process and moves nothing else.
+      // A `cd` in a pipeline stage runs in its own process and moves nothing else. One
+      // reached via `&&`/`||` may not run at all: `cd /home/hasna; false && cd /tmp;
+      // rm -rf *` left the guard in /tmp while bash stayed in the home directory.
       if (piped) return;
+      if (shortCircuit) {
+        analysis.degraded = true;
+        return;
+      }
       // `pushd -n` records the directory WITHOUT moving the shell, so the tracked cwd must
       // not follow it. Previously `-n` was read as the directory operand.
       if (verb === "pushd" && tokens.includes("-n")) return;
@@ -2293,6 +2321,10 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
       const operand = tokens[i];
       const priorCwds = frame.cwds;
       cdOperations += 1;
+      // Both cd bounds below mark the analysis degraded rather than inventing a fallback.
+      // Skipping an over-long operand allowed `cd ////…(4200); rm -rf *`, and adding `/` to
+      // the candidate set caught only sweep targets - `cd /home/hasna; cd .x2000; cd ..;
+      // rm -rf hasna` still destroyed the Hasna home.
       // Once the budget is spent the guard can no longer model a chain of RELATIVE cds. It
       // must not simply keep the last known directory - that was the fail-open the PATH_MAX
       // cap produced - so `/` joins the candidate set and any relative delete is judged
@@ -2302,8 +2334,7 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
       // An ABSOLUTE cd is never dropped: it is a real landing the guard can still model
       // exactly, and skipping it lost `cd ~` after a flood, which allowed `rm -rf .hasna`.
       if (cdOperations > MAX_CD_OPERATIONS && !isAbsolute(expandHome(operand ?? ""))) {
-        if (!frame.cwds.includes(sep)) frame.cwds = [...frame.cwds, sep].slice(0, MAX_CWD_VARIANTS);
-        frame.explicit = true;
+        analysis.degraded = true;
         return;
       }
 
@@ -2332,10 +2363,12 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
           const shrinksOnly = /^[./]+$/.test(expanded);
           const wouldGrow = !shrinksOnly && !isAbsolute(expanded);
           if (wouldGrow && current.length > MAX_TRACKED_CWD_LENGTH) {
+            analysis.degraded = true;
             next.add(current);
             continue;
           }
           if (expanded.length > MAX_TRACKED_CWD_LENGTH) {
+            analysis.degraded = true;
             next.add(current);
             continue;
           }
@@ -2380,14 +2413,14 @@ function loopBoundWords(path: string, bindings: Map<string, string[]>): string[]
   return bindings.get(match[1]) ?? null;
 }
 
-function destructiveShellTargets(command: string, cwd: string): DestructiveShellTarget[] {
+function destructiveShellTargets(command: string, cwd: string, analysis: AnalysisState): DestructiveShellTarget[] {
   const targets: DestructiveShellTarget[] = [];
   for (const layer of shellCommandLayers(command).layers) {
     const bindings = forLoopBindings(layer.command);
 
     const assignments = assignmentWalker(layer.command);
 
-    for (const chunk of cwdTrackedSegments(layer.command, cwd, new Set())) {
+    for (const chunk of cwdTrackedSegments(layer.command, cwd, new Set(), analysis)) {
       const raw = [
         ...rmCommandTargets(chunk.segment),
         ...rsyncDeleteTargets(chunk.segment),
@@ -2522,6 +2555,7 @@ export async function classifyDangerousOperation(input: CodewithHookInput): Prom
 
   if (input.tool_name === "Bash") {
     const command = getCommand(input);
+    const analysis: AnalysisState = { degraded: false };
 
     // A command large enough that merely tokenizing it blows the hook's 20s budget cannot be
     // analysed at all, and a timed-out hook fails open. 70k repetitions of `cd /<4KB>` is a
@@ -2542,7 +2576,7 @@ export async function classifyDangerousOperation(input: CodewithHookInput): Prom
       }
     }
 
-    for (const target of destructiveShellTargets(command, cwd)) {
+    for (const target of destructiveShellTargets(command, cwd, analysis)) {
       const targetCwd = target.baseCwd ?? cwd;
       const targetPath = resolveFrom(targetCwd, target.path);
       const rulesFor = (path: string) => {
@@ -2579,6 +2613,16 @@ export async function classifyDangerousOperation(input: CodewithHookInput): Prom
             reason: collapseBlockReason(target.operation, target.path, collapsedPath, rule, target.remote),
           };
         }
+      }
+    }
+
+    // Raised during the scan above by any bound that stopped modelling the command
+    // exactly. Checked here rather than at each bound so there is ONE fail-closed answer:
+    // three bounds that each invented their own fallback all became root wipes.
+    if (analysis.degraded) {
+      const reason = truncatedAnalysisBlockReason(command);
+      if (reason) {
+        return { block: true, operation: "unanalysable command", reason };
       }
     }
   }
