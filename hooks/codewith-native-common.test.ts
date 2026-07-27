@@ -1228,6 +1228,124 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     }
   });
 
+  // -------------------------------------------------------------------------------------
+  // Adversarial review round 6. Bracket handling produced a fresh under-match in every one
+  // of the three rounds that touched it, so the design changed rather than the edge cases:
+  // anything not modelled exactly now MATCHES. Over-blocking a rare construct is survivable;
+  // under-matching a protected root is not.
+  // -------------------------------------------------------------------------------------
+
+  test("unparseable bracket constructs match rather than vanish", async () => {
+    // Each of these names a real path in bash - verified with echo - while the previous
+    // matcher held a pattern that could match nothing at all.
+    for (const command of [
+      "rm -rf /[e[:]tc",
+      "rm -rf /[e[=]tc",
+      "rm -rf /h[o[:]me",
+      "rm -rf /[u[:]sr",
+      "rm -rf /[v[:]ar/*",
+      "rm -rf /r[o[:]ot",
+      "rm -rf ~/.h[a[:]sna",
+      "rm -rf ~/.h[a[:]sna/repos",
+      `rm -rf "$(bun pm cache)"/[e[:]tc`,
+      // A negated UNKNOWN class: the fail-safe "unknown matches" was then inverted by the
+      // negation into "matches nothing", turning the safeguard into the bypass.
+      "rm -rf /[![:foo:]]tc",
+      "rm -rf /[!x[:foo:]]tc",
+      "rm -rf /[^[:foo:]]tc",
+      "rm -rf /h[![:foo:]]me",
+      // An escaped `]` mid-class dropped every member after it.
+      "rm -rf /[a\\]e]tc",
+      "rm -rf /[a\\]e]tc/*",
+      "rm -rf /home/hasna/.hasn[b\\]a]",
+    ]) {
+      await expectBlocked(command);
+    }
+  });
+
+  test("bracket flooding cannot stall the hook into failing open", async () => {
+    // Re-scanning to end-of-pattern from every `[` was quadratic: 20k brackets took 22s
+    // against the 20s timeout, on a command that also contained a real `rm -rf /*`.
+    //
+    // Two shapes, because the first one alone did not actually exercise the quadratic: a
+    // flooded target under `/` is answered by the covers check before the anchoring scan
+    // ever runs, so that test passed with the quadratic still in place. The second shape -
+    // flood as the last component of a repo-root child - is the one that reaches it.
+    const repo = mkdtempSync(join(homedir(), ".hooks-flood-"));
+    try {
+      Bun.spawnSync(["git", "init", "-q", repo]);
+      for (const [command, cwd] of [
+        [`rm -rf /${"[".repeat(20000)} /*`, undefined],
+        [`rm -rf ${"[".repeat(20000)}`, repo],
+      ] as Array<[string, string | undefined]>) {
+        const started = performance.now();
+        const result = await classify(command, cwd ? { cwd } : {});
+        expect(result.block).toBe(true);
+        expect(performance.now() - started).toBeLessThan(3000);
+      }
+    } finally {
+      try { rmSync(repo, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  test("pushd -n records a directory without moving the shell", async () => {
+    const repo = mkdtempSync(join(homedir(), ".hooks-pushdn-"));
+    try {
+      Bun.spawnSync(["git", "init", "-q", repo]);
+      await expectBlocked("pushd -n /var/tmp; rm -rf *", { cwd: repo });
+      await expectBlocked("pushd -n /var/tmp && rm -rf *", { cwd: repo });
+    } finally {
+      try { rmSync(repo, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  test("a subshell cannot pop the parent shell's directory stack", async () => {
+    // The dirStack was copied per frame; sharing the array would let a subshell's popd
+    // rewrite the parent's stack. Previously no test distinguished the two.
+    const repo = mkdtempSync(join(homedir(), ".hooks-dirstack-"));
+    try {
+      Bun.spawnSync(["git", "init", "-q", repo]);
+      await expectBlocked("pushd /var/tmp; (pushd /var); popd; rm -rf *", { cwd: repo });
+    } finally {
+      try { rmSync(repo, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  test("dot-anchored and punctuation-only globs are sweeps, not anchored patterns", async () => {
+    const repo = mkdtempSync(join(homedir(), ".hooks-dotglob-"));
+    try {
+      Bun.spawnSync(["git", "init", "-q", repo]);
+      for (const command of ["rm -rf .??*", "rm -rf .?*", "rm -rf .[a-z]*", "rm -rf *.*"]) {
+        await expectBlocked(command, { cwd: repo });
+      }
+      // Real literal text still anchors, including after a dot.
+      for (const command of ["rm -rf .turbo*", "rm -rf .venv*", "rm -rf *.log"]) {
+        await expectAllowed(command, { cwd: repo });
+      }
+    } finally {
+      try { rmSync(repo, { recursive: true, force: true }); } catch {}
+    }
+  });
+
+  test("every shape that can rebind a name withdraws the guarantee", async () => {
+    for (const rebind of [
+      "IFS= read -r D",
+      "while read D; do :; done",
+      "printf -v D ''",
+      "source ./x.sh",
+      ". ./x.sh",
+      'trap "D=" EXIT',
+      "builtin read D",
+      "declare -n D=E",
+      "getopts o D",
+      "coproc read D",
+    ]) {
+      await expectBlocked(`D=/tmp/b; ${rebind}; rm -rf "$D"/*`);
+    }
+    // `export X` with no value does NOT change X, so it must not withdraw anything.
+    await expectAllowed(`X=/tmp/build; export X; rm -rf "$X"/*`);
+  });
+
   test("a quoted paren inside a substitution does not disable the collapse rule", async () => {
     // The unterminated-substitution fallback turned an ordinary awk field separator into a
     // bypass, because the quoted "(" was counted as structure.

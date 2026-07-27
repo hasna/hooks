@@ -49,6 +49,28 @@ case "$dir" in /|"") exit 1;; esac
 rm -rf -- "$dir"
 ```
 
+## Globs
+
+A glob threatens a protected root when it can match that root or an ancestor of it, or when it
+wipes the root's contents wholesale. Matching is per path component, so a trailing literal
+bounds the delete: `rm -rf */node_modules` at a monorepo root is allowed, while `rm -rf /*/*`
+is not.
+
+A glob directly under a protected root is refused only when it is *unanchored* — when no
+literal text survives once the wildcards are removed. `[a-z]*`, `?*`, `.??*` and `*.*` are
+unanchored and blocked; `*.log`, `tmp-*`, `.turbo*` and `snapshot-[0-9]*` keep their literal
+anchor and are allowed.
+
+Bracket expressions that this matcher does not model exactly — POSIX `[:class:]`, `[=equiv=]`,
+`[.collate.]`, backslash escapes, anything unterminated — are treated as **matching**, never as
+not-matching. An under-match would leave a protected root unmatched and allow the delete, so
+ambiguity resolves toward refusing.
+
+## Working directory
+
+`cd`, `pushd`, `pushd -n`, `popd` and `cd -` are tracked, per subshell, with a directory stack.
+A `cd` inside `( … )` or a pipeline stage applies within that shell and does not escape it.
+
 ## Wrappers
 
 Commands are unwrapped before scanning: `bash -c` / `sh -c` / `zsh -c`, `su -c`,

@@ -724,8 +724,6 @@ function bracketExpressionEnd(pattern: string, open: number): number {
   while (i < pattern.length) {
     const ch = pattern[i];
     if (ch === "\\") { i += 2; continue; }
-    // POSIX [:class:], [=equiv=] and [.collate.] contain a `]` that does NOT terminate the
-    // expression. Stopping at the first `]` made `[[:lower:]]` match nothing at all.
     if (ch === "[" && (pattern[i + 1] === ":" || pattern[i + 1] === "=" || pattern[i + 1] === ".")) {
       const kind = pattern[i + 1];
       const close = pattern.indexOf(`${kind}]`, i + 2);
@@ -739,72 +737,52 @@ function bracketExpressionEnd(pattern: string, open: number): number {
   return -1;
 }
 
-const POSIX_CLASS_MATCHERS: Record<string, (ch: string) => boolean> = {
-  alpha: (ch) => /\p{L}/u.test(ch),
-  digit: (ch) => /\p{Nd}/u.test(ch),
-  alnum: (ch) => /[\p{L}\p{Nd}]/u.test(ch),
-  lower: (ch) => /\p{Ll}/u.test(ch),
-  upper: (ch) => /\p{Lu}/u.test(ch),
-  space: (ch) => /\s/.test(ch),
-  punct: (ch) => /[!-\/:-@[-`{-~]/.test(ch),
-  xdigit: (ch) => /[0-9A-Fa-f]/.test(ch),
-  word: (ch) => /[\w]/.test(ch),
-  blank: (ch) => ch === " " || ch === "\t",
-  print: (ch) => ch >= " " && ch !== "\u007f",
-  graph: (ch) => ch > " " && ch !== "\u007f",
-  cntrl: (ch) => ch < " " || ch === "\u007f",
-};
-
-/** Does `ch` satisfy the bracket expression `pattern[open..close]`? */
+/**
+ * Does this bracket expression match `ch`?
+ *
+ * Returns TRUE whenever the expression contains anything this matcher does not model exactly.
+ * That direction is the entire design, and it is the correction for six consecutive rounds of
+ * one defect: every bracket bug on this branch has been an UNDER-match, and an under-match
+ * means a protected root goes unmatched and the delete is allowed. `[e]tc`, `[[:lower:]]`,
+ * `[e[:]tc`, `[![:foo:]]` and `[a\]e]` each named a real path in bash while the guard held a
+ * pattern that could match nothing at all.
+ *
+ * Over-matching costs a false block on a construct almost nobody writes. Under-matching costs
+ * a filesystem. So POSIX classes, equivalence and collating classes, and backslash escapes are
+ * all treated as matching rather than as not-matching.
+ */
 function bracketMatches(pattern: string, open: number, close: number, ch: string): boolean {
-  let i = open + 1;
-  let negated = false;
-  if (pattern[i] === "!" || pattern[i] === "^") { negated = true; i += 1; }
+  const body = pattern.slice(open + 1, close);
+  const negated = body.startsWith("!") || body.startsWith("^");
+  const members = negated ? body.slice(1) : body;
+
+  // Anything not modelled exactly: fail closed by matching.
+  if (/\\|\[[:=.]/.test(members)) return true;
 
   let matched = false;
   let first = true;
-  while (i < close) {
-    if (pattern[i] === "[" && (pattern[i + 1] === ":" || pattern[i + 1] === "=" || pattern[i + 1] === ".")) {
-      const kind = pattern[i + 1];
-      const end = pattern.indexOf(`${kind}]`, i + 2);
-      if (end === -1 || end >= close) break;
-      const name = pattern.slice(i + 2, end);
-      if (kind === ":") {
-        const test = POSIX_CLASS_MATCHERS[name];
-        // An unknown class must not silently match nothing.
-        if (test === undefined ? true : test(ch)) matched = true;
-      } else if (name === ch) {
-        matched = true;
-      }
-      i = end + 2;
-      first = false;
-      continue;
-    }
-
-    let member = pattern[i];
-    if (member === "\\" && i + 1 < close) { i += 1; member = pattern[i]; }
-    // `]` is a literal only in first position; `-` is a literal at either end.
+  for (let i = 0; i < members.length; i += 1) {
+    const member = members[i];
     if (member === "]" && !first) break;
-
-    if (pattern[i + 1] === "-" && i + 2 < close && pattern[i + 2] !== "]") {
-      let upper = pattern[i + 2];
-      let step = 3;
-      if (upper === "\\" && i + 3 < close) { upper = pattern[i + 3]; step = 4; }
-      if (ch >= member && ch <= upper) matched = true;
-      i += step;
-    } else {
-      if (ch === member) matched = true;
-      i += 1;
+    if (members[i + 1] === "-" && i + 2 < members.length && members[i + 2] !== "]") {
+      if (ch >= member && ch <= members[i + 2]) matched = true;
+      i += 2;
+    } else if (ch === member) {
+      matched = true;
     }
     first = false;
   }
-
   return negated ? !matched : matched;
 }
 
 /**
- * Two-pointer wildcard match with backtracking limited to the last `*`, so it is linear in
- * practice and can never blow up the way the compiled regex did.
+ * Two-pointer wildcard match. Backtracking is limited to the last `*`, so it stays linear in
+ * practice - the compiled-regex version it replaced backtracked exponentially and blew past
+ * this hook's 20s timeout, which fails open.
+ *
+ * An unterminated or unparseable bracket makes the REST of the component match anything,
+ * rather than degrading `[` to a literal. The literal reading is an under-match, and
+ * `rm -rf /[e[:]tc` - which bash expands to `/etc` - slipped through on exactly that path.
  */
 function globMatches(pattern: string, name: string): boolean {
   let p = 0;
@@ -828,15 +806,9 @@ function globMatches(pattern: string, name: string): boolean {
     }
     if (p < pattern.length && ch === "[") {
       const close = bracketExpressionEnd(pattern, p);
-      if (close !== -1) {
-        if (bracketMatches(pattern, p, close, name[n])) {
-          p = close + 1;
-          n += 1;
-          continue;
-        }
-      } else if (name[n] === "[") {
-        // Unterminated: bash treats the `[` literally.
-        p += 1;
+      if (close === -1) return true;
+      if (bracketMatches(pattern, p, close, name[n])) {
+        p = close + 1;
         n += 1;
         continue;
       }
@@ -861,8 +833,8 @@ function globMatches(pattern: string, name: string): boolean {
 }
 
 /**
- * Does this glob keep no literal text at all, so it can match essentially any name?
- * `[a-z]*` and `?*` are unanchored; `*.log` and `tmp-*` are anchored by their literals.
+ * Does this glob keep no literal text that anchors it, so it can match essentially any name?
+ * `[a-z]*`, `?*`, `.??*` and `*.*` are unanchored; `*.log` and `tmp-*` are anchored.
  */
 function isUnanchoredGlob(pattern: string): boolean {
   if (!/[*?[]/.test(pattern)) return false;
@@ -873,14 +845,20 @@ function isUnanchoredGlob(pattern: string): boolean {
     if (ch === "*" || ch === "?") continue;
     if (ch === "[") {
       const close = bracketExpressionEnd(pattern, i);
-      if (close === -1) { residue += ch; continue; }
+      // Unparseable: the rest matches anything, so nothing after it can anchor. Returning
+      // here also keeps this linear - re-scanning to end-of-pattern from every `[` was
+      // quadratic, and a 20k-bracket flood took 22s against the 20s timeout, failing open.
+      if (close === -1) return true;
       i = close;
       continue;
     }
     residue += ch;
   }
-  return residue.length === 0;
+  // A leading dot does not anchor: `.??*` sweeps a directory just as `*` does. Nor does
+  // punctuation alone: `*.*` takes every dotted entry at the root.
+  return residue.replace(/^\./, "").replace(/[.\-_]/g, "").length === 0;
 }
+
 
 function globComponentMatches(pattern: string, literal: string): boolean {
   if (!/[*?[]/.test(pattern)) return pattern === literal;
@@ -1071,11 +1049,17 @@ const GUARDED_EXPANSION = /^\$\{[A-Za-z_][A-Za-z0-9_]*:\?/;
 const NON_EMPTY_PLACEHOLDER = "__hooks_guarded_expansion__";
 const MAX_EXPANSION_NESTING = 32;
 
-// Builtins that can bind or rebind a variable name. `eval` is here because its argument is
-// opaque, so nothing after it can be guaranteed.
-const REBINDING_BUILTINS = new Set([
-  "export", "declare", "typeset", "readonly", "local", "read", "eval", "let", "mapfile", "readarray",
-]);
+// Builtins whose effect on a variable this scan cannot follow at all. Any of them clears
+// every guarantee, because guessing in the permissive direction is how `$X` stayed certified
+// non-empty while the shell had already emptied it.
+const OPAQUE_BUILTINS = new Set(["eval", "source", ".", "trap", "coproc", "exec"]);
+
+// Builtins that bind a BARE name, with no `=` in sight: `read D`, `getopts o D`.
+const NAME_BINDING_BUILTINS = new Set(["read", "getopts", "mapfile", "readarray"]);
+
+// Builtins that take `NAME=value` operands. A BARE name here does not change the variable -
+// `export X` merely exports the existing value - so bare names must not withdraw anything.
+const VALUE_BINDING_BUILTINS = new Set(["export", "declare", "typeset", "readonly", "local", "let"]);
 
 /** One shell expansion found in a token, with its exact source span. */
 interface FoundExpansion {
@@ -1300,28 +1284,57 @@ function assignmentTimeline(command: string): Array<ReadonlySet<string>> {
       continue;
     }
 
-    // Any construct that can rebind a name withdraws the guarantee. The token loop below
-    // stops at the first non-assignment token, so `export X=$(cmd)` was invisible while an
-    // earlier `X=/tmp/build` kept certifying X as non-empty.
-    if (REBINDING_BUILTINS.has(tokens[0])) {
-      const next = new Set(current);
-      for (const token of tokens.slice(1)) {
-        const name = token.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:=([\s\S]*))?$/);
-        if (!name) continue;
-        next.delete(name[1]);
-        // A literal, non-empty value re-establishes it; anything expandable does not.
-        if (name[2] !== undefined && name[2].length > 0 && !/[$`]/.test(name[2])) next.add(name[1]);
-      }
-      current = next;
+    // Any construct that can rebind a name withdraws the guarantee. Scanned across ALL
+    // tokens, not just the first: `IFS= read -r D` hides the builtin behind a prefix
+    // assignment, and `while read D` behind a keyword, and both kept D certified non-empty.
+    if (tokens.some((token) => OPAQUE_BUILTINS.has(token)) || /\(\(/.test(text)) {
+      current = new Set();
       continue;
     }
 
-    // `for NAME in …` rebinds NAME to each word, any of which may be empty.
-    if (tokens[0] === "for" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(tokens[1] ?? "")) {
-      const next = new Set(current);
-      next.delete(tokens[1]);
-      current = next;
-      continue;
+    {
+      let next: Set<string> | null = null;
+      const withdraw = (name: string) => {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return;
+        next ??= new Set(current);
+        next.delete(name);
+      };
+
+      for (const [position, token] of tokens.entries()) {
+        if (NAME_BINDING_BUILTINS.has(token)) {
+          for (const operand of tokens.slice(position + 1)) {
+            if (!operand.startsWith("-")) withdraw(operand);
+          }
+          continue;
+        }
+        if (token === "printf") {
+          const flag = tokens.indexOf("-v", position);
+          if (flag !== -1) withdraw(tokens[flag + 1] ?? "");
+          continue;
+        }
+        if (VALUE_BINDING_BUILTINS.has(token)) {
+          // `declare -n D=E` makes D an alias for E, so D's value is E's - not the literal.
+          const nameref = tokens.slice(position + 1).some((operand) => operand === "-n");
+          for (const operand of tokens.slice(position + 1)) {
+            const assignment = operand.match(/^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/);
+            if (!assignment) continue;
+            withdraw(assignment[1]);
+            if (!nameref && assignment[2].length > 0 && !/[$`]/.test(assignment[2])) {
+              next ??= new Set(current);
+              next.add(assignment[1]);
+            }
+          }
+          continue;
+        }
+        if (token === "for" && position + 1 < tokens.length) {
+          withdraw(tokens[position + 1]);
+        }
+      }
+
+      if (next) {
+        current = next;
+        continue;
+      }
     }
 
     let next: Set<string> | null = null;
@@ -2123,6 +2136,9 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
     if (verb === "cd" || verb === "pushd") {
       // A `cd` in a pipeline stage runs in its own process and moves nothing else.
       if (piped) return;
+      // `pushd -n` records the directory WITHOUT moving the shell, so the tracked cwd must
+      // not follow it. Previously `-n` was read as the directory operand.
+      if (verb === "pushd" && tokens.includes("-n")) return;
       // `pushd` saves the current directory before moving.
       if (verb === "pushd") frame.dirStack.push(frame.cwds);
       // Skip cd's own flags (-P, -L, --) to reach the directory operand.

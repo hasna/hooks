@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `cd` is tracked within a command, so `cd / && rm -rf *` and `cd "$(cmd)"/ && rm -rf ./*` block.
   - A `for VAR in <root-glob>` binding is followed into `rm -rf "$VAR"`.
   - Block messages now name a safe alternative instead of only refusing.
+  - Glob targets are matched per path component, so a trailing literal bounds the delete: `rm -rf */node_modules` at a monorepo root is allowed while `rm -rf /*/*`, `rm -rf /*/bin` and `rm -rf /home/*/.hasna` are not. A glob directly under a protected root is refused only when *unanchored* — no literal text survives once wildcards are removed — so `[a-z]*`, `?*`, `.??*` and `*.*` block while `*.log`, `tmp-*`, `.turbo*` and `snapshot-[0-9]*` are allowed.
+  - Bracket expressions the matcher does not model exactly (POSIX `[:class:]`, `[=equiv=]`, `[.collate.]`, backslash escapes, unterminated) are treated as matching rather than as not-matching. An under-match leaves a protected root unmatched and allows the delete.
+  - Working-directory tracking covers `cd`, `cd -`, `pushd`, `pushd -n`, `popd` and a per-subshell directory stack; a `cd` in a subshell or pipeline stage no longer escapes it.
+  - The non-empty guarantee used by the expansion rule is withdrawn by `unset`, by `export`/`declare`/`typeset`/`readonly`/`local` assignments, by `read`/`getopts`/`mapfile`/`printf -v`, by `for NAME in`, by `declare -n` namerefs, and entirely by `eval`/`source`/`.`/`trap`/`coproc` and arithmetic assignment. `export X` with no value does not withdraw it.
   - A glob in **any** path component counts, not only the last: `rm -rf /*/*` destroys `/usr/*`, `/etc/*` and `/home/*` and is now blocked. A bounded glob (`~/proj*/dist`, `/var/log/*.gz`) keeps its narrower check and stays allowed.
   - Brace alternations are expanded, so `rm -rf /{bin,etc,home}` is seen as the root deletes it performs.
   - Command-substitution **bodies** are scanned as scripts: `echo $(rm -rf /)` runs the delete and discards only its output.
