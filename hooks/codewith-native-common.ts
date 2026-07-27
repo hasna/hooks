@@ -383,9 +383,12 @@ function shellWords(segment: string): string[] {
 }
 
 function expandHome(path: string): string {
+  // One home for every form. `~` used homedir() while `$HOME` and every protected root used
+  // process.env.HOME, so wherever the two differ the target and the rule were resolved against
+  // different directories and `rm -rf ~/.hasna` missed the ~/.hasna rule entirely.
   const home = process.env.HOME || homedir();
-  if (path === "~") return homedir();
-  if (path.startsWith("~/")) return join(homedir(), path.slice(2));
+  if (path === "~") return home;
+  if (path.startsWith("~/")) return join(home, path.slice(2));
   if (path === "$HOME" || path === "${HOME}") return home;
   if (path.startsWith("$HOME/")) return join(home, path.slice("$HOME/".length));
   if (path.startsWith("${HOME}/")) return join(home, path.slice("${HOME}/".length));
@@ -871,12 +874,27 @@ function isUnanchoredGlob(pattern: string): boolean {
 }
 
 
-function globComponentMatches(pattern: string, literal: string): boolean {
+export function globComponentMatches(pattern: string, literal: string): boolean {
   if (!/[*?[]/.test(pattern)) return pattern === literal;
   // `[` with no `]` anywhere and no other wildcard is a literal bracket, not an expression.
   // Without this, a directory genuinely named `backup[2026` was escalated to "wipes the
   // repository root" - fail-closed matching has to stop where bash stops globbing.
   if (!pattern.includes("]") && !/[*?]/.test(pattern)) return pattern === literal;
+  // Fail closed on an ambiguous BOUNDARY, not just ambiguous contents.
+  //
+  // This is the defect that survived eight review rounds. Bracket CONTENTS already failed
+  // closed, but the boundary was still computed exactly - and every disagreement with bash
+  // about where a bracket ENDS misaligns the rest of the component and silently reports "no
+  // match", which allows the delete. Round 6 searched to end-of-component for the class
+  // terminator and swallowed later brackets; round 7 stopped at the first plain `]`, which is
+  // backwards (inside `[:`, a plain `]` does not terminate) and reopened the class net worse:
+  // 220 -> 380 live root-wipe escapes.
+  //
+  // Every one of those 380 contained `[:`, `[=` or `[.`. Plain brackets, ranges, negation,
+  // `*`, `?` and backslash escapes were measured clean across 44,867 dangerous patterns. So
+  // the guard stops trying to locate a boundary it cannot pin down: a component containing a
+  // POSIX class, equivalence class or collating symbol matches anything.
+  if (/\[[:=.]/.test(pattern)) return true;
   if (CATCH_ALL_GLOB.test(pattern)) return true;
   return globMatches(pattern, literal);
 }
@@ -1282,36 +1300,49 @@ export function emptyExpansionCollapse(
  *   (X=/tmp/build); rm …              a subshell-scoped assignment escaping its subshell
  *   X=/tmp/build | cat; rm …          a pipeline-stage assignment doing the same
  */
-function assignmentTimeline(command: string): Array<ReadonlySet<string>> {
-  const timeline: Array<ReadonlySet<string>> = [];
+function assignmentWalker(command: string): { at: (segmentIndex: number) => ReadonlySet<string> } {
+  const segments = splitShellSegmentsDetailed(command);
+  let cursor = 0;
   let current = new Set<string>();
 
-  for (const { text, depth, isolated } of splitShellSegmentsDetailed(command)) {
-    // The set as it stands BEFORE this segment runs.
-    timeline.push(current);
+  // Advances a SINGLE set forward and hands it out only when a segment actually contains a
+  // delete. Materialising one snapshot per segment was O(segments x names): 30k distinct
+  // names took 24.4s against the 20s timeout, and a timed-out hook fails open. Almost every
+  // command has one delete, so almost every command now copies nothing.
+  const at = (segmentIndex: number): ReadonlySet<string> => {
+    while (cursor < segmentIndex && cursor < segments.length) {
+      applySegment(segments[cursor]);
+      cursor += 1;
+    }
+    return current;
+  };
+
+  function applySegment({ text, depth, isolated }: ShellSegment): void {
 
     // Only assignments in the parent shell, in their own right, change it.
-    if (depth > 0 || isolated) continue;
+    if (depth > 0 || isolated) return;
 
     // `{ X=; }`, `then X=`, `do X=` - strip the compound-command keyword so the assignment
     // inside is seen. cwdTrackedSegments already did this; this scan did not, so
     // `X=/tmp/build; { X=; }; rm -rf "$X"/*` kept X certified while bash emptied it.
     const rawTokens = shellWords(text);
     const tokens = rawTokens.filter((token, index) => !(index === 0 && COMPOUND_KEYWORDS.has(token)));
+    // An assignment behind a compound keyword may never execute: `if false; then X=/tmp; fi`.
+    // Stripping the keyword is right for WITHDRAWAL - the branch might run - but it must not
+    // grant certification, which is a claim that the value IS set.
+    const conditional = rawTokens.length !== tokens.length;
     // A function body runs later and elsewhere, so nothing in it can be relied on.
     if (/^[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)/.test(text) || rawTokens[0] === "function") {
       current = new Set();
-      continue;
+      return;
     }
-    if (tokens.length === 0) continue;
+    if (tokens.length === 0) return;
 
     if (tokens[0] === "unset") {
-      const next = new Set(current);
       for (const name of tokens.slice(1)) {
-        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) next.delete(name);
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) current.delete(name);
       }
-      current = next;
-      continue;
+      return;
     }
 
     // Any construct that can rebind a name withdraws the guarantee. Scanned across ALL
@@ -1326,11 +1357,9 @@ function assignmentTimeline(command: string): Array<ReadonlySet<string>> {
     // CERTIFICATION is granted only from token 0, because a mention is not an execution:
     // `# export CACHE=/tmp/x` in a comment certified CACHE as non-empty, which is the realized
     // incident shape exactly - a documented cleanup script is the likeliest way to write it.
-    let next: Set<string> | null = null;
     const withdraw = (name: string) => {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return;
-      next ??= new Set(current);
-      next.delete(name);
+      current.delete(name);
     };
 
     let pendingNameBinder = false;
@@ -1372,9 +1401,8 @@ function assignmentTimeline(command: string): Array<ReadonlySet<string>> {
         if (!bound) continue;
         withdraw(bound[1]);
         // `declare -n D=E` aliases D to E, so D's value is E's, not this literal.
-        if (valueBinderIsCommand && !sawNameref && bound[2].length > 0 && !/[$`]/.test(bound[2])) {
-          next ??= new Set(current);
-          next.add(bound[1]);
+        if (!conditional && valueBinderIsCommand && !sawNameref && bound[2].length > 0 && !/[$`]/.test(bound[2])) {
+          current.add(bound[1]);
         }
         continue;
       }
@@ -1387,18 +1415,16 @@ function assignmentTimeline(command: string): Array<ReadonlySet<string>> {
       // A PREFIX assignment applies to the command's environment, not to this expansion.
       const isPrefixAssignment = position < tokens.length - 1
         && !/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[position + 1] ?? "");
-      next ??= new Set(current);
-      next.delete(name);
-      if (name === "PWD") next.add(PWD_REASSIGNED);
+      current.delete(name);
+      if (name === "PWD") current.add(PWD_REASSIGNED);
       if (isPrefixAssignment) continue;
-      if (value.length > 0 && !/[$`]/.test(value)) next.add(name);
+      if (!conditional && value.length > 0 && !/[$`]/.test(value)) current.add(name);
     }
 
-    if (opaque) { current = new Set(); continue; }
-    if (next) current = next;
+    if (opaque) current = new Set();
   }
 
-  return timeline;
+  return { at };
 }
 
 function shouldSkipHasnaTreeRule(targetPath: string, rule: ProtectedPathRule, currentManagedRepoRoot: string | null): boolean {
@@ -2248,16 +2274,19 @@ function destructiveShellTargets(command: string, cwd: string): DestructiveShell
   for (const layer of shellCommandLayers(command).layers) {
     const bindings = forLoopBindings(layer.command);
 
-    const timeline = assignmentTimeline(layer.command);
+    const assignments = assignmentWalker(layer.command);
 
     for (const chunk of cwdTrackedSegments(layer.command, cwd, new Set())) {
-      const nonEmptyNames = timeline[chunk.segmentIndex] ?? new Set<string>();
       const raw = [
         ...rmCommandTargets(chunk.segment),
         ...rsyncDeleteTargets(chunk.segment),
         ...findDestructiveTargets(chunk.segment),
         ...gitDestructiveTargets(chunk.segment, chunk.cwds[0]),
       ];
+      // Only a segment that actually deletes something needs the certified-name set, so the
+      // walker is advanced lazily and almost never has to copy.
+      if (raw.length === 0) continue;
+      const nonEmptyNames = assignments.at(chunk.segmentIndex);
 
       const expanded = raw.flatMap((target) => {
         const words = loopBoundWords(target.path, bindings);

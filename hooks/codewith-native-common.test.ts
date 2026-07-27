@@ -6,6 +6,7 @@ import {
   claimCommand,
   classifyDangerousOperation,
   emptyExpansionCollapse,
+  globComponentMatches,
   getAgentName,
   gitCommandInfo,
   gitRemoteHostSlug,
@@ -434,6 +435,18 @@ describe("codewith native common helpers", () => {
  * rm, at any scope, ever.
  */
 describe("destructive shell guard - rm -rf /* incident regression", () => {
+  /**
+   * Root for throwaway git fixtures.
+   *
+   * Deliberately NOT the real $HOME - a crashed run would strand repos in the operator's home
+   * directory. Also deliberately not shared with any `pushd` target used below: a fixture
+   * under the same tree as the pushd target once made the popd test pass for the wrong
+   * reason, because `<target>/*` covered the fixture whether or not popd was handled.
+   */
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "hooks-fixtures-"));
+  afterAll(() => {
+    try { rmSync(fixtureRoot, { recursive: true, force: true }); } catch {}
+  });
   // The incident machine's HOME. Pinned as an explicit fixture so the three mandated
   // regression commands can appear verbatim rather than reconstructed from the runner's env.
   const INCIDENT_HOME = "/home/hasna";
@@ -1143,7 +1156,7 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     // for the rest of the command. Blocked on d8c0e8a; allowed from f6def3c until now.
     // Deliberately NOT under the pushd target: a repo inside /tmp made this pass for the
     // wrong reason, because `/tmp/*` covers the repo root whether or not popd is handled.
-    const repo = mkdtempSync(join(homedir(), ".hooks-popd-"));
+    const repo = mkdtempSync(join(fixtureRoot, "hooks-popd-"));
     try {
       Bun.spawnSync(["git", "init", "-q", repo]);
       for (const command of [
@@ -1271,7 +1284,7 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     // flooded target under `/` is answered by the covers check before the anchoring scan
     // ever runs, so that test passed with the quadratic still in place. The second shape -
     // flood as the last component of a repo-root child - is the one that reaches it.
-    const repo = mkdtempSync(join(homedir(), ".hooks-flood-"));
+    const repo = mkdtempSync(join(fixtureRoot, "hooks-flood-"));
     try {
       Bun.spawnSync(["git", "init", "-q", repo]);
       // Timing is the point here. The verdict differs per shape and both are correct:
@@ -1297,7 +1310,7 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
   });
 
   test("pushd -n records a directory without moving the shell", async () => {
-    const repo = mkdtempSync(join(homedir(), ".hooks-pushdn-"));
+    const repo = mkdtempSync(join(fixtureRoot, "hooks-pushdn-"));
     try {
       Bun.spawnSync(["git", "init", "-q", repo]);
       await expectBlocked("pushd -n /var/tmp; rm -rf *", { cwd: repo });
@@ -1310,7 +1323,7 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
   test("a subshell cannot pop the parent shell's directory stack", async () => {
     // The dirStack was copied per frame; sharing the array would let a subshell's popd
     // rewrite the parent's stack. Previously no test distinguished the two.
-    const repo = mkdtempSync(join(homedir(), ".hooks-dirstack-"));
+    const repo = mkdtempSync(join(fixtureRoot, "hooks-dirstack-"));
     try {
       Bun.spawnSync(["git", "init", "-q", repo]);
       await expectBlocked("pushd /var/tmp; (pushd /var); popd; rm -rf *", { cwd: repo });
@@ -1320,7 +1333,7 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
   });
 
   test("dot-anchored and punctuation-only globs are sweeps, not anchored patterns", async () => {
-    const repo = mkdtempSync(join(homedir(), ".hooks-dotglob-"));
+    const repo = mkdtempSync(join(fixtureRoot, "hooks-dotglob-"));
     try {
       Bun.spawnSync(["git", "init", "-q", repo]);
       for (const command of ["rm -rf .??*", "rm -rf .?*", "rm -rf .[a-z]*", "rm -rf *.*"]) {
@@ -1426,7 +1439,7 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
   test("a literal bracket in a filename is not a sweep", async () => {
     // Fail-closed matching must stop where bash stops globbing: `[` with no `]` is an
     // ordinary character, and these were re-broken twice on this branch.
-    const repo = mkdtempSync(join(homedir(), ".hooks-litbracket-"));
+    const repo = mkdtempSync(join(fixtureRoot, "hooks-litbracket-"));
     try {
       Bun.spawnSync(["git", "init", "-q", repo]);
       await expectAllowed("rm -rf 'weird[dir'", { cwd: repo });
@@ -1453,6 +1466,119 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     await expectBlocked(`X=/tmp/build; env eval 'X='; rm -rf "$X"/*`);
     await expectBlocked(`X=/tmp/build; command source ./x.sh; rm -rf "$X"/*`);
     await expectBlocked(`X=/tmp/build; do for X in ""; do :; done; rm -rf "$X"/*`);
+  });
+
+  // -------------------------------------------------------------------------------------
+  // Adversarial review round 8. The bracket BOUNDARY was the defect class that survived
+  // seven rounds: contents failed closed, but every disagreement with bash about where a
+  // bracket ENDS became a silent under-match. Round 6 searched too far, round 7 stopped too
+  // early and made it net worse (220 -> 380 live escapes). The guard now refuses to compute
+  // a boundary it cannot pin down.
+  // -------------------------------------------------------------------------------------
+
+  test("a component with a POSIX class, equivalence or collating symbol matches anything", async () => {
+    // Each expands onto a live protected root in real bash; each was allowed at HEAD.
+    for (const command of [
+      "rm -rf /[![=o=]]]*",
+      "rm -rf /[[:]:]v]*",
+      "rm -rf /*[[:[=c=]]",
+      "rm -rf /[b[.][:]*n",
+      "rm -rf /[h[.[::]]*",
+      "rm -rf /*[[:]:]c]",
+      "rm -rf /[p[.].]]*",
+      "rm -rf /*[s[.].]]",
+      "rm -rf /*[[=a=]]r]",
+      "rm -rf /[b[.[::]]*",
+      // Round 6 and 7 shapes, kept so neither direction can regress.
+      "rm -rf /[e[:]tc",
+      "rm -rf /[u[:][[:alpha:]]r",
+    ]) {
+      await expectBlocked(command);
+    }
+  });
+
+  test("the matcher itself matches every component bash matches", () => {
+    // Asserted on the MATCHER, not on an end-to-end verdict. Round 7 found that 5 of 15
+    // end-to-end bracket assertions passed with the matcher entirely removed, because the
+    // unanchored-glob-at-the-root rule catches them regardless - which is exactly how the
+    // boundary escapes shipped twice. Every pair below was confirmed against real bash with
+    // `[[ $name == $pattern ]]`.
+    for (const [pattern, name] of [
+      ["[![=o=]]]*", "bin"],
+      ["[[:]:]v]*", "var"],
+      ["*[[:[=c=]]", "etc"],
+      ["[b[.][:]*n", "bin"],
+      ["[h[.[::]]*", "home"],
+      ["*[[:]:]c]", "etc"],
+      ["[p[.].]]*", "proc"],
+      ["*[s[.].]]", "usr"],
+      ["*[[=a=]]r]", "var"],
+      ["[e[:]tc", "etc"],
+      ["[u[:][[:alpha:]]r", "usr"],
+      ["[[:lower:]]tc", "etc"],
+      ["[![:foo:]]tc", "etc"],
+    ] as Array<[string, string]>) {
+      expect(globComponentMatches(pattern, name), `${pattern} must match ${name}`).toBe(true);
+    }
+
+    // ...and does not match what bash does not: a literal bracket is not a pattern.
+    expect(globComponentMatches("et[c", "etc")).toBe(false);
+    expect(globComponentMatches("etc[x", "etc")).toBe(false);
+    expect(globComponentMatches("backup[2026", "backup")).toBe(false);
+    // Ordinary globs keep working.
+    expect(globComponentMatches("*.log", "app.log")).toBe(true);
+    expect(globComponentMatches("*.log", "app.txt")).toBe(false);
+    expect(globComponentMatches("[a-z]*", "etc")).toBe(true);
+    expect(globComponentMatches("[!a-z]*", "etc")).toBe(false);
+  });
+
+  test("an assignment in a branch that may not run does not certify", async () => {
+    // Stripping a compound keyword is right for withdrawal - the branch might run - but it
+    // must not grant certification, which asserts the value IS set. `then X=/tmp/build`
+    // certified X and let `rm -rf "$X"/*` through as the realized incident shape.
+    for (const command of [
+      'if [ -d /nonexistent ]; then CACHE=/tmp/c; fi; rm -rf "$CACHE"/*',
+      'if false; then X=/tmp/build; fi; rm -rf "$X"/*',
+      'while false; do X=/tmp/build; done; rm -rf "$X"/*',
+      'for i in ""; do X=/tmp/build; done; rm -rf "$X"/*',
+    ]) {
+      await expectBlocked(command);
+    }
+    // The same must hold through a value-binding builtin, which is a separate code path.
+    await expectBlocked('if false; then export X=/tmp/build; fi; rm -rf "$X"/*');
+    await expectBlocked('while false; do declare X=/tmp/build; done; rm -rf "$X"/*');
+    // Unconditional assignment still certifies.
+    await expectAllowed('X=/tmp/build; rm -rf "$X"/*');
+    await expectAllowed('export X=/tmp/build; rm -rf "$X"/*');
+  });
+
+  test("distinct-name padding cannot stall the hook into failing open", async () => {
+    // The certified-name set was copied per segment - O(segments x names). 30k distinct names
+    // took 24.4s against the 20s timeout. The walker now advances one set in place and hands
+    // it out only for segments that actually delete something.
+    const command = `${Array.from({ length: 30000 }, (_, i) => `A${i}=1`).join("; ")}; rm -rf /*`;
+    const started = performance.now();
+    const result = await classify(command);
+    expect(result.block).toBe(true);
+    expect(performance.now() - started).toBeLessThan(2000);
+  });
+
+  test("~ and $HOME resolve through the same home as the protected roots", async () => {
+    // `~` went through homedir() while $HOME and every rule root used process.env.HOME, so
+    // wherever they differ - containers, `sudo -u`, CI - the target and the rule were built
+    // from different directories and `rm -rf ~/.hasna` missed its own rule. It also made this
+    // suite pass only on a machine whose HOME is literally /home/hasna.
+    const elsewhere = mkdtempSync(join(fixtureRoot, "otherhome-"));
+    await expectBlocked("rm -rf ~/.hasna", { home: elsewhere });
+    await expectBlocked('rm -rf "$HOME"/.hasna', { home: elsewhere });
+    await expectBlocked("rm -rf ~/.hasna/repos", { home: elsewhere });
+  });
+
+  test("value-binding builtins and for-bindings are recognised away from position 0", async () => {
+    // Both mechanisms were real and had zero coverage across 72 assertions.
+    await expectBlocked('X=/tmp/build; IFS= export X=$(cmd); rm -rf "$X"/*');
+    await expectBlocked('X=/tmp/build; LC_ALL=C read X; rm -rf "$X"/*');
+    await expectBlocked('X=/tmp/build; time for X in ""; do :; done; rm -rf "$X"/*');
   });
 
   test("a quoted paren inside a substitution does not disable the collapse rule", async () => {
