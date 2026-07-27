@@ -882,6 +882,12 @@ function isUnanchoredGlob(pattern: string): boolean {
 }
 
 
+/** Does this component actually glob, or is it a literal that merely contains a bracket? */
+function componentIsPattern(component: string): boolean {
+  if (/[*?]/.test(component)) return true;
+  return component.includes("[") && component.includes("]");
+}
+
 export function globComponentMatches(pattern: string, literal: string): boolean {
   if (!/[*?[]/.test(pattern)) return pattern === literal;
   // `[` with no `]` anywhere and no other wildcard is a literal bracket, not an expression.
@@ -973,9 +979,12 @@ function globThreatensRule(targetPath: string, rule: ProtectedPathRule): boolean
   // /usr/bin, /var/bin and the rest, and a trailing literal makes the pattern deeper than any
   // single root, so component matching alone misses it. Scoped to the filesystem root so
   // ordinary sweeps deeper down - `/opt/*/logs`, `/var/*/tmp`, `*/node_modules` - stay allowed.
-  // Any UNANCHORED first component sweeps every top-level directory, not just a literal `*`:
-  // `/?*/bin` and `/[a-z]*/bin` expand to /usr/bin exactly as `/*/bin` does.
-  if (rule.root === sep && parts.length > 1 && isUnanchoredGlob(parts[1])) return true;
+  // At the filesystem root, ANY glob in the first component reaches several top-level
+  // directories: `/*r*/lib` matched 11 of 25 entries on the reference machine, and `/?*/bin`
+  // and `/[a-z]*/bin` reach /usr/bin exactly as `/*/bin` does. A single literal character is
+  // not an anchor at this depth, so the sweep rule does not ask for one. The cost is refusing
+  // `rm -rf /tmp*/x`, which is rare and safe to spell out literally.
+  if (rule.root === sep && parts.length > 1 && componentIsPattern(parts[1])) return true;
 
   return false;
 }
@@ -1329,6 +1338,9 @@ function assignmentWalker(command: string): { at: (segmentIndex: number) => Read
 
   // Depth of open `if` / `while` / `until` / `case` blocks. Everything inside one may not run.
   let conditionalDepth = 0;
+  // Brace-group nesting, and the depth at which a `&&`/`||` right-hand side was entered.
+  let braceDepth = 0;
+  let conditionalBraceDepth = 0;
 
   function applySegment({ text, depth, isolated, shortCircuit }: ShellSegment): void {
 
@@ -1349,15 +1361,43 @@ function assignmentWalker(command: string): { at: (segmentIndex: number) => Read
     //
     // A brace group `{ …; }` is NOT conditional - bash runs it in the current shell - so it is
     // deliberately excluded here even though its keyword is stripped for tokenizing.
-    const OPENERS = new Set(["if", "elif", "while", "until", "case", "select"]);
+    // `for` opens because `done` closes it - omitting it while keeping `done` a closer let any
+    // `for` loop inside a conditional zero the counter. `elif` does NOT open: `fi` closes an
+    // if/elif/else chain exactly once, so counting elif left the depth permanently above zero
+    // and nothing after the block could ever certify.
+    const OPENERS = new Set(["if", "while", "until", "case", "select", "for"]);
     const CLOSERS = new Set(["fi", "done", "esac"]);
-    for (const token of rawTokens) {
-      if (OPENERS.has(token)) conditionalDepth += 1;
-      else if (CLOSERS.has(token)) conditionalDepth = Math.max(0, conditionalDepth - 1);
+    // Keywords that introduce the NEXT command rather than being one, so the real command
+    // token sits behind them: `then for f in …` opens a loop that `done` will close.
+    const INTRODUCERS = new Set(["then", "do", "else", "elif", "!", "{", "}", "("]);
+
+    // Only a keyword in COMMAND POSITION is a keyword. `echo done`, `touch fi` and a `fi`
+    // inside a heredoc body or after `#` are ordinary words, and treating them as closers
+    // decremented the counter and re-certified the branch.
+    let leadingIndex = 0;
+    while (leadingIndex < rawTokens.length && INTRODUCERS.has(rawTokens[leadingIndex])) leadingIndex += 1;
+    const leading = rawTokens[leadingIndex];
+    const introducer = rawTokens[0];
+
+    if (leading !== undefined) {
+      if (OPENERS.has(leading)) conditionalDepth += 1;
+      else if (CLOSERS.has(leading)) conditionalDepth = Math.max(0, conditionalDepth - 1);
     }
+
+    // `&&`/`||` govern the WHOLE right-hand side, including a brace group. Marking only the
+    // first segment after the operator let `false && { A=1; X=/tmp/build; }` certify X.
+    if (introducer === "{") braceDepth += 1;
+    if (introducer === "}" || rawTokens[rawTokens.length - 1] === "}") {
+      braceDepth = Math.max(0, braceDepth - 1);
+      if (braceDepth < conditionalBraceDepth) conditionalBraceDepth = 0;
+    }
+    if (shortCircuit && braceDepth > 0 && conditionalBraceDepth === 0) conditionalBraceDepth = braceDepth;
+
     const conditional = conditionalDepth > 0
       || shortCircuit
-      || rawTokens.some((token) => OPENERS.has(token) || token === "then" || token === "do");
+      || conditionalBraceDepth > 0
+      || (leading !== undefined && OPENERS.has(leading))
+      || (introducer !== undefined && (introducer === "then" || introducer === "do" || introducer === "elif"));
     // A function body runs later and elsewhere, so nothing in it can be relied on.
     if (/^[A-Za-z_][A-Za-z0-9_]*\s*\(\s*\)/.test(text) || rawTokens[0] === "function") {
       current = new Set();
@@ -2175,6 +2215,11 @@ interface CommandChunk {
 const MAX_CWD_VARIANTS = 4;
 // Linux PATH_MAX. A tracked cwd longer than this cannot correspond to a real directory.
 const MAX_TRACKED_CWD_LENGTH = 4096;
+// Beyond this many `cd`s the guard stops modelling the shell and fails closed; see below.
+const MAX_CD_OPERATIONS = 2000;
+// Far above any command a person or agent writes; below the size where tokenizing alone
+// exceeds the hook's 20s budget.
+const MAX_ANALYSABLE_COMMAND_LENGTH = 1_000_000;
 
 /**
  * Segments of one layer paired with the working directories in effect when they run.
@@ -2191,6 +2236,7 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
   // that subshell - it just does not escape to the parent - so skipping isolated `cd`
   // outright left `(cd / && rm -rf *)`, the standard "cd without moving my shell" idiom,
   // completely unguarded. Depth 0 is the parent shell.
+  let cdOperations = 0;
   let stack: Array<{ group: number; cwds: string[]; previous: string[]; dirStack: string[][]; explicit: boolean }> = [
     { group: 0, cwds: [baseCwd], previous: [baseCwd], dirStack: [], explicit: false },
   ];
@@ -2246,6 +2292,20 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
       while (i < tokens.length && (tokens[i] === "-P" || tokens[i] === "-L" || tokens[i] === "-e" || tokens[i] === "-@" || tokens[i] === "--")) i += 1;
       const operand = tokens[i];
       const priorCwds = frame.cwds;
+      cdOperations += 1;
+      // Once the budget is spent the guard can no longer model a chain of RELATIVE cds. It
+      // must not simply keep the last known directory - that was the fail-open the PATH_MAX
+      // cap produced - so `/` joins the candidate set and any relative delete is judged
+      // against the filesystem root too. `rm -rf *` then blocks; `rm -rf dist` still resolves
+      // to /dist and passes.
+      //
+      // An ABSOLUTE cd is never dropped: it is a real landing the guard can still model
+      // exactly, and skipping it lost `cd ~` after a flood, which allowed `rm -rf .hasna`.
+      if (cdOperations > MAX_CD_OPERATIONS && !isAbsolute(expandHome(operand ?? ""))) {
+        if (!frame.cwds.includes(sep)) frame.cwds = [...frame.cwds, sep].slice(0, MAX_CWD_VARIANTS);
+        frame.explicit = true;
+        return;
+      }
 
       if (operand === undefined || operand === "~") {
         frame.cwds = [home];
@@ -2257,15 +2317,25 @@ function cwdTrackedSegments(command: string, baseCwd: string, nonEmptyNames: Rea
         const collapsed = emptyExpansionCollapse(operand, nonEmptyNames);
         const next = new Set<string>();
         for (const current of frame.cwds) {
-          // A chain of RELATIVE `cd`s grows the tracked path by a component each time, and
-          // resolving an ever-longer path n times is quadratic: 70k `cd d<i>` took 19.6s
-          // against the 20s timeout, and a timed-out hook fails open. No real directory can
-          // exceed PATH_MAX, so declining to grow past it is correct rather than a mere cap.
+          // Only operands that can GROW the path are capped.
           //
-          // An ABSOLUTE cd is always applied: it replaces the path rather than extending it,
-          // so it is cheap, and skipping it was itself a fail-open - a `cd /` after the flood
-          // left the guard pointing at the long path and `rm -rf *` was allowed.
-          if (!isAbsolute(expandHome(operand)) && current.length > MAX_TRACKED_CWD_LENGTH) {
+          // `..` and `.` shrink or hold, and skipping them froze the model permanently: after
+          // one crossing, `cd d0 … cd d1999; cd ..x2100` left the guard on the long path while
+          // bash had walked back to `/`, so `rm -rf *` was allowed. That was a fail-open
+          // introduced by the cap itself - the seventh time a bound in this file produced one.
+          //
+          // An absolute operand replaces the path, but resolving a 4KB operand 70k times still
+          // took 24s against the 20s timeout, so its own length is capped too. No real
+          // directory exceeds PATH_MAX, which is why this is a correctness bound and not just
+          // a throttle.
+          const expanded = expandHome(operand);
+          const shrinksOnly = /^[./]+$/.test(expanded);
+          const wouldGrow = !shrinksOnly && !isAbsolute(expanded);
+          if (wouldGrow && current.length > MAX_TRACKED_CWD_LENGTH) {
+            next.add(current);
+            continue;
+          }
+          if (expanded.length > MAX_TRACKED_CWD_LENGTH) {
             next.add(current);
             continue;
           }
@@ -2452,6 +2522,19 @@ export async function classifyDangerousOperation(input: CodewithHookInput): Prom
 
   if (input.tool_name === "Bash") {
     const command = getCommand(input);
+
+    // A command large enough that merely tokenizing it blows the hook's 20s budget cannot be
+    // analysed at all, and a timed-out hook fails open. 70k repetitions of `cd /<4KB>` is a
+    // 280 MB string: no per-rule bound helps, because the cost is reading the input. Refuse it
+    // when it carries a recursive delete, rather than letting the timeout decide.
+    if (command.length > MAX_ANALYSABLE_COMMAND_LENGTH) {
+      // Decided here either way. Falling through to the full scan for a command with no
+      // delete in it still spent 46s tokenizing, which stalls every Bash call behind the
+      // hook's timeout for no benefit.
+      const reason = truncatedAnalysisBlockReason(command);
+      return reason ? { block: true, operation: "oversized command", reason } : { block: false };
+    }
+
     if (shellCommandLayers(command).truncated) {
       const reason = truncatedAnalysisBlockReason(command);
       if (reason) {

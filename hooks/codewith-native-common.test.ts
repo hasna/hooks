@@ -1525,6 +1525,33 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
       expect(globComponentMatches(pattern, name), `${pattern} must match ${name}`).toBe(true);
     }
 
+    // The pairs above are answered by the unpinnable-boundary rule, which matches ANY name -
+    // so the literal in each is inert and a wrong one cannot be detected. Asserted explicitly
+    // rather than left implied, because the previous version of this test claimed to verify
+    // the literals and could not.
+    for (const pattern of ["*[s[.].]]", "[[:lower:]]tc", "[![:foo:]]tc"]) {
+      expect(globComponentMatches(pattern, "ZZqq9Xw"), `${pattern} is unpinnable`).toBe(true);
+    }
+
+    // Patterns WITHOUT an unpinnable construct exercise the real matcher, so their literals
+    // are load-bearing. Every pair confirmed against bash `[[ $name == $pattern ]]`.
+    for (const [pattern, name, want] of [
+      ["[a-z]tc", "etc", true],
+      ["[a-z]tc", "9tc", false],
+      ["[!a-z]tc", "9tc", true],
+      ["[!a-z]tc", "etc", false],
+      ["u[s]r", "usr", true],
+      ["u[s]r", "uxr", false],
+      ["h[o-p]me", "home", true],
+      ["h[a-c]me", "home", false],
+      ["*b[i]n", "bin", true],
+      ["*b[i]n", "ban", false],
+      ["v[a]r", "var", true],
+      ["v[a]r", "vor", false],
+    ] as Array<[string, string, boolean]>) {
+      expect(globComponentMatches(pattern, name), `${pattern} vs ${name}`).toBe(want);
+    }
+
     // ...and does not match what bash does not: a literal bracket is not a pattern.
     expect(globComponentMatches("et[c", "etc")).toBe(false);
     expect(globComponentMatches("etc[x", "etc")).toBe(false);
@@ -1629,7 +1656,8 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     // Anchored first components are still ordinary targeted deletes.
     await expectAllowed("rm -rf /opt/*/logs");
     await expectAllowed("rm -rf /var/*/tmp");
-    await expectAllowed("rm -rf /tmp*/x");
+    // `/tmp*/x` moved to BLOCK in round 10: at the filesystem root a single literal character
+    // is not an anchor. Asserted in the round-10 sweep test.
   });
 
   test("a long relative cd chain cannot stall the hook, and an absolute cd still lands", async () => {
@@ -1671,6 +1699,86 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
       else process.env.HASNA_REPOS_WORKTREES_ROOT = previous;
       process.env.HOME = INCIDENT_HOME;
     }
+  });
+
+  // -------------------------------------------------------------------------------------
+  // Adversarial review round 10.
+  // -------------------------------------------------------------------------------------
+
+  test("a cd that shrinks the path is never skipped by the length cap", async () => {
+    // The PATH_MAX cap skipped ALL relative operands once crossed, including `..`, which
+    // shrinks. After one crossing the model froze while bash walked back to `/`, so
+    // `rm -rf *` was allowed - a fail-open introduced by the cap itself.
+    const repo = mkdtempSync(join(fixtureRoot, "unwind-"));
+    Bun.spawnSync(["git", "init", "-q", repo]);
+    // TWO operations only, so the cd BUDGET is nowhere near spent and this isolates the
+    // length cap. One descent past PATH_MAX, then one `..` back: if `..` is skipped as
+    // "relative", the guard stays deep while bash is back at the repo root.
+    const deep = `cd ${"a".repeat(4200)}`;
+    await expectBlocked(`${deep}; cd ..; rm -rf *`, { cwd: repo });
+    // `.` is the repo root itself; `.git` is a child and is correctly not a protected root.
+    await expectBlocked(`${deep}; cd ..; rm -rf .`, { cwd: repo });
+
+    // And the same over a long chain, where the budget is spent as well.
+    const down = Array.from({ length: 2000 }, (_, i) => `cd d${i}`).join("; ");
+    const up = Array.from({ length: 2100 }, () => "cd ..").join("; ");
+    await expectBlocked(`${down}; ${up}; rm -rf *`, { cwd: repo });
+    await expectBlocked(`${down}; ${up}; rm -rf home`, { cwd: repo });
+  });
+
+  test("a keyword only counts in command position, and for/done stay balanced", async () => {
+    for (const command of [
+      // `for` opens because `done` closes; omitting it let any loop zero the counter.
+      'if [ -d /nonexistent ]; then for f in *.log; do echo "$f"; done; X=/tmp/build; fi; rm -rf "$X"/*',
+      'for i in $NOPE; do A=1; X=/tmp/build; done; rm -rf "$X"/*',
+      // A literal `done`/`fi` WORD is not a closer.
+      'if false; then echo done; X=/tmp/build; fi; rm -rf "$X"/*',
+      'if false; then echo "fi"; X=/tmp/build; fi; rm -rf "$X"/*',
+      'if false; then touch done; X=/tmp/build; fi; rm -rf "$X"/*',
+      'if [ -d /opt/nonexistent-cache ]; then echo done; CACHE=/opt/nonexistent-cache; fi; rm -rf "$CACHE"/*',
+      'if false; then echo x # fi\nX=/tmp/build; fi; rm -rf "$X"/*',
+      // `&&`/`||` govern the whole right-hand side, brace group included.
+      'false && { A=1; X=/tmp/build; }; rm -rf "$X"/*',
+      'true || { A=1; X=/tmp/build; }; rm -rf "$X"/*',
+      'case x in y) echo fi;;& z) X=/tmp/build;; esac; rm -rf "$X"/*',
+    ]) {
+      await expectBlocked(command);
+    }
+  });
+
+  test("a keyword-shaped word does not poison the rest of the command", async () => {
+    // `elif` was counted as an opener although `fi` closes the chain once, and any token
+    // spelled like a keyword set conditional - both refused certification for ordinary work.
+    for (const command of [
+      'if a; then :; elif b; then :; fi; CACHE=/tmp/c; rm -rf "$CACHE"/*',
+      'echo "if"; CACHE=/tmp/c; rm -rf "$CACHE"/*',
+      'touch if; CACHE=/tmp/c; rm -rf "$CACHE"/*',
+      'echo select; CACHE=/tmp/c; rm -rf "$CACHE"/*',
+      'X=/tmp/build; { export X=/tmp/build; }; rm -rf "$X"/*',
+    ]) {
+      await expectAllowed(command);
+    }
+  });
+
+  test("any glob in the first component sweeps the filesystem root", async () => {
+    // `/*r*/lib` reached 11 of 25 top-level directories on the reference machine; one literal
+    // character is not an anchor at that depth.
+    for (const command of ["rm -rf /*r*/lib", "rm -rf /*s*/bin", "rm -rf /s*/bin", "rm -rf /tmp*/x"]) {
+      await expectBlocked(command);
+    }
+    // Deeper globs are still ordinary targeted deletes.
+    await expectAllowed("rm -rf /opt/*/logs");
+    await expectAllowed("rm -rf /var/*/tmp");
+  });
+
+  test("a command too large to tokenize is decided, not left to the timeout", async () => {
+    // 70k repetitions of `cd /<4KB>` is a 280 MB string; no per-rule bound helps because the
+    // cost is reading the input, and a timed-out hook fails open.
+    const oversized = Array.from({ length: 70000 }, () => `cd /${"a".repeat(3990)}`).join("; ");
+    const started = performance.now();
+    expect((await classify(`${oversized}; rm -rf /*`)).block).toBe(true);
+    expect((await classify(oversized.replace(/cd /g, "echo "))).block).toBe(false);
+    expect(performance.now() - started).toBeLessThan(15000);
   });
 
   test("a quoted paren inside a substitution does not disable the collapse rule", async () => {
