@@ -34,7 +34,7 @@ function respond(output: HookOutput): void {
   console.log(JSON.stringify(output));
 }
 
-export function run(): void {
+export async function run(): Promise<void> {
   const input = readStdinJson();
 
   if (!input) {
@@ -42,7 +42,7 @@ export function run(): void {
     return;
   }
 
-  writeHookEvent({
+  await writeHookEvent({
     session_id: input.session_id,
     hook_name: "sessionlog",
     event_type: "PostToolUse",
@@ -55,5 +55,5 @@ export function run(): void {
 }
 
 if (import.meta.main) {
-  run();
+  await run();
 }

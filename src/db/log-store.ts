@@ -2,6 +2,12 @@ import type { Database } from "bun:sqlite";
 import { getDb } from "./index.js";
 import type { HookEventRow } from "./schema.js";
 
+export interface HookEventInput extends Partial<Omit<HookEventRow, "session_id" | "hook_name" | "event_type">> {
+  session_id: string;
+  hook_name: string;
+  event_type: HookEventRow["event_type"];
+}
+
 export interface HookLogListOptions {
   hook?: string;
   session?: string;
@@ -26,6 +32,54 @@ export interface HookLogSummary {
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 1000;
+const TOOL_INPUT_MAX_LENGTH = 500;
+
+/**
+ * Normalize a hook event into the exact row shape both write paths persist —
+ * the local SQLite writer and the `/v1/log/events` ingestion route — so an event
+ * looks identical whichever backend accepted it.
+ */
+export function buildHookEventRow(event: HookEventInput): HookEventRow {
+  return {
+    id: event.id ?? crypto.randomUUID().replace(/-/g, "").slice(0, 21),
+    timestamp: event.timestamp ?? new Date().toISOString(),
+    session_id: event.session_id,
+    hook_name: event.hook_name,
+    event_type: event.event_type,
+    tool_name: event.tool_name ?? null,
+    tool_input: event.tool_input ? event.tool_input.slice(0, TOOL_INPUT_MAX_LENGTH) : null,
+    result: event.result ?? null,
+    error: event.error ?? null,
+    duration_ms: event.duration_ms ?? null,
+    project_dir: event.project_dir ?? null,
+    metadata: event.metadata ?? null,
+  };
+}
+
+export function insertHookEvent(event: HookEventInput, db: Database = getDb()): HookEventRow {
+  const row = buildHookEventRow(event);
+  // REPLACE keyed on id keeps ingestion idempotent when a client retries a POST.
+  db.run(
+    `INSERT OR REPLACE INTO hook_events
+      (id, timestamp, session_id, hook_name, event_type, tool_name, tool_input, result, error, duration_ms, project_dir, metadata)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      row.id,
+      row.timestamp,
+      row.session_id,
+      row.hook_name,
+      row.event_type,
+      row.tool_name,
+      row.tool_input,
+      row.result,
+      row.error,
+      row.duration_ms,
+      row.project_dir,
+      row.metadata,
+    ],
+  );
+  return row;
+}
 
 export function normalizeLogLimit(value: string | number | undefined, fallback = DEFAULT_LIMIT): number {
   const parsed = typeof value === "number" ? value : value ? Number.parseInt(value, 10) : fallback;

@@ -2,7 +2,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { createHooksServer } from "./server.js";
-import { handleMcpRequest, resolveMcpHttpPort, DEFAULT_MCP_HTTP_PORT } from "./http.js";
+import { handleMcpHttpRequest, handleMcpRequest, resolveMcpHttpPort, DEFAULT_MCP_HTTP_PORT } from "./http.js";
 import { handleHooksApiRequest } from "../server/api.js";
 
 describe("hooks MCP HTTP transport", () => {
@@ -60,7 +60,7 @@ describe("hooks MCP HTTP transport", () => {
           return handleMcpRequest(req, createHooksServer);
         }
         if (url.pathname.startsWith("/v1/")) {
-          return handleHooksApiRequest(req, { name: "hooks", env: { HASNA_HOOKS_API_KEY: "fixture-key" } });
+          return handleHooksApiRequest(req, { name: "hooks", env: { HASNA_HOOKS_API_SERVER_KEY: "fixture-server-key" } });
         }
         return new Response("Not Found", { status: 404 });
       },
@@ -87,7 +87,7 @@ describe("hooks MCP HTTP transport", () => {
   test("GET /v1/health returns API health without auth", async () => {
     const res = await handleHooksApiRequest(
       new Request("http://127.0.0.1/v1/health"),
-      { name: "hooks", env: { HASNA_HOOKS_API_KEY: "fixture-key" } },
+      { name: "hooks", env: { HASNA_HOOKS_API_SERVER_KEY: "fixture-server-key" } },
     );
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ status: "ok", name: "hooks" });
@@ -96,10 +96,60 @@ describe("hooks MCP HTTP transport", () => {
   test("/v1 data routes require bearer auth", async () => {
     const res = await handleHooksApiRequest(
       new Request("http://127.0.0.1/v1/log/events"),
-      { name: "hooks", env: { HASNA_HOOKS_API_KEY: "fixture-key" } },
+      { name: "hooks", env: { HASNA_HOOKS_API_SERVER_KEY: "fixture-server-key" } },
     );
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: "Unauthorized" });
+  });
+
+  describe("/v1 data API mount gate", () => {
+    const routes: Array<[string, string]> = [
+      ["GET", "/v1/log/events"],
+      ["DELETE", "/v1/log/events"],
+      ["GET", "/v1/storage/export"],
+      ["POST", "/v1/storage/import"],
+    ];
+
+    test.each(routes)("%s %s is not served without --api", async (method, path) => {
+      const res = await handleMcpHttpRequest(
+        new Request(`http://127.0.0.1${path}`, { method }),
+        { name: "hooks", buildServer: createHooksServer },
+      );
+      expect(res.status).toBe(404);
+      expect(await res.text()).toBe("Not Found");
+    });
+
+    test("GET /v1/log/events is served with --api", async () => {
+      const res = await handleMcpHttpRequest(
+        new Request("http://127.0.0.1/v1/log/events"),
+        { name: "hooks", buildServer: createHooksServer, api: true },
+      );
+      expect(res.status).not.toBe(404);
+    });
+  });
+
+  test("the /v1 server key is not the client API key", async () => {
+    const clientKeyOnly = await handleHooksApiRequest(
+      new Request("http://127.0.0.1/v1/log/events", {
+        headers: { authorization: "Bearer client-key" },
+      }),
+      { name: "hooks", env: { HASNA_HOOKS_API_KEY: "client-key", HOOKS_API_KEY: "client-key" } },
+    );
+    expect(clientKeyOnly.status).toBe(503);
+    expect(await clientKeyOnly.json()).toEqual({
+      error: "HASNA_HOOKS_API_SERVER_KEY is required for Hooks /v1 data routes",
+    });
+
+    const clientKeyAgainstServerKey = await handleHooksApiRequest(
+      new Request("http://127.0.0.1/v1/log/events", {
+        headers: { authorization: "Bearer client-key" },
+      }),
+      {
+        name: "hooks",
+        env: { HASNA_HOOKS_API_KEY: "client-key", HASNA_HOOKS_API_SERVER_KEY: "fixture-server-key" },
+      },
+    );
+    expect(clientKeyAgainstServerKey.status).toBe(401);
   });
 
   listenerTest("MCP initialize + list tools over Streamable HTTP", async () => {

@@ -100,6 +100,14 @@ storage deployments. Use the `hooks log` commands to inspect hook event data.
 In local mode they read SQLite; in explicit API mode they use the authenticated
 Hooks `/v1` HTTP authority instead of falling back to local files.
 
+Hook event *ingestion* follows the same routing: in API mode the observability
+hooks (`commandlog`, `sessionlog`, `costwatch`, `errornotify`) `POST` each event
+to `/v1/log/events` on the configured authority, so `hooks log tail` sees the
+events this machine just produced. If the authority is unreachable or
+incompletely configured, the event is spooled into the local SQLite database
+rather than dropped, and a warning is written to stderr. Drain the spool with
+`hooks storage push` — rows are upserted by event id, so draining is idempotent.
+
 ```bash
 hooks storage status --json
 HASNA_HOOKS_DATABASE_URL=postgres://... hooks storage push --tables hook_events,feedback --json
@@ -118,8 +126,25 @@ Configure database storage with `HASNA_HOOKS_DATABASE_URL` or fallback
 `remote` values for SQLite/PostgreSQL sync. For the HTTP API backend, set
 `HASNA_HOOKS_STORAGE_MODE=api` (or `self_hosted`/`cloud`) plus
 `HASNA_HOOKS_API_URL` and `HASNA_HOOKS_API_KEY`. API mode disables local
-fallback for API-routed commands. The existing `hooks mcp --http` server exposes
-the shared MCP endpoint at `/mcp` and the Hooks API routes under `/v1`.
+fallback for API-routed commands. In `remote`/`hybrid` mode the HTTP transport
+is chosen only when `HASNA_HOOKS_API_URL` is set — an API key on its own never
+diverts those modes away from PostgreSQL — and configuring both a database URL
+and an API URL prints a precedence warning.
+
+### Serving the API
+
+`hooks mcp --http` serves only the shared MCP endpoint at `/mcp`. The Hooks
+`/v1` data API reads and can delete hook event history, so it is opt-in:
+
+```bash
+HASNA_HOOKS_API_SERVER_KEY=... hooks mcp --http --api
+```
+
+`HASNA_HOOKS_API_SERVER_KEY` (fallback `HOOKS_API_SERVER_KEY`) is the credential
+this process accepts on `/v1`. It is deliberately separate from the client-side
+`HASNA_HOOKS_API_KEY` that the CLI presents to a remote authority, so one secret
+never serves both trust roles. Without a server key the `/v1` data routes fail
+closed with HTTP 503.
 
 ## Runtime model
 

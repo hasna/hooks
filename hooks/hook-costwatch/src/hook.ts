@@ -99,7 +99,7 @@ function findSessionTranscript(cwd: string, sessionId: string): string | null {
   return null;
 }
 
-export function run(): void {
+export async function run(): Promise<void> {
   const input = readStdinJson();
 
   if (!input) {
@@ -136,7 +136,7 @@ export function run(): void {
       process.stderr.write(`[hook-costwatch] Check your actual usage at https://console.anthropic.com/\n`);
     }
 
-    writeHookEvent({
+    await writeHookEvent({
       session_id: input.session_id,
       hook_name: "costwatch",
       event_type: "Stop",
@@ -152,7 +152,7 @@ export function run(): void {
   } else {
     process.stderr.write(`[hook-costwatch] Could not estimate session cost (no transcript found).\n`);
 
-    writeHookEvent({
+    await writeHookEvent({
       session_id: input.session_id,
       hook_name: "costwatch",
       event_type: "Stop",
@@ -171,5 +171,5 @@ export function run(): void {
 }
 
 if (import.meta.main) {
-  run();
+  await run();
 }

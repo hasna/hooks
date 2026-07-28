@@ -124,6 +124,54 @@ describe("hooks api router", () => {
   });
 
   test.each([
+    ["HASNA_HOOKS_API_KEY"],
+    ["HOOKS_API_KEY"],
+  ])("a stray %s never diverts legacy remote mode away from PostgreSQL", (keyEnv) => {
+    const env = {
+      HASNA_HOOKS_STORAGE_MODE: "remote",
+      HASNA_HOOKS_DATABASE_URL: "postgres://example/hooks",
+      [keyEnv]: "strayvalue",
+    };
+    expect(resolveHooksCliStorageMode(env)).toMatchObject({ mode: "remote", selected: false, warnings: [] });
+    expect(getHooksApiClient(env)).toBeNull();
+  });
+
+  test("hybrid mode keeps the PostgreSQL path when only an API key is present", () => {
+    const env = {
+      HASNA_HOOKS_STORAGE_MODE: "hybrid",
+      HOOKS_DATABASE_URL: "postgres://example/hooks",
+      HOOKS_API_KEY: "strayvalue",
+    };
+    expect(resolveHooksCliStorageMode(env)).toMatchObject({ mode: "hybrid", selected: false });
+    expect(getHooksApiClient(env)).toBeNull();
+  });
+
+  test("legacy remote mode warns when a database URL and an API URL are both configured", () => {
+    const env = {
+      HASNA_HOOKS_STORAGE_MODE: "remote",
+      HASNA_HOOKS_DATABASE_URL: "postgres://example/hooks",
+      HASNA_HOOKS_API_URL: "https://hooks.example",
+      HASNA_HOOKS_API_KEY: "fixture-key",
+    };
+    const resolution = resolveHooksCliStorageMode(env);
+    expect(resolution).toMatchObject({ mode: "remote", selected: true });
+    expect(resolution.warnings).toHaveLength(1);
+    expect(resolution.warnings[0]).toContain("REMOTE_TRANSPORT_AMBIGUOUS");
+    expect(resolution.warnings[0]).toContain("HASNA_HOOKS_DATABASE_URL");
+    expect(resolution.warnings[0]).toContain("HASNA_HOOKS_API_URL");
+    expect(getHooksApiAuthorityConfigStatus(env).warnings).toEqual(resolution.warnings);
+  });
+
+  test("explicit api mode does not warn about an unused database URL", () => {
+    expect(resolveHooksCliStorageMode({
+      HASNA_HOOKS_STORAGE_MODE: "api",
+      HASNA_HOOKS_DATABASE_URL: "postgres://example/hooks",
+      HASNA_HOOKS_API_URL: "https://hooks.example",
+      HASNA_HOOKS_API_KEY: "fixture-key",
+    }).warnings).toEqual([]);
+  });
+
+  test.each([
     "https://user@hooks.example",
     "https://hooks.example?x=1",
     "https://hooks.example#v1",
@@ -179,6 +227,39 @@ describe("hooks api router", () => {
       search: "?hook=gitguard&session=session&limit=5",
       authorization: "Bearer fixture-key",
     }]);
+  });
+
+  test("client appends hook events to the configured /v1 authority", async () => {
+    const requests: Array<{ method: string | undefined; path: string; body: unknown }> = [];
+    const client = getHooksApiClient({
+      HASNA_HOOKS_STORAGE_MODE: "api",
+      HASNA_HOOKS_API_URL: "http://127.0.0.1:8847",
+      HASNA_HOOKS_API_KEY: "fixture-key",
+    });
+    const row = {
+      id: "evt_append",
+      timestamp: "2026-07-28T00:00:00.000Z",
+      session_id: "session-append",
+      hook_name: "commandlog",
+      event_type: "PostToolUse" as const,
+      tool_name: "Bash",
+      tool_input: "git status",
+      result: null,
+      error: null,
+      duration_ms: null,
+      project_dir: "/tmp/project",
+      metadata: null,
+    };
+
+    await withFetchStub(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      requests.push({ method: init?.method, path: url.pathname, body: JSON.parse(String(init?.body)) });
+      return Response.json({ event: row }, { status: 201 });
+    }, async () => {
+      expect(await client!.appendHookEvent(row)).toEqual(row);
+    });
+
+    expect(requests).toEqual([{ method: "POST", path: "/v1/log/events", body: row }]);
   });
 
   test("client storage pull imports remote rows into the local database", async () => {

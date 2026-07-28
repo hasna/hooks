@@ -1,45 +1,61 @@
 /**
  * Shared hook DB writer — single write path for all observability hooks.
+ *
+ * In local mode the event is inserted straight into SQLite. In an API storage
+ * mode the event is POSTed to the configured Hooks `/v1` authority so that the
+ * `hooks log` commands — which read from that same authority — can see it. If
+ * the authority is unreachable or misconfigured the event is spooled into the
+ * local database instead of being dropped; `hooks storage push` drains that
+ * spool to the authority (row upserts are keyed on the event id, so draining is
+ * idempotent).
+ *
  * Never throws: errors are written to stderr only.
  */
 
-import { getDb } from "../db";
+import type { HooksApiClient } from "../cli/cloud-router";
+import { insertHookEvent, buildHookEventRow, type HookEventInput as HookEventRowInput } from "../db/log-store";
 import type { HookEventRow } from "../db/schema";
 
-export type HookEventInput = Omit<HookEventRow, "id" | "timestamp"> & {
-  timestamp?: string;
-};
+export type HookEventInput = Omit<HookEventRowInput, "id">;
 
-function nanoid(): string {
-  return crypto.randomUUID().replace(/-/g, "").slice(0, 21);
+async function resolveApiClient(): Promise<HooksApiClient | null> {
+  try {
+    const { getHooksApiClient } = await import("../cli/cloud-router");
+    return getHooksApiClient();
+  } catch (err) {
+    process.stderr.write(`[hooks db-writer] Hooks API routing unavailable, spooling locally: ${err}\n`);
+    return null;
+  }
 }
 
-export function writeHookEvent(event: HookEventInput): void {
+function spool(row: HookEventRow): void {
   try {
-    const db = getDb();
-    const id = nanoid();
-    const timestamp = event.timestamp ?? new Date().toISOString();
-
-    db.run(
-      `INSERT INTO hook_events
-        (id, timestamp, session_id, hook_name, event_type, tool_name, tool_input, result, error, duration_ms, project_dir, metadata)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        id,
-        timestamp,
-        event.session_id,
-        event.hook_name,
-        event.event_type,
-        event.tool_name ?? null,
-        event.tool_input ? event.tool_input.slice(0, 500) : null,
-        event.result ?? null,
-        event.error ?? null,
-        event.duration_ms ?? null,
-        event.project_dir ?? null,
-        event.metadata ?? null,
-      ]
-    );
+    insertHookEvent(row);
   } catch (err) {
     process.stderr.write(`[hooks db-writer] failed to write event: ${err}\n`);
   }
+}
+
+export async function writeHookEvent(event: HookEventInput): Promise<void> {
+  let row: HookEventRow;
+  try {
+    row = buildHookEventRow(event);
+  } catch (err) {
+    process.stderr.write(`[hooks db-writer] failed to write event: ${err}\n`);
+    return;
+  }
+
+  const client = await resolveApiClient();
+  if (client) {
+    try {
+      await client.appendHookEvent(row);
+      return;
+    } catch (err) {
+      process.stderr.write(
+        `[hooks db-writer] Hooks API write failed, spooling locally for 'hooks storage push': ${err}\n`,
+      );
+    }
+  }
+
+  spool(row);
 }

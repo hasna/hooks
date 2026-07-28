@@ -3,10 +3,12 @@ import { dirname, join } from "path";
 import { fileURLToPath } from "url";
 import {
   clearHookEvents,
+  insertHookEvent,
   listHookErrors,
   listHookEvents,
   normalizeLogLimit,
   searchHookEvents,
+  type HookEventInput,
 } from "../db/log-store.js";
 import {
   getStorageStatus,
@@ -17,6 +19,14 @@ import {
 } from "../storage.js";
 
 type Env = Record<string, string | undefined>;
+
+/**
+ * The credential this process accepts as the /v1 admin key. It is deliberately
+ * NOT `HASNA_HOOKS_API_KEY`: that variable is the CLIENT bearer token for a
+ * remote authority, and one secret must not serve both trust roles.
+ */
+export const HOOKS_API_SERVER_KEY_ENV = "HASNA_HOOKS_API_SERVER_KEY";
+export const HOOKS_API_SERVER_KEY_FALLBACK_ENV = "HOOKS_API_SERVER_KEY";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 let pkg = { name: "@hasna/hooks", version: "0.0.0" };
@@ -50,6 +60,10 @@ export async function handleHooksApiRequest(req: Request, options: { name?: stri
         limit: normalizeLogLimit(url.searchParams.get("limit") ?? undefined),
       });
       return json({ events, count: events.length });
+    }
+    if (url.pathname === "/v1/log/events" && req.method === "POST") {
+      const event = await req.json() as HookEventInput;
+      return json({ event: insertHookEvent(event) }, 201);
     }
     if (url.pathname === "/v1/log/events" && req.method === "DELETE") {
       const cleared = clearHookEvents({ hook: url.searchParams.get("hook") ?? undefined });
@@ -89,9 +103,9 @@ export async function handleHooksApiRequest(req: Request, options: { name?: stri
 }
 
 function requireApiAuth(req: Request, env: Env): Response | null {
-  const expected = (env.HASNA_HOOKS_API_KEY ?? env.HOOKS_API_KEY)?.trim();
+  const expected = (env[HOOKS_API_SERVER_KEY_ENV] ?? env[HOOKS_API_SERVER_KEY_FALLBACK_ENV])?.trim();
   if (!expected) {
-    return json({ error: "HASNA_HOOKS_API_KEY is required for Hooks /v1 data routes" }, 503);
+    return json({ error: `${HOOKS_API_SERVER_KEY_ENV} is required for Hooks /v1 data routes` }, 503);
   }
   const authorization = req.headers.get("authorization") ?? "";
   if (authorization !== `Bearer ${expected}`) {

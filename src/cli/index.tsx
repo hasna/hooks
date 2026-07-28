@@ -45,6 +45,7 @@ import {
   exportProfiles,
   importProfiles,
 } from "../lib/profiles.js";
+import type { HooksApiClient } from "./cloud-router.js";
 
 const program = new Command();
 
@@ -119,6 +120,20 @@ function printDisclosureHint(hidden: number, detailCommand: string, options: { i
   } else {
     console.log(chalk.dim(`\n  Use --verbose or ${detailCommand} for details.`));
   }
+}
+
+/**
+ * Resolve the configured Hooks API client, surfacing any routing warnings (such
+ * as a PostgreSQL URL and an HTTP authority both being configured) on stderr so
+ * the chosen transport is never silent. Returns null when the command should
+ * read and write local SQLite.
+ */
+async function loadHooksApiClient(): Promise<HooksApiClient | null> {
+  const { getHooksApiAuthorityConfigStatus, getHooksApiClient } = await import("./cloud-router.js");
+  for (const warning of getHooksApiAuthorityConfigStatus().warnings) {
+    console.error(chalk.yellow(`! ${warning}`));
+  }
+  return getHooksApiClient();
 }
 
 function failCommand(error: unknown, options: { json?: boolean } = {}): void {
@@ -1070,8 +1085,7 @@ logCmd
   .action(async (options: { hook?: string; session?: string; limit: string; json: boolean }) => {
     let rows: any[];
     try {
-      const { getHooksApiClient } = await import("./cloud-router.js");
-      const client = getHooksApiClient();
+      const client = await loadHooksApiClient();
       if (client) {
         rows = await client.listHookEvents({
           hook: options.hook,
@@ -1112,8 +1126,7 @@ logCmd
   .action(async (text: string, options: { limit: string; json: boolean }) => {
     let rows: any[];
     try {
-      const { getHooksApiClient } = await import("./cloud-router.js");
-      const client = getHooksApiClient();
+      const client = await loadHooksApiClient();
       if (client) {
         rows = await client.searchHookEvents({ text, limit: parseInt(options.limit) || 50 });
       } else {
@@ -1145,8 +1158,7 @@ logCmd
   .action(async (options: { n: string; json: boolean }) => {
     let rows: any[];
     try {
-      const { getHooksApiClient } = await import("./cloud-router.js");
-      const client = getHooksApiClient();
+      const client = await loadHooksApiClient();
       if (client) {
         rows = await client.tailHookEvents({ limit: parseInt(options.n) || 20 });
       } else {
@@ -1180,8 +1192,7 @@ logCmd
   .action(async (options: { since: string; limit: string; json: boolean }) => {
     let rows: any[];
     try {
-      const { getHooksApiClient } = await import("./cloud-router.js");
-      const client = getHooksApiClient();
+      const client = await loadHooksApiClient();
       if (client) {
         rows = await client.listHookErrors({ since: options.since, limit: parseInt(options.limit) || 50 });
       } else {
@@ -1213,8 +1224,7 @@ logCmd
   .action(async (options: { hook?: string; yes: boolean; json: boolean }) => {
     let count: number;
     try {
-      const { getHooksApiClient } = await import("./cloud-router.js");
-      const client = getHooksApiClient();
+      const client = await loadHooksApiClient();
       if (client) {
         if (!options.yes) {
           if (options.json) console.log(JSON.stringify({ cleared: 0, confirmed: false, hook: options.hook ?? null }));
@@ -1296,6 +1306,7 @@ storageCmd
         console.log(`  API key:    ${apiStatus.api_key_configured ? "configured" : "not configured"}`);
         console.log("  Local fallback: disabled");
         console.log("  Network:    not used (configuration diagnostic only)");
+        for (const warning of apiStatus.warnings) console.error(chalk.yellow(`  ${warning}`));
         for (const issue of apiStatus.issues) console.error(chalk.red(`  ${issue}`));
       }
       if (!apiStatus.ok) process.exitCode = 1;
@@ -1323,8 +1334,7 @@ storageCmd
     try {
       const { parseStorageTables, storagePush } = await import("../storage.js");
       const tables = parseStorageTables(options.tables);
-      const { getHooksApiClient } = await import("./cloud-router.js");
-      const client = getHooksApiClient();
+      const client = await loadHooksApiClient();
       const results = client
         ? await client.storagePush({ tables })
         : await storagePush({ tables });
@@ -1351,8 +1361,7 @@ storageCmd
     try {
       const { parseStorageTables, storagePull } = await import("../storage.js");
       const tables = parseStorageTables(options.tables);
-      const { getHooksApiClient } = await import("./cloud-router.js");
-      const client = getHooksApiClient();
+      const client = await loadHooksApiClient();
       const results = client
         ? await client.storagePull({ tables })
         : await storagePull({ tables });
@@ -1379,8 +1388,7 @@ storageCmd
     try {
       const { parseStorageTables, storageSync } = await import("../storage.js");
       const tables = parseStorageTables(options.tables);
-      const { getHooksApiClient } = await import("./cloud-router.js");
-      const client = getHooksApiClient();
+      const client = await loadHooksApiClient();
       const result = client
         ? await client.storageSync({ tables })
         : await storageSync({ tables });
@@ -1405,9 +1413,10 @@ program
   .option("-s, --stdio", "Use stdio transport (one process per agent)", false)
   .option("--sse", "Use legacy SSE transport (port 39427)", false)
   .option("--http", "Use Streamable HTTP transport (explicit; this is also the default)", false)
+  .option("--api", "Also serve the Hooks /v1 data API (off by default; requires HASNA_HOOKS_API_SERVER_KEY)", false)
   .option("-p, --port <port>", "Port for HTTP/SSE transport (defaults to 8847 for HTTP, 39427 for SSE)")
   .description("Start MCP server for AI agent integration (default: shared Streamable HTTP)")
-  .action(async (options: { stdio: boolean; sse: boolean; http: boolean; port?: string }) => {
+  .action(async (options: { stdio: boolean; sse: boolean; http: boolean; api: boolean; port?: string }) => {
     if (options.stdio) {
       const { startStdioServer } = await import("../mcp/server.js");
       await startStdioServer();
@@ -1419,7 +1428,12 @@ program
       const { createHooksServer } = await import("../mcp/server.js");
       const { resolveMcpHttpPort, startMcpHttpServer } = await import("../mcp/http.js");
       const args = options.port ? ["--port", options.port] : [];
-      startMcpHttpServer({ name: "hooks", port: resolveMcpHttpPort(args), buildServer: createHooksServer });
+      startMcpHttpServer({
+        name: "hooks",
+        port: resolveMcpHttpPort(args),
+        buildServer: createHooksServer,
+        api: options.api,
+      });
     }
   });
 registerEventsCommands(program, { source: "hooks" });

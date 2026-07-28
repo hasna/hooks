@@ -1,10 +1,5 @@
 import type { HookEventRow } from "../db/schema.js";
-import {
-  storageExportRows,
-  storageImportRows,
-  type StorageRowsPayload,
-  type SyncResult,
-} from "../storage.js";
+import type { StorageRowsPayload, SyncResult } from "../storage.js";
 
 type Env = Record<string, string | undefined>;
 type HttpMethod = "GET" | "POST" | "DELETE";
@@ -12,11 +7,15 @@ type HttpMethod = "GET" | "POST" | "DELETE";
 const API_MODES = new Set(["api", "self_hosted", "cloud"]);
 const POSTGRES_COMPAT_MODES = new Set(["remote", "hybrid"]);
 const VALID_STORAGE_MODES = new Set(["local", "remote", "hybrid", ...API_MODES]);
+const API_URL_ENV = ["HASNA_HOOKS_API_URL", "HOOKS_API_URL"] as const;
+const API_KEY_ENV = ["HASNA_HOOKS_API_KEY", "HOOKS_API_KEY"] as const;
+const DATABASE_URL_ENV = ["HASNA_HOOKS_DATABASE_URL", "HOOKS_DATABASE_URL"] as const;
 
 export interface HooksCliStorageModeResolution {
   mode: string;
   selected: boolean;
   source: "HASNA_HOOKS_STORAGE_MODE" | "HOOKS_STORAGE_MODE" | "default";
+  warnings: string[];
 }
 
 export interface HooksApiAuthorityConfigStatus {
@@ -27,11 +26,13 @@ export interface HooksApiAuthorityConfigStatus {
   api_key_configured: boolean;
   v1_base_url: string | null;
   issues: string[];
+  warnings: string[];
   local_fallback: false;
 }
 
 export interface HooksApiClient {
   baseUrl: string;
+  appendHookEvent(event: HookEventRow): Promise<HookEventRow>;
   listHookEvents(options?: { hook?: string; session?: string; limit?: number }): Promise<HookEventRow[]>;
   searchHookEvents(options: { text: string; limit?: number }): Promise<HookEventRow[]>;
   tailHookEvents(options?: { limit?: number }): Promise<HookEventRow[]>;
@@ -56,9 +57,20 @@ function firstConfigured(env: Env, names: readonly string[]): string | null {
   return null;
 }
 
-function apiConfigPresent(env: Env): boolean {
-  return Boolean(firstConfigured(env, ["HASNA_HOOKS_API_URL", "HOOKS_API_URL"])) ||
-    Boolean(firstConfigured(env, ["HASNA_HOOKS_API_KEY", "HOOKS_API_KEY"]));
+function firstConfiguredName(env: Env, names: readonly string[]): string | null {
+  for (const name of names) {
+    if (env[name]?.trim()) return name;
+  }
+  return null;
+}
+
+/**
+ * The API endpoint — never the credential alone — decides whether a legacy
+ * `remote`/`hybrid` mode is routed over HTTP. A stray `HOOKS_API_KEY` in the
+ * environment must not hijack the PostgreSQL storage path.
+ */
+function apiAuthorityConfigured(env: Env): boolean {
+  return Boolean(firstConfigured(env, API_URL_ENV));
 }
 
 export function resolveHooksCliStorageMode(env: Env = process.env as Env): HooksCliStorageModeResolution {
@@ -85,10 +97,26 @@ export function resolveHooksCliStorageMode(env: Env = process.env as Env): Hooks
   }
 
   const mode = canonical ?? fallback ?? "local";
+  const postgresCompat = POSTGRES_COMPAT_MODES.has(mode);
+  const selected = API_MODES.has(mode) || (postgresCompat && apiAuthorityConfigured(env));
+
+  const warnings: string[] = [];
+  if (selected && postgresCompat) {
+    const databaseUrlEnv = firstConfiguredName(env, DATABASE_URL_ENV);
+    if (databaseUrlEnv) {
+      warnings.push(
+        `REMOTE_TRANSPORT_AMBIGUOUS: ${mode} mode has both ${databaseUrlEnv} and ` +
+          `${firstConfiguredName(env, API_URL_ENV)} configured; the HTTP /v1 authority takes precedence ` +
+          "and PostgreSQL sync is not used",
+      );
+    }
+  }
+
   return {
     mode,
-    selected: API_MODES.has(mode) || (POSTGRES_COMPAT_MODES.has(mode) && apiConfigPresent(env)),
+    selected,
     source: canonical ? "HASNA_HOOKS_STORAGE_MODE" : fallback ? "HOOKS_STORAGE_MODE" : "default",
+    warnings,
   };
 }
 
@@ -101,10 +129,11 @@ export function getHooksApiAuthorityConfigStatus(env: Env = process.env as Env):
       selected: true,
       ok: false,
       mode: clean(env.HASNA_HOOKS_STORAGE_MODE) ?? clean(env.HOOKS_STORAGE_MODE) ?? "invalid",
-      api_url_configured: Boolean(firstConfigured(env, ["HASNA_HOOKS_API_URL", "HOOKS_API_URL"])),
-      api_key_configured: Boolean(firstConfigured(env, ["HASNA_HOOKS_API_KEY", "HOOKS_API_KEY"])),
+      api_url_configured: Boolean(firstConfigured(env, API_URL_ENV)),
+      api_key_configured: Boolean(firstConfigured(env, API_KEY_ENV)),
       v1_base_url: null,
       issues: [error instanceof Error ? error.message : String(error)],
+      warnings: [],
       local_fallback: false,
     };
   }
@@ -118,19 +147,20 @@ export function getHooksApiAuthorityConfigStatus(env: Env = process.env as Env):
       api_key_configured: false,
       v1_base_url: null,
       issues: [],
+      warnings: resolution.warnings,
       local_fallback: false,
     };
   }
 
   const issues: string[] = [];
-  const rawApiUrl = firstConfigured(env, ["HASNA_HOOKS_API_URL", "HOOKS_API_URL"]);
+  const rawApiUrl = firstConfigured(env, API_URL_ENV);
   let apiUrl: string | null = null;
   try {
     apiUrl = normalizeHooksApiUrl(rawApiUrl ?? undefined);
   } catch (error) {
     issues.push(error instanceof Error ? error.message : String(error));
   }
-  const apiKeyConfigured = Boolean(firstConfigured(env, ["HASNA_HOOKS_API_KEY", "HOOKS_API_KEY"]));
+  const apiKeyConfigured = Boolean(firstConfigured(env, API_KEY_ENV));
   if (!apiUrl && issues.length === 0) {
     issues.push("REMOTE_API_URL_MISSING: api Hooks storage requires HASNA_HOOKS_API_URL; local SQLite fallback is disabled");
   }
@@ -146,6 +176,7 @@ export function getHooksApiAuthorityConfigStatus(env: Env = process.env as Env):
     api_key_configured: apiKeyConfigured,
     v1_base_url: apiUrl ? `${apiUrl}/v1` : null,
     issues,
+    warnings: resolution.warnings,
     local_fallback: false,
   };
 }
@@ -154,7 +185,7 @@ export function getHooksApiClient(env: Env = process.env as Env): HooksApiClient
   const status = getHooksApiAuthorityConfigStatus(env);
   if (!status.selected) return null;
   if (!status.ok) throw new Error(status.issues[0]);
-  const apiKey = firstConfigured(env, ["HASNA_HOOKS_API_KEY", "HOOKS_API_KEY"])!;
+  const apiKey = firstConfigured(env, API_KEY_ENV)!;
   return new HttpHooksApiClient(status.v1_base_url!, apiKey);
 }
 
@@ -193,6 +224,11 @@ class HttpHooksApiClient implements HooksApiClient {
     private readonly apiKey: string,
   ) {}
 
+  async appendHookEvent(event: HookEventRow): Promise<HookEventRow> {
+    const data = await this.request<{ event: HookEventRow }>("POST", "/log/events", event);
+    return data.event;
+  }
+
   async listHookEvents(options: { hook?: string; session?: string; limit?: number } = {}): Promise<HookEventRow[]> {
     const data = await this.request<{ events: HookEventRow[] }>("GET", `/log/events${queryString(options)}`);
     return data.events;
@@ -223,12 +259,16 @@ class HttpHooksApiClient implements HooksApiClient {
   }
 
   async storagePush(options: { tables?: string[] } = {}): Promise<SyncResult[]> {
+    // Imported lazily: hook processes route event writes through this client and
+    // must not pay for the PostgreSQL adapter that ../storage.js pulls in.
+    const { storageExportRows } = await import("../storage.js");
     const payload = storageExportRows({ tables: options.tables });
     const data = await this.request<{ results: SyncResult[] }>("POST", "/storage/import", payload);
     return data.results;
   }
 
   async storagePull(options: { tables?: string[] } = {}): Promise<SyncResult[]> {
+    const { storageImportRows } = await import("../storage.js");
     const payload = await this.storageExport(options);
     return storageImportRows(payload, { direction: "pull" });
   }

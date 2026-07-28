@@ -895,6 +895,31 @@ describe("CLI", () => {
         rmSync(root, { recursive: true, force: true });
       }
     });
+
+    test("a stray API key does not divert remote storage push away from PostgreSQL", async () => {
+      const root = mkdtempSync(join(tmpdir(), "hooks-storage-stray-key-"));
+      const dbPath = join(root, "hooks.db");
+      try {
+        seedHookEvent(dbPath, { id: "evt_stray", hook_name: "gitguard" });
+        const result = await runWithEnv(["storage", "push", "--tables", "hook_events", "--json"], {
+          HOME: root,
+          HASNA_HOOKS_DB_PATH: dbPath,
+          HASNA_HOOKS_STORAGE_MODE: "remote",
+          // Port 1 is never listening: PostgreSQL is attempted and refused fast.
+          HASNA_HOOKS_DATABASE_URL: "postgres://hooks:hooks@127.0.0.1:1/hooks",
+          HOOKS_API_KEY: "strayvalue",
+          HASNA_HOOKS_API_URL: undefined,
+          HASNA_HOOKS_API_KEY: undefined,
+        });
+
+        expect(result.exitCode).toBe(1);
+        const error = String(JSON.parse(result.stdout).error);
+        expect(error).not.toContain("REMOTE_API_URL_MISSING");
+        expect(error).toContain("ECONNREFUSED");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("hooks update with installed hooks", () => {
