@@ -10,6 +10,23 @@ const VALID_STORAGE_MODES = new Set(["local", "remote", "hybrid", ...API_MODES])
 const API_URL_ENV = ["HASNA_HOOKS_API_URL", "HOOKS_API_URL"] as const;
 const API_KEY_ENV = ["HASNA_HOOKS_API_KEY", "HOOKS_API_KEY"] as const;
 const DATABASE_URL_ENV = ["HASNA_HOOKS_DATABASE_URL", "HOOKS_DATABASE_URL"] as const;
+const API_TIMEOUT_ENV = ["HASNA_HOOKS_API_TIMEOUT_MS", "HOOKS_API_TIMEOUT_MS"] as const;
+const API_WRITE_TIMEOUT_ENV = ["HASNA_HOOKS_API_WRITE_TIMEOUT_MS", "HOOKS_API_WRITE_TIMEOUT_MS"] as const;
+
+/** Deadline for interactive `hooks log` / `hooks storage` commands. */
+export const DEFAULT_API_TIMEOUT_MS = 30_000;
+/**
+ * Deadline for the hook event write path. Every agent tool call blocks on this
+ * request, so an authority that accepts the connection and never answers must
+ * fall through to the local spool in seconds rather than stalling the agent
+ * until its own hook timeout kills the process and the event is lost.
+ */
+export const DEFAULT_API_WRITE_TIMEOUT_MS = 3_000;
+
+export interface HooksApiTimeouts {
+  request: number;
+  write: number;
+}
 
 export interface HooksCliStorageModeResolution {
   mode: string;
@@ -186,7 +203,27 @@ export function getHooksApiClient(env: Env = process.env as Env): HooksApiClient
   if (!status.selected) return null;
   if (!status.ok) throw new Error(status.issues[0]);
   const apiKey = firstConfigured(env, API_KEY_ENV)!;
-  return new HttpHooksApiClient(status.v1_base_url!, apiKey);
+  return new HttpHooksApiClient(status.v1_base_url!, apiKey, resolveHooksApiTimeouts(env));
+}
+
+/**
+ * Request deadlines for the API client. A malformed override falls back to the
+ * default rather than throwing: a typo in a performance knob must not be able
+ * to disable the deadline that keeps hook writes from blocking forever.
+ */
+export function resolveHooksApiTimeouts(env: Env = process.env as Env): HooksApiTimeouts {
+  return {
+    request: resolveTimeoutMs(env, API_TIMEOUT_ENV, DEFAULT_API_TIMEOUT_MS),
+    write: resolveTimeoutMs(env, API_WRITE_TIMEOUT_ENV, DEFAULT_API_WRITE_TIMEOUT_MS),
+  };
+}
+
+function resolveTimeoutMs(env: Env, names: readonly string[], fallback: number): number {
+  const raw = firstConfigured(env, names);
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.trunc(parsed);
 }
 
 function normalizeHooksApiUrl(value: string | undefined): string | null {
@@ -222,10 +259,11 @@ class HttpHooksApiClient implements HooksApiClient {
   constructor(
     readonly baseUrl: string,
     private readonly apiKey: string,
+    private readonly timeouts: HooksApiTimeouts,
   ) {}
 
   async appendHookEvent(event: HookEventRow): Promise<HookEventRow> {
-    const data = await this.request<{ event: HookEventRow }>("POST", "/log/events", event);
+    const data = await this.request<{ event: HookEventRow }>("POST", "/log/events", event, this.timeouts.write);
     return data.event;
   }
 
@@ -283,12 +321,21 @@ class HttpHooksApiClient implements HooksApiClient {
     return this.request<StorageRowsPayload>("GET", `/storage/export${queryString({ tables: options.tables?.join(",") })}`);
   }
 
-  private async request<T = unknown>(method: HttpMethod, path: string, body?: unknown): Promise<T> {
+  private async request<T = unknown>(
+    method: HttpMethod,
+    path: string,
+    body?: unknown,
+    timeoutMs: number = this.timeouts.request,
+  ): Promise<T> {
+    // The deadline covers the response body too, so an authority that answers
+    // its headers and then stalls the stream is classified the same way.
+    const signal = AbortSignal.timeout(timeoutMs);
     let response: Response;
     try {
       response = await fetch(`${this.baseUrl}${path}`, {
         method,
         redirect: "manual",
+        signal,
         headers: {
           authorization: `Bearer ${this.apiKey}`,
           ...(body === undefined ? {} : { "content-type": "application/json" }),
@@ -296,18 +343,28 @@ class HttpHooksApiClient implements HooksApiClient {
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     } catch (error) {
-      throw new Error(
-        `REMOTE_API_UNREACHABLE: configured Hooks authority ${authorityBase(this.baseUrl)} could not be reached for ${path}; ` +
-          "local SQLite fallback is disabled",
-        { cause: error },
-      );
+      throw this.unreachable(path, timeoutMs, signal.aborted, error);
     }
 
     if (!response.ok) {
       await classifyRemoteResponse(this.baseUrl, path, response);
     }
     if (response.status === 204) return undefined as T;
-    return response.json() as Promise<T>;
+    try {
+      return await response.json() as T;
+    } catch (error) {
+      if (signal.aborted) throw this.unreachable(path, timeoutMs, true, error);
+      throw error;
+    }
+  }
+
+  private unreachable(path: string, timeoutMs: number, timedOut: boolean, cause: unknown): Error {
+    const reason = timedOut ? `did not respond within ${timeoutMs}ms` : "could not be reached";
+    return new Error(
+      `REMOTE_API_UNREACHABLE: configured Hooks authority ${authorityBase(this.baseUrl)} ${reason} for ${path}; ` +
+        "local SQLite fallback is disabled",
+      { cause },
+    );
   }
 }
 

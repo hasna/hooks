@@ -12,7 +12,16 @@ export const STORAGE_TABLES = [
 
 export const HOOKS_STORAGE_TABLES = STORAGE_TABLES;
 
+/**
+ * The only tables the `/v1` HTTP transport carries. `schema_migrations` and
+ * `_meta` are per-database bookkeeping: replicating a peer's migration ledger
+ * would let a client running a newer release mark a migration as applied on an
+ * authority that never ran its DDL, permanently suppressing it.
+ */
+export const DATA_SYNC_TABLES = ["hook_events", "feedback"] as const;
+
 export type StorageTable = (typeof STORAGE_TABLES)[number];
+export type DataSyncTable = (typeof DATA_SYNC_TABLES)[number];
 export type StorageRow = Record<string, unknown>;
 
 export type StorageMode = "local" | "hybrid" | "remote";
@@ -148,9 +157,10 @@ export async function storageSync(options?: { tables?: string[] }): Promise<{ pu
   return { pull, push };
 }
 
+/** Builds a `/v1` payload; bookkeeping tables are never exported. */
 export function storageExportRows(options?: { tables?: string[] }, db: Database = getDb()): StorageRowsPayload {
   const tables: Partial<Record<StorageTable, StorageRow[]>> = {};
-  for (const table of resolveTables(options?.tables)) {
+  for (const table of resolveDataSyncTables(options?.tables)) {
     tables[table] = tableExists(db, table)
       ? db.query(`SELECT * FROM ${quoteIdent(table)}`).all() as StorageRow[]
       : [];
@@ -158,6 +168,12 @@ export function storageExportRows(options?: { tables?: string[] }, db: Database 
   return { tables };
 }
 
+/**
+ * Applies a `/v1` payload. A bookkeeping table sent by a peer — an older client
+ * or a hand-rolled request — is refused with an error in its `SyncResult`
+ * instead of being upserted, so the local migration ledger is never written by
+ * anything but this process's own migration runner.
+ */
 export function storageImportRows(
   payload: StorageRowsPayload,
   options: { direction?: "push" | "pull" } = {},
@@ -171,6 +187,11 @@ export function storageImportRows(
   for (const table of tables) {
     const result: SyncResult = { table, rowsRead: 0, rowsWritten: 0, errors: [] };
     try {
+      if (!isDataSyncTable(table)) {
+        const incoming = incomingTables[table];
+        result.rowsRead = Array.isArray(incoming) ? incoming.length : 0;
+        throw new Error(bookkeepingTableRefusal([table]));
+      }
       if (!tableExists(db, table)) {
         results.push(result);
         continue;
@@ -219,6 +240,27 @@ export function resolveTables(tables?: string[]): StorageTable[] {
   const invalid = requested.filter((table) => !allowed.has(table));
   if (invalid.length > 0) throw new Error(`Unknown hooks sync table(s): ${invalid.join(", ")}`);
   return requested as StorageTable[];
+}
+
+export function isDataSyncTable(table: string): table is DataSyncTable {
+  return (DATA_SYNC_TABLES as readonly string[]).includes(table);
+}
+
+/**
+ * Table resolution for the `/v1` transport: defaults to the data tables and
+ * refuses bookkeeping tables even when they are named explicitly.
+ */
+export function resolveDataSyncTables(tables?: string[]): DataSyncTable[] {
+  if (!tables || tables.length === 0) return [...DATA_SYNC_TABLES];
+  const requested = resolveTables(tables);
+  const bookkeeping = requested.filter((table) => !isDataSyncTable(table));
+  if (bookkeeping.length > 0) throw new Error(bookkeepingTableRefusal(bookkeeping));
+  return requested as DataSyncTable[];
+}
+
+function bookkeepingTableRefusal(tables: string[]): string {
+  return `Hooks /v1 sync does not carry bookkeeping table(s): ${tables.join(", ")}; ` +
+    "migration state is per-database and is never replicated between peers";
 }
 
 export function parseStorageTables(value?: string | string[] | null): StorageTable[] | undefined {

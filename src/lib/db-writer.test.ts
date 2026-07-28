@@ -29,6 +29,10 @@ const ROUTING_ENV = [
   "HOOKS_API_KEY",
   "HASNA_HOOKS_DB_PATH",
   "HOOKS_DB_PATH",
+  "HASNA_HOOKS_API_TIMEOUT_MS",
+  "HOOKS_API_TIMEOUT_MS",
+  "HASNA_HOOKS_API_WRITE_TIMEOUT_MS",
+  "HOOKS_API_WRITE_TIMEOUT_MS",
 ] as const;
 
 async function withEnv<T>(overrides: Record<string, string | undefined>, callback: () => Promise<T>): Promise<T> {
@@ -154,6 +158,40 @@ describe("writeHookEvent", () => {
       expect(rows[0]).toMatchObject({ session_id: "session-writer", hook_name: "commandlog" });
     });
   });
+
+  test("api mode spools to local SQLite when the authority never answers", async () => {
+    // A wedged authority accepts the TCP connection and returns nothing. Without
+    // a write deadline the hook blocks until the agent kills it and the event is
+    // lost, so this asserts the spool guarantee, not just the fast-failure one.
+    await withTempRoot("hooks-writer-hung-", async (root) => {
+      const dbPath = join(root, "hooks.db");
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        idleTimeout: 0,
+        fetch: () => new Promise<Response>(() => {}),
+      });
+      let elapsedMs = 0;
+      try {
+        const startedAt = Date.now();
+        await withEnv({
+          HASNA_HOOKS_STORAGE_MODE: "api",
+          HASNA_HOOKS_API_URL: `http://127.0.0.1:${server.port}`,
+          HASNA_HOOKS_API_KEY: "fixture-api-key",
+          HASNA_HOOKS_API_WRITE_TIMEOUT_MS: "400",
+          HASNA_HOOKS_DB_PATH: dbPath,
+        }, () => writeHookEvent(EVENT));
+        elapsedMs = Date.now() - startedAt;
+      } finally {
+        server.stop(true);
+      }
+
+      expect(elapsedMs).toBeLessThan(5_000);
+      const rows = readHookEvents(dbPath);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ session_id: "session-writer", hook_name: "commandlog" });
+    });
+  }, 15_000);
 
   test("api mode spools to local SQLite when the authority is misconfigured", async () => {
     await withTempRoot("hooks-writer-misconfigured-", async (root) => {

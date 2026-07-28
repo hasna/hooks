@@ -1,4 +1,5 @@
 export {
+  DATA_SYNC_TABLES,
   HOOKS_STORAGE_ENV,
   HOOKS_STORAGE_FALLBACK_ENV,
   HOOKS_STORAGE_MODE_ENV,
@@ -14,7 +15,9 @@ export {
   getStoragePg,
   getStorageStatus,
   getSyncMetaAll,
+  isDataSyncTable,
   parseStorageTables,
+  resolveDataSyncTables,
   resolveTables,
   runStorageMigrations,
   storageExportRows,
@@ -23,6 +26,6 @@ export {
   storagePush,
   storageSync,
 } from "./db/storage-sync.js";
-export type { StorageEnv, StorageMode, StorageRow, StorageRowsPayload, StorageStatus, SyncMeta, SyncResult } from "./db/storage-sync.js";
+export type { DataSyncTable, StorageEnv, StorageMode, StorageRow, StorageRowsPayload, StorageStatus, SyncMeta, SyncResult } from "./db/storage-sync.js";
 export { PgAdapterAsync } from "./db/remote-storage.js";
 export { PG_MIGRATIONS } from "./db/pg-migrations.js";

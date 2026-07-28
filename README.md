@@ -103,10 +103,23 @@ Hooks `/v1` HTTP authority instead of falling back to local files.
 Hook event *ingestion* follows the same routing: in API mode the observability
 hooks (`commandlog`, `sessionlog`, `costwatch`, `errornotify`) `POST` each event
 to `/v1/log/events` on the configured authority, so `hooks log tail` sees the
-events this machine just produced. If the authority is unreachable or
-incompletely configured, the event is spooled into the local SQLite database
-rather than dropped, and a warning is written to stderr. Drain the spool with
-`hooks storage push` — rows are upserted by event id, so draining is idempotent.
+events this machine just produced. If the authority is unreachable, incompletely
+configured, or does not answer within the write deadline, the event is spooled
+into the local SQLite database rather than dropped, and a warning is written to
+stderr. Drain the spool with `hooks storage push` — rows are upserted by event
+id, so draining is idempotent.
+
+Every `/v1` request carries a deadline, so a hung authority can never block an
+agent's tool call: hook event writes default to 3s
+(`HASNA_HOOKS_API_WRITE_TIMEOUT_MS`, fallback `HOOKS_API_WRITE_TIMEOUT_MS`) and
+interactive `hooks log` / `hooks storage` commands default to 30s
+(`HASNA_HOOKS_API_TIMEOUT_MS`, fallback `HOOKS_API_TIMEOUT_MS`).
+
+The `/v1` transport carries data tables only — `hook_events` and `feedback`.
+`schema_migrations` and `_meta` are per-database bookkeeping and are never
+exported, imported, or accepted by `/v1/storage/import`: replicating a peer's
+migration ledger would let a machine on a newer release mark a migration as
+applied on an authority that never ran its DDL, permanently suppressing it.
 
 ```bash
 hooks storage status --json

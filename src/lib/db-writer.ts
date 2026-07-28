@@ -4,10 +4,14 @@
  * In local mode the event is inserted straight into SQLite. In an API storage
  * mode the event is POSTed to the configured Hooks `/v1` authority so that the
  * `hooks log` commands — which read from that same authority — can see it. If
- * the authority is unreachable or misconfigured the event is spooled into the
- * local database instead of being dropped; `hooks storage push` drains that
- * spool to the authority (row upserts are keyed on the event id, so draining is
- * idempotent).
+ * the authority is unreachable, misconfigured, or does not answer within the
+ * write deadline (`DEFAULT_API_WRITE_TIMEOUT_MS`, overridable with
+ * `HASNA_HOOKS_API_WRITE_TIMEOUT_MS`), the event is spooled into the local
+ * database instead of being dropped; `hooks storage push` drains that spool to
+ * the authority (row upserts are keyed on the event id, so draining is
+ * idempotent). The deadline is what makes the spool guarantee hold against a
+ * hung authority: this function runs inside every agent tool call, so it must
+ * never block for longer than that.
  *
  * Never throws: errors are written to stderr only.
  */

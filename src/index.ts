@@ -188,6 +188,7 @@ export {
 } from "./lib/profiles.js";
 
 export {
+  DATA_SYNC_TABLES,
   HOOKS_STORAGE_ENV,
   HOOKS_STORAGE_FALLBACK_ENV,
   HOOKS_STORAGE_MODE_ENV,
@@ -203,7 +204,9 @@ export {
   getStoragePg,
   getStorageStatus,
   getSyncMetaAll,
+  isDataSyncTable,
   parseStorageTables,
+  resolveDataSyncTables,
   resolveTables,
   runStorageMigrations,
   storageExportRows,
@@ -212,4 +215,4 @@ export {
   storagePush,
   storageSync,
 } from "./storage.js";
-export type { StorageEnv, StorageMode, StorageRow, StorageRowsPayload, StorageStatus, SyncMeta, SyncResult } from "./storage.js";
+export type { DataSyncTable, StorageEnv, StorageMode, StorageRow, StorageRowsPayload, StorageStatus, SyncMeta, SyncResult } from "./storage.js";

@@ -4,8 +4,11 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import {
+  DEFAULT_API_TIMEOUT_MS,
+  DEFAULT_API_WRITE_TIMEOUT_MS,
   getHooksApiAuthorityConfigStatus,
   getHooksApiClient,
+  resolveHooksApiTimeouts,
   resolveHooksCliStorageMode,
 } from "./cloud-router.js";
 import { closeDb } from "../db/index.js";
@@ -343,4 +346,92 @@ describe("hooks api router", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  test("client storage push never transports the local migration ledger", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hooks-router-push-ledger-"));
+    const dbPath = join(root, "hooks.db");
+    try {
+      const imports: any[] = [];
+      const client = getHooksApiClient({
+        HASNA_HOOKS_STORAGE_MODE: "api",
+        HASNA_HOOKS_API_URL: "http://127.0.0.1:8847",
+        HASNA_HOOKS_API_KEY: "fixture-key",
+      });
+
+      await withDbPath(dbPath, async () => {
+        await withFetchStub(async (_input, init) => {
+          imports.push(JSON.parse(String(init?.body)));
+          return Response.json({ results: [] });
+        }, () => client!.storagePush());
+      });
+
+      // The local database has a populated schema_migrations table; a default
+      // push must still carry data tables only.
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        expect((db.query("SELECT version FROM schema_migrations").all() as unknown[]).length).toBeGreaterThan(0);
+      } finally {
+        db.close();
+      }
+      expect(Object.keys(imports[0].tables).sort()).toEqual(["feedback", "hook_events"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("client storage push refuses an explicitly requested bookkeeping table", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hooks-router-push-refuse-"));
+    try {
+      const client = getHooksApiClient({
+        HASNA_HOOKS_STORAGE_MODE: "api",
+        HASNA_HOOKS_API_URL: "http://127.0.0.1:8847",
+        HASNA_HOOKS_API_KEY: "fixture-key",
+      });
+      await withDbPath(join(root, "hooks.db"), async () => {
+        await expect(client!.storagePush({ tables: ["schema_migrations"] }))
+          .rejects.toThrow("does not carry bookkeeping table");
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("resolves request deadlines from the environment and ignores malformed overrides", () => {
+    expect(resolveHooksApiTimeouts({})).toEqual({
+      request: DEFAULT_API_TIMEOUT_MS,
+      write: DEFAULT_API_WRITE_TIMEOUT_MS,
+    });
+    expect(resolveHooksApiTimeouts({
+      HOOKS_API_TIMEOUT_MS: "1200",
+      HASNA_HOOKS_API_WRITE_TIMEOUT_MS: "250",
+    })).toEqual({ request: 1200, write: 250 });
+    expect(resolveHooksApiTimeouts({
+      HASNA_HOOKS_API_TIMEOUT_MS: "not-a-number",
+      HASNA_HOOKS_API_WRITE_TIMEOUT_MS: "0",
+    })).toEqual({ request: DEFAULT_API_TIMEOUT_MS, write: DEFAULT_API_WRITE_TIMEOUT_MS });
+  });
+
+  test("client requests fail fast against an authority that accepts the connection and never answers", async () => {
+    // Distinct from the immediate ECONNREFUSED the other tests exercise: this
+    // is a wedged authority, which without a deadline blocks the caller forever.
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      idleTimeout: 0,
+      fetch: () => new Promise<Response>(() => {}),
+    });
+    try {
+      const client = getHooksApiClient({
+        HASNA_HOOKS_STORAGE_MODE: "api",
+        HASNA_HOOKS_API_URL: `http://127.0.0.1:${server.port}`,
+        HASNA_HOOKS_API_KEY: "fixture-key",
+        HASNA_HOOKS_API_TIMEOUT_MS: "400",
+      });
+      const startedAt = Date.now();
+      await expect(client!.listHookEvents()).rejects.toThrow("REMOTE_API_UNREACHABLE");
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+    } finally {
+      server.stop(true);
+    }
+  }, 15_000);
 });

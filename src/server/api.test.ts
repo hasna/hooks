@@ -134,3 +134,85 @@ describe("Hooks /v1 log ingestion", () => {
     expect(res.status).toBe(503);
   });
 });
+
+function readMigrationLedger(dbPath: string): string[] {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    return (db.query("SELECT version FROM schema_migrations ORDER BY version").all() as Array<{ version: string }>)
+      .map((row) => row.version);
+  } finally {
+    db.close();
+  }
+}
+
+describe("Hooks /v1 storage sync", () => {
+  test("POST /v1/storage/import refuses a schema_migrations payload and leaves the ledger untouched", async () => {
+    await withTempRoot("hooks-api-ledger-", async (root) => {
+      const dbPath = join(root, "hooks.db");
+      let ledgerBefore: string[] = [];
+
+      await withDbPath(dbPath, async () => {
+        // Opening the authority's database applies its own migrations.
+        await handleHooksApiRequest(post({
+          session_id: "session-ledger",
+          hook_name: "commandlog",
+          event_type: "PostToolUse",
+        }), { env: SERVER_ENV });
+        ledgerBefore = readMigrationLedger(dbPath);
+        expect(ledgerBefore.length).toBeGreaterThan(0);
+
+        const res = await handleHooksApiRequest(
+          new Request("http://127.0.0.1/v1/storage/import", {
+            method: "POST",
+            headers: AUTH,
+            body: JSON.stringify({
+              tables: {
+                schema_migrations: [{ version: "004_future", applied_at: "2026-07-28T00:00:00.000Z" }],
+                _meta: [{ key: "peer", value: "client" }],
+              },
+            }),
+          }),
+          { env: SERVER_ENV },
+        );
+
+        expect(res.status).toBe(200);
+        const { results } = await res.json() as { results: Array<{ table: string; rowsWritten: number; errors: string[] }> };
+        for (const result of results) {
+          expect(result.rowsWritten).toBe(0);
+          expect(result.errors.join(" ")).toContain("does not carry bookkeeping table");
+        }
+        expect(results.map((result) => result.table).sort()).toEqual(["_meta", "schema_migrations"]);
+      });
+
+      expect(readMigrationLedger(dbPath)).toEqual(ledgerBefore);
+    });
+  });
+
+  test("GET /v1/storage/export never carries bookkeeping tables", async () => {
+    await withTempRoot("hooks-api-export-", async (root) => {
+      await withDbPath(join(root, "hooks.db"), async () => {
+        const res = await handleHooksApiRequest(
+          new Request("http://127.0.0.1/v1/storage/export", { headers: AUTH }),
+          { env: SERVER_ENV },
+        );
+        expect(res.status).toBe(200);
+        const { tables } = await res.json() as { tables: Record<string, unknown[]> };
+        expect(Object.keys(tables).sort()).toEqual(["feedback", "hook_events"]);
+      });
+    });
+  });
+
+  test("GET /v1/storage/export rejects an explicitly requested bookkeeping table", async () => {
+    await withTempRoot("hooks-api-export-reject-", async (root) => {
+      await withDbPath(join(root, "hooks.db"), async () => {
+        const res = await handleHooksApiRequest(
+          new Request("http://127.0.0.1/v1/storage/export?tables=schema_migrations", { headers: AUTH }),
+          { env: SERVER_ENV },
+        );
+        expect(res.status).toBe(400);
+        const { error } = await res.json() as { error: string };
+        expect(error).toContain("does not carry bookkeeping table");
+      });
+    });
+  });
+});
