@@ -107,14 +107,14 @@ function importErrorsLog(db: Database, filePath: string): number {
   return count;
 }
 
-export function runLegacyImport(db: Database): void {
+export function runLegacyImport(db: Database, homeDir = homedir()): void {
   try {
     if (isAlreadyDone(db)) return;
 
     let total = 0;
 
     // Scan ~/.claude/projects/<hash>/ directories for session log files
-    const claudeProjectsDir = join(homedir(), ".claude", "projects");
+    const claudeProjectsDir = join(homeDir, ".claude", "projects");
     if (existsSync(claudeProjectsDir)) {
       try {
         const projectDirs = readdirSync(claudeProjectsDir);

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added unit coverage for SQLite/PostgreSQL storage synchronization and one-time legacy flat-file imports, including empty, malformed, and permission-refusal paths.
+
 ### Changed
 
 - **BREAKING: deployment modes are gone; hooks storage is a two-value data-backend switch.** `StorageMode = "local" | "hybrid" | "remote"` described *where* something ran, which was never a property of the data layer, and nothing in the codebase ever branched on it — it was reported by `hooks storage status` and the `storage_status` MCP tool and otherwise decorative. It is replaced by `StorageBackend = "sqlite" | "postgresql"`.
