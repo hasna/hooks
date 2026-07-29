@@ -402,6 +402,16 @@ export const HOOKS: HookMeta[] = [
     matcher: "",
     tags: ["errors", "failures", "logging", "debugging"],
   },
+  {
+    name: "spiral-detector",
+    displayName: "Spiral Detector",
+    description: "Interrupts sessions after five consecutive identical command failures",
+    version: "0.1.0",
+    category: "Observability",
+    event: "PostToolUse",
+    matcher: "",
+    tags: ["spiral", "failures", "retries", "safety", "interrupt"],
+  },
 
   // Code Quality
   {
