@@ -8,6 +8,7 @@ import {
   listHookEvents,
   normalizeLogLimit,
   searchHookEvents,
+  summarizeHookEvents,
   type HookEventInput,
 } from "../db/log-store.js";
 import {
@@ -57,6 +58,7 @@ export async function handleHooksApiRequest(req: Request, options: { name?: stri
       const events = listHookEvents({
         hook: url.searchParams.get("hook") ?? undefined,
         session: url.searchParams.get("session") ?? undefined,
+        since: url.searchParams.get("since") ?? undefined,
         limit: normalizeLogLimit(url.searchParams.get("limit") ?? undefined),
       });
       return json({ events, count: events.length });
@@ -82,6 +84,9 @@ export async function handleHooksApiRequest(req: Request, options: { name?: stri
         limit: normalizeLogLimit(url.searchParams.get("limit") ?? undefined),
       });
       return json({ events, count: events.length });
+    }
+    if (url.pathname === "/v1/log/summary" && req.method === "GET") {
+      return json(summarizeHookEvents({ since: url.searchParams.get("since") ?? undefined }));
     }
     if (url.pathname === "/v1/storage/status" && req.method === "GET") {
       return json({ ...getStorageStatus(), transport: "api-http" });

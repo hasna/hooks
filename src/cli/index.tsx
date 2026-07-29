@@ -1223,6 +1223,10 @@ logCmd
   .option("-j, --json", "Output as JSON", false)
   .action(async (options: { hook?: string; yes: boolean; json: boolean }) => {
     let count: number;
+    // Set only on the API path, which destroys rows in two stores. The report
+    // has to name both: an operator who is told "0" while a local spool was
+    // deleted has lost audit history without being warned.
+    let apiCleared: { remote: number; local: number } | null = null;
     try {
       const client = await loadHooksApiClient();
       if (client) {
@@ -1235,7 +1239,7 @@ logCmd
           }
           return;
         }
-        count = await client.clearHookEvents({ hook: options.hook });
+        const remote = await client.clearHookEvents({ hook: options.hook });
         // The authority is not the only copy: `storage pull` mirrors its rows
         // into local SQLite and `storage push` uploads whatever that file still
         // holds, so a delete that stopped at the authority would be reversed by
@@ -1243,7 +1247,16 @@ logCmd
         // authority reported nothing — rows spooled while it was unreachable
         // live only locally and would otherwise be pushed after the purge.
         const { clearLocalHookEventMirror } = await import("../db/log-store.js");
-        clearLocalHookEventMirror({ hook: options.hook });
+        const local = clearLocalHookEventMirror({ hook: options.hook });
+        apiCleared = { remote, local };
+        // The headline is the larger of the two, not their sum: the mirror holds
+        // the rows `storage pull` copied down from the authority, so adding the
+        // counts would report one pulled event twice. The maximum is exact in
+        // both pure cases — a mirror of the authority (local === remote) and an
+        // unpushed spool it never saw (remote === 0) — and it can never claim
+        // nothing was cleared while local rows were destroyed. Both per-store
+        // counts are reported alongside it so the split is never hidden.
+        count = Math.max(remote, local);
       } else {
         const { clearHookEvents } = await import("../db/log-store.js");
         if (!options.yes) {
@@ -1262,8 +1275,10 @@ logCmd
       return;
     }
 
+    const perStore = apiCleared ? { cleared_remote: apiCleared.remote, cleared_local: apiCleared.local } : {};
+
     if (count === 0) {
-      if (options.json) console.log(JSON.stringify({ cleared: 0, hook: options.hook ?? null }));
+      if (options.json) console.log(JSON.stringify({ cleared: 0, hook: options.hook ?? null, ...perStore }));
       else console.log(chalk.dim("Nothing to clear."));
       return;
     }
@@ -1279,7 +1294,13 @@ logCmd
       return;
     }
 
-    if (options.json) { console.log(JSON.stringify({ cleared: count, hook: options.hook ?? null })); return; }
+    if (options.json) { console.log(JSON.stringify({ cleared: count, hook: options.hook ?? null, ...perStore })); return; }
+    if (apiCleared) {
+      console.log(chalk.green(
+        `✓ Cleared ${count} event(s) — ${apiCleared.remote} on the Hooks API and ${apiCleared.local} in the local mirror.`,
+      ));
+      return;
+    }
     console.log(chalk.green(`✓ Cleared ${count} event(s).`));
   });
 

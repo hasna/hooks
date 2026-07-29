@@ -232,6 +232,39 @@ describe("hooks api router", () => {
     }]);
   });
 
+  test("client sends log summary and since-filtered list requests to the /v1 authority", async () => {
+    const requests: Array<{ path: string; search: string; authorization: string | null }> = [];
+    const client = getHooksApiClient({
+      HASNA_HOOKS_STORAGE_MODE: "api",
+      HASNA_HOOKS_API_URL: "http://127.0.0.1:8847",
+      HASNA_HOOKS_API_KEY: "fixture-key",
+    });
+    const summary = {
+      since: "2026-07-28T00:00:00.000Z",
+      hooks: [{ hook_name: "gitguard", total: 3, errors: 1, error_rate: "33.3%" }],
+      totals: { events: 3, errors: 1, hooks_active: 1 },
+    };
+
+    await withFetchStub(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      requests.push({
+        path: url.pathname,
+        search: url.search,
+        authorization: new Headers(init?.headers).get("authorization"),
+      });
+      if (url.pathname === "/v1/log/summary") return Response.json(summary);
+      return Response.json({ events: [] });
+    }, async () => {
+      expect(await client!.summarizeHookEvents({ since: "7d" })).toEqual(summary);
+      expect(await client!.listHookEvents({ since: "30m", limit: 5 })).toEqual([]);
+    });
+
+    expect(requests).toEqual([
+      { path: "/v1/log/summary", search: "?since=7d", authorization: "Bearer fixture-key" },
+      { path: "/v1/log/events", search: "?since=30m&limit=5", authorization: "Bearer fixture-key" },
+    ]);
+  });
+
   test("client appends hook events to the configured /v1 authority", async () => {
     const requests: Array<{ method: string | undefined; path: string; body: unknown }> = [];
     const client = getHooksApiClient({

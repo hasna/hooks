@@ -864,7 +864,10 @@ describe("CLI", () => {
         const pulled = await runJsonWithEnv(["storage", "pull", "--tables", "hook_events"], apiEnv);
         expect(pulled).toEqual([{ table: "hook_events", rowsRead: 2, rowsWritten: 2, errors: [] }]);
 
-        expect(await runJsonWithEnv(["log", "clear", "--yes"], apiEnv)).toMatchObject({ cleared: 2 });
+        // Both stores held the same two events, so the headline is 2 — not the
+        // sum of the per-store counts, which would report each pulled event twice.
+        expect(await runJsonWithEnv(["log", "clear", "--yes"], apiEnv))
+          .toMatchObject({ cleared: 2, cleared_remote: 2, cleared_local: 2 });
         // The purge must reach the mirror the next push reads from.
         expect(await runJsonWithEnv(["log", "list"], localEnv)).toEqual([]);
 
@@ -908,10 +911,21 @@ describe("CLI", () => {
         // the DELETE clears nothing remotely and only the mirror holds the rows.
         seedHookEvent(dbPath, { id: "evt_spooled", hook_name: "gitguard" });
 
-        expect(await runJsonWithEnv(["log", "clear", "--yes"], apiEnv)).toMatchObject({ cleared: 0 });
+        // Destroying the spool while reporting "Nothing to clear." would lose
+        // audit history behind a message that says nothing happened.
+        const human = await runWithEnv(["log", "clear", "--yes"], apiEnv);
+        expect(human.exitCode).toBe(0);
+        expect(human.stdout).not.toContain("Nothing to clear.");
+        expect(human.stdout).toContain("Cleared 1 event(s)");
+        expect(human.stdout).toContain("1 in the local mirror");
 
         await runJsonWithEnv(["storage", "push", "--tables", "hook_events"], apiEnv);
         expect(imports.at(-1).tables.hook_events).toEqual([]);
+
+        // The JSON report counts the local rows and names both stores.
+        seedHookEvent(dbPath, { id: "evt_spooled_2", hook_name: "gitguard" });
+        expect(await runJsonWithEnv(["log", "clear", "--yes"], apiEnv))
+          .toMatchObject({ cleared: 1, cleared_remote: 0, cleared_local: 1, hook: null });
       } finally {
         server.stop(true);
         rmSync(root, { recursive: true, force: true });
@@ -937,7 +951,7 @@ describe("CLI", () => {
           HASNA_HOOKS_API_KEY: "fixture-api-key",
         });
 
-        expect(result).toMatchObject({ cleared: 3 });
+        expect(result).toMatchObject({ cleared: 3, cleared_remote: 3, cleared_local: 0 });
         expect(existsSync(dirname(dbPath))).toBe(false);
       } finally {
         server.stop(true);
@@ -971,7 +985,8 @@ describe("CLI", () => {
         seedHookEvent(dbPath, { id: "evt_guard", hook_name: "gitguard" });
         seedHookEvent(dbPath, { id: "evt_cost", hook_name: "costwatch" });
 
-        expect(await runJsonWithEnv(["log", "clear", "--hook", "gitguard", "--yes"], apiEnv)).toMatchObject({ cleared: 1 });
+        expect(await runJsonWithEnv(["log", "clear", "--hook", "gitguard", "--yes"], apiEnv))
+          .toMatchObject({ cleared: 1, cleared_remote: 1, cleared_local: 1, hook: "gitguard" });
 
         await runJsonWithEnv(["storage", "push", "--tables", "hook_events"], apiEnv);
         expect(imports.at(-1).tables.hook_events.map((row: any) => row.id)).toEqual(["evt_cost"]);

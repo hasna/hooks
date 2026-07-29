@@ -57,8 +57,53 @@ import {
   storagePush,
   storageSync,
 } from "../storage.js";
+import type { HooksApiClient } from "../cli/cloud-router.js";
 
 export const MCP_PORT = 39427;
+
+/**
+ * Resolve the configured Hooks `/v1` authority for the log query tools, or null
+ * in local mode where SQLite is the source of truth.
+ *
+ * The hook write path (`src/lib/db-writer.ts`) POSTs events to that authority in
+ * an API storage mode, so a tool that queried local SQLite would answer "no
+ * events" for a session whose events all landed remotely. These tools therefore
+ * route exactly like `hooks log …` in `src/cli/index.tsx`, and a misconfigured
+ * or unreachable authority surfaces as a tool error rather than an empty result
+ * set — local SQLite fallback is disabled for API-routed reads.
+ */
+async function loadHooksApiClient(): Promise<HooksApiClient | null> {
+  const { getHooksApiAuthorityConfigStatus, getHooksApiClient } = await import("../cli/cloud-router.js");
+  // stderr, never stdout: stdout is the stdio transport's protocol channel.
+  for (const warning of getHooksApiAuthorityConfigStatus().warnings) {
+    process.stderr.write(`[hooks mcp] ${warning}\n`);
+  }
+  return getHooksApiClient();
+}
+
+function toolFailure(error: unknown) {
+  return {
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
+    }],
+    isError: true,
+  };
+}
+
+function logEventsResult(rows: any[], compact: boolean) {
+  return {
+    content: [{
+      type: "text" as const,
+      text: JSON.stringify({
+        events: compact ? rows.map(compactEvent) : rows,
+        count: rows.length,
+        compact,
+        hint: compact ? "Use compact:false for full tool_input/output fields." : undefined,
+      }),
+    }],
+  };
+}
 
 function formatInstallResults(results: InstallResult[], extra?: Record<string, any>) {
   const installed = results.filter((r) => r.success).map((r) => r.hook);
@@ -787,7 +832,7 @@ export function createHooksServer(): McpServer {
 
   defineTool(
     "hooks_log_list",
-    "List hook events from SQLite. Compact summaries by default; set compact:false for full event rows.",
+    "List hook events from the configured Hooks authority, or local SQLite in local storage mode. Compact summaries by default; set compact:false for full event rows.",
     {
       hook_name: z.string().optional().describe("Filter by hook name (e.g. 'sessionlog', 'costwatch')"),
       session_id: z.string().optional().describe("Filter by session ID prefix"),
@@ -796,154 +841,76 @@ export function createHooksServer(): McpServer {
       compact: z.boolean().default(true).describe("Return compact event summaries by default. Set false for full rows."),
     },
     async ({ hook_name, session_id, limit, since, compact }) => {
-      const { getDb } = await import("../db/index.js");
-      const db = getDb();
       const maxRows = boundedLimit(limit, compact ? 20 : 50, compact ? 100 : 500);
-
-      function parseDuration(s: string): string | null {
-        const m = s.match(/^(\d+)(s|m|h|d)$/);
-        if (!m) return null;
-        const n = parseInt(m[1]);
-        const ms = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2] as "s"|"m"|"h"|"d"]!;
-        return new Date(Date.now() - n * ms).toISOString();
+      const query = { hook: hook_name, session: session_id, since, limit: maxRows };
+      try {
+        const client = await loadHooksApiClient();
+        if (client) return logEventsResult(await client.listHookEvents(query), compact);
+        const { listHookEvents } = await import("../db/log-store.js");
+        return logEventsResult(listHookEvents(query), compact);
+      } catch (error) {
+        return toolFailure(error);
       }
-
-      let sql = "SELECT * FROM hook_events WHERE 1=1";
-      const params: (string | number)[] = [];
-
-      if (hook_name) { sql += " AND hook_name = ?"; params.push(hook_name); }
-      if (session_id) { sql += " AND session_id LIKE ?"; params.push(`${session_id}%`); }
-      if (since) {
-        const ts = since.match(/^\d{4}/) ? since : parseDuration(since);
-        if (ts) { sql += " AND timestamp >= ?"; params.push(ts); }
-      }
-      sql += " ORDER BY timestamp DESC LIMIT ?";
-      params.push(maxRows);
-
-      const rows = db.query(sql).all(...params) as any[];
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            events: compact ? rows.map(compactEvent) : rows,
-            count: rows.length,
-            compact,
-            hint: compact ? "Use compact:false for full tool_input/output fields." : undefined,
-          }),
-        }],
-      };
     }
   );
 
   defineTool(
     "hooks_log_tail",
-    "Show recent hook events from SQLite. Compact summaries by default.",
+    "Show recent hook events from the configured Hooks authority, or local SQLite in local storage mode. Compact summaries by default.",
     {
       n: z.number().default(20).describe("Number of most recent events to return"),
       compact: z.boolean().default(true).describe("Return compact event summaries by default. Set false for full rows."),
     },
     async ({ n, compact }) => {
-      const { getDb } = await import("../db/index.js");
-      const db = getDb();
       const maxRows = boundedLimit(n, 20, compact ? 100 : 500);
-      const rows = db.query("SELECT * FROM hook_events ORDER BY timestamp DESC LIMIT ?").all(maxRows) as any[];
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            events: compact ? rows.map(compactEvent) : rows,
-            count: rows.length,
-            compact,
-            hint: compact ? "Use compact:false for full tool_input/output fields." : undefined,
-          }),
-        }],
-      };
+      try {
+        const client = await loadHooksApiClient();
+        if (client) return logEventsResult(await client.tailHookEvents({ limit: maxRows }), compact);
+        const { tailHookEvents } = await import("../db/log-store.js");
+        return logEventsResult(tailHookEvents(maxRows), compact);
+      } catch (error) {
+        return toolFailure(error);
+      }
     }
   );
 
   defineTool(
     "hooks_log_errors",
-    "Show hook events that contain errors. Compact summaries by default.",
+    "Show hook events that contain errors, from the configured Hooks authority or local SQLite in local storage mode. Compact summaries by default.",
     {
       since: z.string().default("24h").describe("Duration string (e.g. '1h', '30m', '7d') or ISO timestamp"),
       limit: z.number().optional().describe("Max number of error events to return. Defaults to 20 compact rows or 50 full rows."),
       compact: z.boolean().default(true).describe("Return compact event summaries by default. Set false for full rows."),
     },
     async ({ since, limit, compact }) => {
-      const { getDb } = await import("../db/index.js");
-      const db = getDb();
       const maxRows = boundedLimit(limit, compact ? 20 : 50, compact ? 100 : 500);
-
-      function parseDuration(s: string): string {
-        const m = s.match(/^(\d+)(s|m|h|d)$/);
-        if (!m) return s;
-        const n = parseInt(m[1]);
-        const ms = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2] as "s"|"m"|"h"|"d"]!;
-        return new Date(Date.now() - n * ms).toISOString();
+      try {
+        const client = await loadHooksApiClient();
+        if (client) return logEventsResult(await client.listHookErrors({ since, limit: maxRows }), compact);
+        const { listHookErrors } = await import("../db/log-store.js");
+        return logEventsResult(listHookErrors({ since, limit: maxRows }), compact);
+      } catch (error) {
+        return toolFailure(error);
       }
-
-      const ts = since.match(/^\d{4}/) ? since : parseDuration(since);
-      const rows = db.query(
-        "SELECT * FROM hook_events WHERE error IS NOT NULL AND timestamp >= ? ORDER BY timestamp DESC LIMIT ?"
-      ).all(ts, maxRows) as any[];
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            events: compact ? rows.map(compactEvent) : rows,
-            count: rows.length,
-            compact,
-            hint: compact ? "Use compact:false for full tool_input/output fields." : undefined,
-          }),
-        }],
-      };
     }
   );
 
   defineTool(
     "hooks_log_summary",
-    "Summarize hook execution: counts per hook, error rates, and recent activity.",
+    "Summarize hook execution: counts per hook, error rates, and recent activity. Reads the configured Hooks authority, or local SQLite in local storage mode.",
     {
       since: z.string().default("24h").describe("Duration string (e.g. '1h', '24h', '7d') or ISO timestamp"),
     },
     async ({ since }) => {
-      const { getDb } = await import("../db/index.js");
-      const db = getDb();
-
-      function parseDuration(s: string): string {
-        const m = s.match(/^(\d+)(s|m|h|d)$/);
-        if (!m) return s;
-        const n = parseInt(m[1]);
-        const ms = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2] as "s"|"m"|"h"|"d"]!;
-        return new Date(Date.now() - n * ms).toISOString();
+      try {
+        const client = await loadHooksApiClient();
+        const summary = client
+          ? await client.summarizeHookEvents({ since })
+          : (await import("../db/log-store.js")).summarizeHookEvents({ since });
+        return { content: [{ type: "text" as const, text: JSON.stringify(summary) }] };
+      } catch (error) {
+        return toolFailure(error);
       }
-
-      const ts = since.match(/^\d{4}/) ? since : parseDuration(since);
-
-      const totals = db.query(
-        "SELECT hook_name, COUNT(*) as total, SUM(CASE WHEN error IS NOT NULL THEN 1 ELSE 0 END) as errors FROM hook_events WHERE timestamp >= ? GROUP BY hook_name ORDER BY total DESC"
-      ).all(ts) as { hook_name: string; total: number; errors: number }[];
-
-      const summary = totals.map((r) => ({
-        hook_name: r.hook_name,
-        total: r.total,
-        errors: r.errors,
-        error_rate: r.total > 0 ? ((r.errors / r.total) * 100).toFixed(1) + "%" : "0%",
-      }));
-
-      const grandTotal = totals.reduce((s, r) => s + r.total, 0);
-      const grandErrors = totals.reduce((s, r) => s + r.errors, 0);
-
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            since: ts,
-            hooks: summary,
-            totals: { events: grandTotal, errors: grandErrors, hooks_active: totals.length },
-          }),
-        }],
-      };
     }
   );
 
@@ -975,6 +942,12 @@ export function createHooksServer(): McpServer {
     async (params) => ({ content: [{ type: "text" as const, text: JSON.stringify(await storageSync(params.tables ? { tables: params.tables } : undefined)) }] }),
   );
 
+  // Unlike the log query tools this one always writes local SQLite, in every
+  // storage mode. `feedback` is one of the two DATA_SYNC_TABLES, so the row is
+  // spooled exactly like an unreachable-authority hook event and reaches the
+  // authority on the next `hooks storage push`; there is no `/v1` feedback
+  // route to send it to directly, and no read surface that could answer from
+  // the wrong store.
   defineTool(
     "send_feedback",
     "Send feedback about this service",

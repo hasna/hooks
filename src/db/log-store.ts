@@ -12,6 +12,7 @@ export interface HookEventInput extends Partial<Omit<HookEventRow, "session_id" 
 export interface HookLogListOptions {
   hook?: string;
   session?: string;
+  since?: string;
   limit?: number;
 }
 
@@ -107,6 +108,10 @@ export function listHookEvents(options: HookLogListOptions = {}, db: Database = 
   if (options.session) {
     sql += " AND session_id LIKE ?";
     params.push(`${options.session}%`);
+  }
+  if (options.since) {
+    sql += " AND timestamp >= ?";
+    params.push(parseLogSince(options.since));
   }
   sql += " ORDER BY timestamp DESC LIMIT ?";
   params.push(normalizeLogLimit(options.limit));

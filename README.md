@@ -112,7 +112,17 @@ id, so draining is idempotent.
 Because that spool is also the mirror `hooks storage pull` writes into, `hooks
 log clear` in API mode deletes on the authority *and* in the local database. A
 purge that stopped at the authority would be undone by the next `hooks storage
-push`, which uploads whatever the local file still holds.
+push`, which uploads whatever the local file still holds. Both stores are
+reported: `cleared_remote` and `cleared_local` name the per-store counts and
+`cleared` is the larger of the two, so clearing an unpushed spool the authority
+never saw can never be reported as "nothing to clear". (`cleared` is the larger
+count rather than their sum because a pulled event exists in both stores and
+must not be counted twice.)
+
+The MCP log tools (`hooks_log_list`, `hooks_log_tail`, `hooks_log_errors`,
+`hooks_log_summary`) route exactly like the `hooks log` commands: the authority
+in API mode, local SQLite in local mode, and a tool error rather than a stale
+local answer when an API authority is configured but cannot be reached.
 
 Every `/v1` request carries a deadline, so a hung authority can never block an
 agent's tool call: hook event writes default to 3s

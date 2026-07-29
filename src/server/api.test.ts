@@ -122,6 +122,83 @@ describe("Hooks /v1 log ingestion", () => {
     });
   });
 
+  test("GET /v1/log/events honours the since filter", async () => {
+    await withTempRoot("hooks-api-since-", async (root) => {
+      await withDbPath(join(root, "hooks.db"), async () => {
+        await handleHooksApiRequest(post({
+          id: "evt_recent",
+          timestamp: new Date().toISOString(),
+          session_id: "session-since",
+          hook_name: "commandlog",
+          event_type: "PostToolUse",
+        }), { env: SERVER_ENV });
+        await handleHooksApiRequest(post({
+          id: "evt_ancient",
+          timestamp: "2020-01-01T00:00:00.000Z",
+          session_id: "session-since",
+          hook_name: "commandlog",
+          event_type: "PostToolUse",
+        }), { env: SERVER_ENV });
+
+        const filtered = await handleHooksApiRequest(
+          new Request("http://127.0.0.1/v1/log/events?since=1h", { headers: AUTH }),
+          { env: SERVER_ENV },
+        );
+        const { events } = await filtered.json() as { events: Array<{ id: string }> };
+        expect(events.map((event) => event.id)).toEqual(["evt_recent"]);
+
+        const unfiltered = await handleHooksApiRequest(
+          new Request("http://127.0.0.1/v1/log/events", { headers: AUTH }),
+          { env: SERVER_ENV },
+        );
+        const all = await unfiltered.json() as { events: Array<{ id: string }> };
+        expect(all.events.map((event) => event.id).sort()).toEqual(["evt_ancient", "evt_recent"]);
+      });
+    });
+  });
+
+  test("GET /v1/log/summary aggregates events per hook", async () => {
+    await withTempRoot("hooks-api-summary-", async (root) => {
+      await withDbPath(join(root, "hooks.db"), async () => {
+        await handleHooksApiRequest(post({
+          session_id: "session-summary",
+          hook_name: "commandlog",
+          event_type: "PostToolUse",
+        }), { env: SERVER_ENV });
+        await handleHooksApiRequest(post({
+          session_id: "session-summary",
+          hook_name: "commandlog",
+          event_type: "PostToolUse",
+          error: "boom",
+        }), { env: SERVER_ENV });
+
+        const res = await handleHooksApiRequest(
+          new Request("http://127.0.0.1/v1/log/summary", { headers: AUTH }),
+          { env: SERVER_ENV },
+        );
+        expect(res.status).toBe(200);
+        const summary = await res.json() as {
+          since: string;
+          hooks: Array<{ hook_name: string; total: number; errors: number; error_rate: string }>;
+          totals: { events: number; errors: number; hooks_active: number };
+        };
+        expect(summary.hooks).toEqual([
+          { hook_name: "commandlog", total: 2, errors: 1, error_rate: "50.0%" },
+        ]);
+        expect(summary.totals).toEqual({ events: 2, errors: 1, hooks_active: 1 });
+        expect(summary.since).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      });
+    });
+  });
+
+  test("GET /v1/log/summary requires the server key", async () => {
+    const res = await handleHooksApiRequest(
+      new Request("http://127.0.0.1/v1/log/summary", { headers: { authorization: "Bearer wrong-key" } }),
+      { env: SERVER_ENV },
+    );
+    expect(res.status).toBe(401);
+  });
+
   test("POST /v1/log/events requires the server key", async () => {
     const res = await handleHooksApiRequest(
       new Request("http://127.0.0.1/v1/log/events", {

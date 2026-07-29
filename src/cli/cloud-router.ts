@@ -1,3 +1,4 @@
+import type { HookLogSummary } from "../db/log-store.js";
 import type { HookEventRow } from "../db/schema.js";
 import type { StorageRowsPayload, SyncResult } from "../storage.js";
 
@@ -50,10 +51,11 @@ export interface HooksApiAuthorityConfigStatus {
 export interface HooksApiClient {
   baseUrl: string;
   appendHookEvent(event: HookEventRow): Promise<HookEventRow>;
-  listHookEvents(options?: { hook?: string; session?: string; limit?: number }): Promise<HookEventRow[]>;
+  listHookEvents(options?: { hook?: string; session?: string; since?: string; limit?: number }): Promise<HookEventRow[]>;
   searchHookEvents(options: { text: string; limit?: number }): Promise<HookEventRow[]>;
   tailHookEvents(options?: { limit?: number }): Promise<HookEventRow[]>;
   listHookErrors(options?: { since?: string; limit?: number }): Promise<HookEventRow[]>;
+  summarizeHookEvents(options?: { since?: string }): Promise<HookLogSummary>;
   clearHookEvents(options?: { hook?: string }): Promise<number>;
   storageStatus(): Promise<unknown>;
   storagePush(options?: { tables?: string[] }): Promise<SyncResult[]>;
@@ -267,7 +269,7 @@ class HttpHooksApiClient implements HooksApiClient {
     return data.event;
   }
 
-  async listHookEvents(options: { hook?: string; session?: string; limit?: number } = {}): Promise<HookEventRow[]> {
+  async listHookEvents(options: { hook?: string; session?: string; since?: string; limit?: number } = {}): Promise<HookEventRow[]> {
     const data = await this.request<{ events: HookEventRow[] }>("GET", `/log/events${queryString(options)}`);
     return data.events;
   }
@@ -285,6 +287,10 @@ class HttpHooksApiClient implements HooksApiClient {
   async listHookErrors(options: { since?: string; limit?: number } = {}): Promise<HookEventRow[]> {
     const data = await this.request<{ events: HookEventRow[] }>("GET", `/log/errors${queryString(options)}`);
     return data.events;
+  }
+
+  async summarizeHookEvents(options: { since?: string } = {}): Promise<HookLogSummary> {
+    return this.request<HookLogSummary>("GET", `/log/summary${queryString(options)}`);
   }
 
   async clearHookEvents(options: { hook?: string } = {}): Promise<number> {

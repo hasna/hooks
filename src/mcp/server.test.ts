@@ -65,6 +65,52 @@ function loopbackListenerAvailable(port: number): boolean {
   }
 }
 
+// Kept clear of the range src/cli/cli.test.ts allocates from, so the two suites
+// never race for the same port inside one `bun test` process.
+let nextAuthorityPort = 45000 + (process.pid % 15000);
+
+function serveOnAvailablePort(
+  fetch: (request: Request) => Response | Promise<Response>,
+  attempts = 100,
+): ReturnType<typeof Bun.serve> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    nextAuthorityPort += 1;
+    try {
+      return Bun.serve({ hostname: "127.0.0.1", port: nextAuthorityPort, fetch });
+    } catch (error) {
+      if (String((error as { code?: unknown }).code) !== "EADDRINUSE") throw error;
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+function authorityListenersAvailable(): boolean {
+  try {
+    const server = serveOnAvailablePort(() => new Response("ok"), 5);
+    server.stop(true);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function overrideEnv(values: Record<string, string | undefined>): () => void {
+  const previous: Record<string, string | undefined> = {};
+  for (const [key, value] of Object.entries(values)) {
+    previous[key] = process.env[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  return () => {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+}
+
 function seedLogDb(rowCount: number, options: { withErrors?: boolean } = {}): () => void {
   closeDb();
   const previousHasnaPath = process.env.HASNA_HOOKS_DB_PATH;
@@ -875,6 +921,20 @@ describe("MCP server", () => {
       }
     });
 
+    test("hooks_log_summary aggregates local events per hook", async () => {
+      const cleanup = seedLogDb(5, { withErrors: true });
+      try {
+        const data = parseResult(await client.callTool({ name: "hooks_log_summary", arguments: {} }));
+        expect(data.hooks).toEqual([
+          { hook_name: "gitguard", total: 5, errors: 5, error_rate: "100.0%" },
+        ]);
+        expect(data.totals).toEqual({ events: 5, errors: 5, hooks_active: 1 });
+        expect(data.since).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      } finally {
+        cleanup();
+      }
+    });
+
     // --- compact mode ---
 
     test("hooks_list compact returns minimal fields", async () => {
@@ -904,6 +964,182 @@ describe("MCP server", () => {
       const hook = listItems(data).find((h: any) => h.name === "gitguard");
       expect(hook).toHaveProperty("matcher");
       restoreSettings();
+    });
+  });
+
+  /**
+   * In an API storage mode the hook write path POSTs events to the configured
+   * `/v1` authority and never touches local SQLite, so an MCP log tool that read
+   * the local file would answer "no events" for work that just happened. Each
+   * test seeds the local database with rows the authority does not have, so a
+   * tool that fell back to SQLite returns visibly wrong events rather than an
+   * ambiguous empty list.
+   */
+  describe("log tools under an API authority", () => {
+    const authorityTest = authorityListenersAvailable() ? test : test.skip;
+
+    const AUTHORITY_EVENT = {
+      id: "evt_authority",
+      timestamp: new Date().toISOString(),
+      session_id: "session-authority",
+      hook_name: "authorityhook",
+      event_type: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: "git status",
+      result: "continue",
+      error: "authority failure",
+      duration_ms: 10,
+      project_dir: "/tmp/project",
+      metadata: null,
+    };
+
+    type SeenRequest = { method: string; path: string; authorization: string | null };
+
+    async function withApiAuthority<T>(
+      handler: (request: Request) => Response | Promise<Response>,
+      body: (client: Client, requests: SeenRequest[]) => Promise<T>,
+    ): Promise<T> {
+      const requests: SeenRequest[] = [];
+      const authority = serveOnAvailablePort((request) => {
+        const url = new URL(request.url);
+        requests.push({
+          method: request.method,
+          path: url.pathname,
+          authorization: request.headers.get("authorization"),
+        });
+        return handler(request);
+      });
+      const restoreDb = seedLogDb(3, { withErrors: true });
+      const restoreEnv = overrideEnv({
+        HASNA_HOOKS_STORAGE_MODE: "api",
+        HOOKS_STORAGE_MODE: undefined,
+        HASNA_HOOKS_API_URL: `http://127.0.0.1:${authority.port}`,
+        HOOKS_API_URL: undefined,
+        HASNA_HOOKS_API_KEY: "fixture-api-key",
+        HOOKS_API_KEY: undefined,
+      });
+      const apiServer = createHooksServer();
+      const apiClient = new Client({ name: "test-client", version: "1.0.0" });
+      const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+      await Promise.all([
+        apiClient.connect(clientTransport),
+        apiServer.connect(serverTransport),
+      ]);
+      try {
+        return await body(apiClient, requests);
+      } finally {
+        await apiClient.close();
+        restoreEnv();
+        restoreDb();
+        authority.stop(true);
+      }
+    }
+
+    authorityTest("hooks_log_list reads the authority, not the local spool", async () => {
+      await withApiAuthority(
+        (request) => {
+          const url = new URL(request.url);
+          if (url.pathname === "/v1/log/events") return Response.json({ events: [AUTHORITY_EVENT] });
+          return Response.json({ error: "unexpected route" }, { status: 404 });
+        },
+        async (client, requests) => {
+          const data = parseResult(await client.callTool({ name: "hooks_log_list", arguments: {} }));
+          expect(data.count).toBe(1);
+          expect(data.events.map((event: any) => event.id)).toEqual(["evt_authority"]);
+          expect(requests).toEqual([
+            { method: "GET", path: "/v1/log/events", authorization: "Bearer fixture-api-key" },
+          ]);
+        },
+      );
+    });
+
+    authorityTest("hooks_log_list forwards its filters to the authority", async () => {
+      await withApiAuthority(
+        (request) => {
+          const url = new URL(request.url);
+          if (url.pathname !== "/v1/log/events") return Response.json({ error: "unexpected route" }, { status: 404 });
+          expect(url.searchParams.get("hook")).toBe("authorityhook");
+          expect(url.searchParams.get("session")).toBe("session-auth");
+          expect(url.searchParams.get("since")).toBe("30m");
+          expect(url.searchParams.get("limit")).toBe("7");
+          return Response.json({ events: [AUTHORITY_EVENT] });
+        },
+        async (client) => {
+          const data = parseResult(await client.callTool({
+            name: "hooks_log_list",
+            arguments: { hook_name: "authorityhook", session_id: "session-auth", since: "30m", limit: 7 },
+          }));
+          expect(data.count).toBe(1);
+        },
+      );
+    });
+
+    authorityTest("hooks_log_tail reads the authority, not the local spool", async () => {
+      await withApiAuthority(
+        (request) => {
+          const url = new URL(request.url);
+          if (url.pathname === "/v1/log/events") return Response.json({ events: [AUTHORITY_EVENT] });
+          return Response.json({ error: "unexpected route" }, { status: 404 });
+        },
+        async (client, requests) => {
+          const data = parseResult(await client.callTool({ name: "hooks_log_tail", arguments: {} }));
+          expect(data.count).toBe(1);
+          expect(data.events.map((event: any) => event.id)).toEqual(["evt_authority"]);
+          expect(requests.map((seen) => seen.path)).toEqual(["/v1/log/events"]);
+        },
+      );
+    });
+
+    authorityTest("hooks_log_errors reads the authority, not the local spool", async () => {
+      await withApiAuthority(
+        (request) => {
+          const url = new URL(request.url);
+          if (url.pathname === "/v1/log/errors") return Response.json({ events: [AUTHORITY_EVENT] });
+          return Response.json({ error: "unexpected route" }, { status: 404 });
+        },
+        async (client, requests) => {
+          const data = parseResult(await client.callTool({ name: "hooks_log_errors", arguments: {} }));
+          expect(data.count).toBe(1);
+          expect(data.events.map((event: any) => event.id)).toEqual(["evt_authority"]);
+          expect(requests.map((seen) => seen.path)).toEqual(["/v1/log/errors"]);
+        },
+      );
+    });
+
+    authorityTest("hooks_log_summary reads the authority, not the local spool", async () => {
+      const summary = {
+        since: "2026-07-28T00:00:00.000Z",
+        hooks: [{ hook_name: "authorityhook", total: 4, errors: 1, error_rate: "25.0%" }],
+        totals: { events: 4, errors: 1, hooks_active: 1 },
+      };
+      await withApiAuthority(
+        (request) => {
+          const url = new URL(request.url);
+          if (url.pathname === "/v1/log/summary") return Response.json(summary);
+          return Response.json({ error: "unexpected route" }, { status: 404 });
+        },
+        async (client, requests) => {
+          const data = parseResult(await client.callTool({ name: "hooks_log_summary", arguments: {} }));
+          expect(data).toEqual(summary);
+          expect(requests.map((seen) => seen.path)).toEqual(["/v1/log/summary"]);
+        },
+      );
+    });
+
+    authorityTest("log tools fail closed instead of serving local rows when the authority errors", async () => {
+      await withApiAuthority(
+        () => Response.json({ error: "boom" }, { status: 503 }),
+        async (client) => {
+          for (const name of ["hooks_log_list", "hooks_log_tail", "hooks_log_errors", "hooks_log_summary"]) {
+            const result = await client.callTool({ name, arguments: {} });
+            expect(result.isError).toBe(true);
+            const data = parseResult(result);
+            expect(data.error).toContain("REMOTE_API_UNAVAILABLE");
+            expect(data.error).toContain("local SQLite fallback is disabled");
+            expect(data).not.toHaveProperty("events");
+          }
+        },
+      );
     });
   });
 
