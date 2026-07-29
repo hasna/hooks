@@ -109,6 +109,11 @@ into the local SQLite database rather than dropped, and a warning is written to
 stderr. Drain the spool with `hooks storage push` — rows are upserted by event
 id, so draining is idempotent.
 
+Because that spool is also the mirror `hooks storage pull` writes into, `hooks
+log clear` in API mode deletes on the authority *and* in the local database. A
+purge that stopped at the authority would be undone by the next `hooks storage
+push`, which uploads whatever the local file still holds.
+
 Every `/v1` request carries a deadline, so a hung authority can never block an
 agent's tool call: hook event writes default to 3s
 (`HASNA_HOOKS_API_WRITE_TIMEOUT_MS`, fallback `HOOKS_API_WRITE_TIMEOUT_MS`) and

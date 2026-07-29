@@ -105,6 +105,31 @@ function seedHookEvent(dbPath: string, row: Partial<Record<string, string | numb
   }
 }
 
+/**
+ * Budget for tests that drive several real `bun run src/cli/index.tsx` processes
+ * in sequence. Bun's 5s default is a spawn-count budget, not a signal about the
+ * behaviour under test, and a loaded machine blows through it.
+ */
+const CLI_E2E_TIMEOUT_MS = 30_000;
+
+function remoteHookEvent(row: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "evt_remote",
+    timestamp: "2026-07-28T00:00:00.000Z",
+    session_id: "session-remote",
+    hook_name: "gitguard",
+    event_type: "PreToolUse",
+    tool_name: "Bash",
+    tool_input: "git status",
+    result: "continue",
+    error: null,
+    duration_ms: 10,
+    project_dir: "/tmp/project",
+    metadata: null,
+    ...row,
+  };
+}
+
 function nextTestPort(): number {
   nextTestPortValue += 1;
   return nextTestPortValue;
@@ -782,6 +807,179 @@ describe("CLI", () => {
         rmSync(root, { recursive: true, force: true });
       }
     });
+
+    listenerTest("api log clear purges the local mirror so a later push cannot resurrect events", async () => {
+      const authorityEvents: any[] = [
+        remoteHookEvent({ id: "evt_a", tool_input: "rm -rf /tmp/secret-workspace" }),
+        remoteHookEvent({ id: "evt_b", tool_input: "cat /tmp/secret-workspace/token" }),
+      ];
+      const imports: any[] = [];
+      const server = serveOnAvailablePort(async (request) => {
+        const url = new URL(request.url);
+        if (url.pathname === "/v1/storage/export") {
+          return Response.json({ tables: { hook_events: [...authorityEvents] } });
+        }
+        if (url.pathname === "/v1/storage/import") {
+          const payload = await request.json() as { tables?: { hook_events?: any[] } };
+          imports.push(payload);
+          // A real authority upserts whatever the client pushes — that is how the
+          // purged rows came back before the local mirror was cleared too.
+          const rows = payload.tables?.hook_events ?? [];
+          for (const row of rows) {
+            if (!authorityEvents.some((event) => event.id === row.id)) authorityEvents.push(row);
+          }
+          return Response.json({
+            results: [{ table: "hook_events", rowsRead: rows.length, rowsWritten: rows.length, errors: [] }],
+          });
+        }
+        if (url.pathname === "/v1/log/events" && request.method === "DELETE") {
+          const cleared = authorityEvents.length;
+          authorityEvents.length = 0;
+          return Response.json({ cleared });
+        }
+        if (url.pathname === "/v1/log/events") {
+          return Response.json({ events: [...authorityEvents] });
+        }
+        return Response.json({ error: "unexpected route" }, { status: 404 });
+      });
+      const root = mkdtempSync(join(tmpdir(), "hooks-log-api-clear-"));
+      const dbPath = join(root, "hooks.db");
+      const apiEnv = {
+        HOME: root,
+        HASNA_HOOKS_DB_PATH: dbPath,
+        HASNA_HOOKS_STORAGE_MODE: "api",
+        HASNA_HOOKS_API_URL: `http://127.0.0.1:${server.port}`,
+        HASNA_HOOKS_API_KEY: "fixture-api-key",
+      };
+      const localEnv = {
+        HOME: root,
+        HASNA_HOOKS_DB_PATH: dbPath,
+        HASNA_HOOKS_STORAGE_MODE: "local",
+        HOOKS_STORAGE_MODE: undefined,
+        HASNA_HOOKS_API_URL: undefined,
+        HASNA_HOOKS_API_KEY: undefined,
+      };
+      try {
+        // A routine sync mirrors the authority's rows into the local spool.
+        const pulled = await runJsonWithEnv(["storage", "pull", "--tables", "hook_events"], apiEnv);
+        expect(pulled).toEqual([{ table: "hook_events", rowsRead: 2, rowsWritten: 2, errors: [] }]);
+
+        expect(await runJsonWithEnv(["log", "clear", "--yes"], apiEnv)).toMatchObject({ cleared: 2 });
+        // The purge must reach the mirror the next push reads from.
+        expect(await runJsonWithEnv(["log", "list"], localEnv)).toEqual([]);
+
+        await runJsonWithEnv(["storage", "push", "--tables", "hook_events"], apiEnv);
+        expect(imports.at(-1).tables.hook_events).toEqual([]);
+        expect(await runJsonWithEnv(["log", "list"], apiEnv)).toEqual([]);
+      } finally {
+        server.stop(true);
+        rmSync(root, { recursive: true, force: true });
+      }
+    }, CLI_E2E_TIMEOUT_MS);
+
+    listenerTest("api log clear purges an unpushed local spool the authority never saw", async () => {
+      const imports: any[] = [];
+      const server = serveOnAvailablePort(async (request) => {
+        const url = new URL(request.url);
+        if (url.pathname === "/v1/storage/import") {
+          const payload = await request.json() as { tables?: { hook_events?: any[] } };
+          imports.push(payload);
+          const rows = payload.tables?.hook_events ?? [];
+          return Response.json({
+            results: [{ table: "hook_events", rowsRead: rows.length, rowsWritten: rows.length, errors: [] }],
+          });
+        }
+        if (url.pathname === "/v1/log/events" && request.method === "DELETE") {
+          return Response.json({ cleared: 0 });
+        }
+        return Response.json({ error: "unexpected route" }, { status: 404 });
+      });
+      const root = mkdtempSync(join(tmpdir(), "hooks-log-api-clear-spool-"));
+      const dbPath = join(root, "hooks.db");
+      const apiEnv = {
+        HOME: root,
+        HASNA_HOOKS_DB_PATH: dbPath,
+        HASNA_HOOKS_STORAGE_MODE: "api",
+        HASNA_HOOKS_API_URL: `http://127.0.0.1:${server.port}`,
+        HASNA_HOOKS_API_KEY: "fixture-api-key",
+      };
+      try {
+        // Spooled locally while the authority was unreachable: never uploaded, so
+        // the DELETE clears nothing remotely and only the mirror holds the rows.
+        seedHookEvent(dbPath, { id: "evt_spooled", hook_name: "gitguard" });
+
+        expect(await runJsonWithEnv(["log", "clear", "--yes"], apiEnv)).toMatchObject({ cleared: 0 });
+
+        await runJsonWithEnv(["storage", "push", "--tables", "hook_events"], apiEnv);
+        expect(imports.at(-1).tables.hook_events).toEqual([]);
+      } finally {
+        server.stop(true);
+        rmSync(root, { recursive: true, force: true });
+      }
+    }, CLI_E2E_TIMEOUT_MS);
+
+    listenerTest("api log clear does not create a local database when no mirror exists", async () => {
+      const server = serveOnAvailablePort((request) => {
+        const url = new URL(request.url);
+        if (url.pathname === "/v1/log/events" && request.method === "DELETE") {
+          return Response.json({ cleared: 3 });
+        }
+        return Response.json({ error: "unexpected route" }, { status: 404 });
+      });
+      const root = mkdtempSync(join(tmpdir(), "hooks-log-api-clear-nomirror-"));
+      const dbPath = join(root, "must-not-exist", "hooks.db");
+      try {
+        const result = await runJsonWithEnv(["log", "clear", "--yes"], {
+          HOME: root,
+          HASNA_HOOKS_DB_PATH: dbPath,
+          HASNA_HOOKS_STORAGE_MODE: "api",
+          HASNA_HOOKS_API_URL: `http://127.0.0.1:${server.port}`,
+          HASNA_HOOKS_API_KEY: "fixture-api-key",
+        });
+
+        expect(result).toMatchObject({ cleared: 3 });
+        expect(existsSync(dirname(dbPath))).toBe(false);
+      } finally {
+        server.stop(true);
+        rmSync(root, { recursive: true, force: true });
+      }
+    }, CLI_E2E_TIMEOUT_MS);
+
+    listenerTest("api log clear --hook only purges the named hook from the local mirror", async () => {
+      const imports: any[] = [];
+      const server = serveOnAvailablePort(async (request) => {
+        const url = new URL(request.url);
+        if (url.pathname === "/v1/storage/import") {
+          imports.push(await request.json());
+          return Response.json({ results: [{ table: "hook_events", rowsRead: 0, rowsWritten: 0, errors: [] }] });
+        }
+        if (url.pathname === "/v1/log/events" && request.method === "DELETE") {
+          return Response.json({ cleared: url.searchParams.get("hook") === "gitguard" ? 1 : 0 });
+        }
+        return Response.json({ error: "unexpected route" }, { status: 404 });
+      });
+      const root = mkdtempSync(join(tmpdir(), "hooks-log-api-clear-hook-"));
+      const dbPath = join(root, "hooks.db");
+      const apiEnv = {
+        HOME: root,
+        HASNA_HOOKS_DB_PATH: dbPath,
+        HASNA_HOOKS_STORAGE_MODE: "api",
+        HASNA_HOOKS_API_URL: `http://127.0.0.1:${server.port}`,
+        HASNA_HOOKS_API_KEY: "fixture-api-key",
+      };
+      try {
+        seedHookEvent(dbPath, { id: "evt_guard", hook_name: "gitguard" });
+        seedHookEvent(dbPath, { id: "evt_cost", hook_name: "costwatch" });
+
+        expect(await runJsonWithEnv(["log", "clear", "--hook", "gitguard", "--yes"], apiEnv)).toMatchObject({ cleared: 1 });
+
+        await runJsonWithEnv(["storage", "push", "--tables", "hook_events"], apiEnv);
+        expect(imports.at(-1).tables.hook_events.map((row: any) => row.id)).toEqual(["evt_cost"]);
+      } finally {
+        server.stop(true);
+        rmSync(root, { recursive: true, force: true });
+      }
+    }, CLI_E2E_TIMEOUT_MS);
   });
 
   describe("hooks storage api parity", () => {

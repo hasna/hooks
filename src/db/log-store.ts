@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
-import { getDb } from "./index.js";
+import { existsSync } from "fs";
+import { getDb, getDbPath } from "./index.js";
 import type { HookEventRow } from "./schema.js";
 
 export interface HookEventInput extends Partial<Omit<HookEventRow, "session_id" | "hook_name" | "event_type">> {
@@ -174,6 +175,25 @@ export function clearHookEvents(options: { hook?: string } = {}, db: Database = 
     db.run("DELETE FROM hook_events");
   }
   return count;
+}
+
+/**
+ * Delete the local copy of events an API authority has already purged.
+ *
+ * Under an API authority the local SQLite file is a spool and a pull mirror, not
+ * a second source of truth: `storage pull` writes authority rows into it and
+ * `storage push` uploads everything it still holds. A clear that only reached
+ * the authority is therefore undone by the next routine sync, so the purge has
+ * to reach both sides.
+ *
+ * Returns 0 without touching the filesystem when no local database exists —
+ * `getDb()` would create the file and its schema, and an API-mode client with
+ * no spool must not grow one just to empty it.
+ */
+export function clearLocalHookEventMirror(options: { hook?: string } = {}): number {
+  const path = getDbPath();
+  if (path !== ":memory:" && !existsSync(path)) return 0;
+  return clearHookEvents(options);
 }
 
 function durationMs(value: string): number {

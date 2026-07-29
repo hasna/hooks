@@ -1230,12 +1230,20 @@ logCmd
           if (options.json) console.log(JSON.stringify({ cleared: 0, confirmed: false, hook: options.hook ?? null }));
           else {
             const scope = options.hook ? `hook "${options.hook}"` : "all hooks";
-            console.log(chalk.yellow(`About to delete event logs for ${scope} on the configured Hooks API.`));
+            console.log(chalk.yellow(`About to delete event logs for ${scope} on the configured Hooks API and in the local mirror.`));
             console.log(chalk.dim("Re-run with --yes to confirm."));
           }
           return;
         }
         count = await client.clearHookEvents({ hook: options.hook });
+        // The authority is not the only copy: `storage pull` mirrors its rows
+        // into local SQLite and `storage push` uploads whatever that file still
+        // holds, so a delete that stopped at the authority would be reversed by
+        // the next routine sync. Purge the mirror too, and do it even when the
+        // authority reported nothing — rows spooled while it was unreachable
+        // live only locally and would otherwise be pushed after the purge.
+        const { clearLocalHookEventMirror } = await import("../db/log-store.js");
+        clearLocalHookEventMirror({ hook: options.hook });
       } else {
         const { clearHookEvents } = await import("../db/log-store.js");
         if (!options.yes) {
