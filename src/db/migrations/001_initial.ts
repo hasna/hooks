@@ -3,10 +3,10 @@
  * Creates hook_events table and indexes.
  */
 
-import type { Database } from "bun:sqlite";
+import type { DbAdapter } from "@hasna/cloud";
 import { CREATE_HOOK_EVENTS_TABLE, CREATE_INDEXES } from "../schema";
 
-export function up(db: Database): void {
+export function up(db: DbAdapter): void {
   db.exec(CREATE_HOOK_EVENTS_TABLE);
   for (const idx of CREATE_INDEXES) {
     db.exec(idx);

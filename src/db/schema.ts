@@ -1,9 +1,9 @@
 /**
  * SQLite schema for @hasna/hooks local data.
- * Owned by this package (no shared runtime dependency).
+ * Owned by this package and applied through the shared cloud adapter.
  */
 
-import type { Database } from "bun:sqlite";
+import type { DbAdapter } from "@hasna/cloud";
 
 export const CREATE_HOOK_EVENTS_TABLE = `
   CREATE TABLE IF NOT EXISTS hook_events (
@@ -45,7 +45,7 @@ export interface HookEventRow {
   metadata: string | null;
 }
 
-export function applySchema(db: Database): void {
+export function applySchema(db: DbAdapter): void {
   db.exec(CREATE_HOOK_EVENTS_TABLE);
   for (const idx of CREATE_INDEXES) {
     db.exec(idx);

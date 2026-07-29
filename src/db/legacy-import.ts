@@ -8,14 +8,14 @@
  * Tracks completion via a `_meta` table row keyed "legacy_import_done".
  */
 
-import type { Database } from "bun:sqlite";
+import type { DbAdapter } from "@hasna/cloud";
 import { existsSync, readdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
 const META_KEY = "legacy_import_done";
 
-function ensureMetaTable(db: Database): void {
+function ensureMetaTable(db: DbAdapter): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS _meta (
       key   TEXT PRIMARY KEY,
@@ -24,21 +24,21 @@ function ensureMetaTable(db: Database): void {
   `);
 }
 
-function isAlreadyDone(db: Database): boolean {
+function isAlreadyDone(db: DbAdapter): boolean {
   ensureMetaTable(db);
-  const row = db.query<{ value: string }, [string]>("SELECT value FROM _meta WHERE key = ?").get(META_KEY);
+  const row = db.get("SELECT value FROM _meta WHERE key = ?", META_KEY) as { value: string } | undefined;
   return row?.value === "1";
 }
 
-function markDone(db: Database): void {
-  db.run("INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)", [META_KEY, "1"]);
+function markDone(db: DbAdapter): void {
+  db.run("INSERT OR REPLACE INTO _meta (key, value) VALUES (?, ?)", META_KEY, "1");
 }
 
 function nanoid(): string {
   return crypto.randomUUID().replace(/-/g, "").slice(0, 21);
 }
 
-function importJsonlFile(db: Database, filePath: string): number {
+function importJsonlFile(db: DbAdapter, filePath: string): number {
   let count = 0;
   try {
     const lines = readFileSync(filePath, "utf-8").split("\n").filter(Boolean);
@@ -49,16 +49,14 @@ function importJsonlFile(db: Database, filePath: string): number {
           `INSERT OR IGNORE INTO hook_events
             (id, timestamp, session_id, hook_name, event_type, tool_name, tool_input, project_dir)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            nanoid(),
-            entry.timestamp ?? new Date().toISOString(),
-            entry.session_id ?? "legacy",
-            "sessionlog",
-            "PostToolUse",
-            entry.tool_name ?? null,
-            entry.tool_input ? String(entry.tool_input).slice(0, 500) : null,
-            null,
-          ]
+          nanoid(),
+          entry.timestamp ?? new Date().toISOString(),
+          entry.session_id ?? "legacy",
+          "sessionlog",
+          "PostToolUse",
+          entry.tool_name ?? null,
+          entry.tool_input ? String(entry.tool_input).slice(0, 500) : null,
+          null,
         );
         count++;
       } catch {
@@ -71,7 +69,7 @@ function importJsonlFile(db: Database, filePath: string): number {
   return count;
 }
 
-function importErrorsLog(db: Database, filePath: string): number {
+function importErrorsLog(db: DbAdapter, filePath: string): number {
   let count = 0;
   try {
     const lines = readFileSync(filePath, "utf-8").split("\n").filter(Boolean);
@@ -87,14 +85,12 @@ function importErrorsLog(db: Database, filePath: string): number {
           `INSERT OR IGNORE INTO hook_events
             (id, timestamp, session_id, hook_name, event_type, error)
            VALUES (?, ?, ?, ?, ?, ?)`,
-          [
-            nanoid(),
-            timestamp,
-            sessionPrefix ? `legacy-${sessionPrefix}` : "legacy",
-            "errornotify",
-            "PostToolUse",
-            errorMsg.slice(0, 500),
-          ]
+          nanoid(),
+          timestamp,
+          sessionPrefix ? `legacy-${sessionPrefix}` : "legacy",
+          "errornotify",
+          "PostToolUse",
+          errorMsg.slice(0, 500),
         );
         count++;
       } catch {
@@ -107,7 +103,7 @@ function importErrorsLog(db: Database, filePath: string): number {
   return count;
 }
 
-export function runLegacyImport(db: Database): void {
+export function runLegacyImport(db: DbAdapter): void {
   try {
     if (isAlreadyDone(db)) return;
 

@@ -7,15 +7,14 @@
  * (fresh databases created from the updated schema.ts).
  */
 
-import type { Database } from "bun:sqlite";
+import type { DbAdapter } from "@hasna/cloud";
 import { CREATE_HOOK_EVENTS_TABLE, CREATE_INDEXES } from "../schema";
 
-export function up(db: Database): void {
-  const row = db
-    .query<{ sql: string | null }, [string]>(
-      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?"
-    )
-    .get("hook_events");
+export function up(db: DbAdapter): void {
+  const row = db.get(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+    "hook_events",
+  ) as { sql: string | null } | undefined;
 
   // Table missing (shouldn't happen — 001 creates it) or already current.
   if (!row?.sql) return;
