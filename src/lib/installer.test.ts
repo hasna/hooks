@@ -199,15 +199,15 @@ describe("installer", () => {
     test("installs multiple hooks", () => {
       const results = installHooks(["gitguard", "checkpoint"]);
       expect(results).toHaveLength(2);
-      expect(results[0].success).toBe(true);
-      expect(results[1].success).toBe(true);
+      expect(results[0]?.success).toBe(true);
+      expect(results[1]?.success).toBe(true);
     });
 
     test("returns mixed results for valid and invalid hooks", () => {
       const results = installHooks(["gitguard", "nonexistent"]);
       expect(results).toHaveLength(2);
-      expect(results[0].success).toBe(true);
-      expect(results[1].success).toBe(false);
+      expect(results[0]?.success).toBe(true);
+      expect(results[1]?.success).toBe(false);
     });
   });
 

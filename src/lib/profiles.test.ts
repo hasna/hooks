@@ -147,8 +147,11 @@ describe("profiles", () => {
 
       const all = listProfiles();
       for (let i = 1; i < all.length; i++) {
-        expect(new Date(all[i].created_at).getTime()).toBeGreaterThanOrEqual(
-          new Date(all[i - 1].created_at).getTime()
+        const current = all[i];
+        const previous = all[i - 1];
+        if (!current || !previous) throw new Error("Expected adjacent profiles");
+        expect(new Date(current.created_at).getTime()).toBeGreaterThanOrEqual(
+          new Date(previous.created_at).getTime()
         );
       }
     });

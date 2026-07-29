@@ -23,11 +23,11 @@ export function InstallProgress({
     const install = async () => {
       const newResults: InstallResult[] = [];
 
-      for (let i = 0; i < hooks.length; i++) {
+      for (const [i, hook] of hooks.entries()) {
         setCurrent(i);
         await new Promise((r) => setTimeout(r, 100));
 
-        const result = installHook(hooks[i], { overwrite });
+        const result = installHook(hook, { overwrite });
         newResults.push(result);
         setResults([...newResults]);
       }

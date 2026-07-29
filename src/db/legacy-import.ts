@@ -83,6 +83,7 @@ function importErrorsLog(db: Database, filePath: string): number {
         const m = line.match(linePattern);
         if (!m) continue;
         const [, timestamp, sessionPrefix, , errorMsg] = m;
+        if (!timestamp || !errorMsg) continue;
         db.run(
           `INSERT OR IGNORE INTO hook_events
             (id, timestamp, session_id, hook_name, event_type, error)

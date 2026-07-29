@@ -124,16 +124,28 @@ function printDisclosureHint(hidden: number, detailCommand: string, options: { i
 /** Levenshtein distance for did-you-mean suggestions */
 function editDistance(a: string, b: string): number {
   const m = a.length, n = b.length;
-  const dp: number[][] = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
-  for (let j = 0; j <= n; j++) dp[0][j] = j;
+  const dp: number[][] = [Array.from({ length: n + 1 }, (_, j) => j)];
   for (let i = 1; i <= m; i++) {
+    const previousRow = dp[i - 1];
+    if (!previousRow) throw new Error("Unable to calculate edit distance");
+
+    const row = [i];
     for (let j = 1; j <= n; j++) {
-      dp[i][j] = a[i - 1] === b[j - 1]
-        ? dp[i - 1][j - 1]
-        : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      const deletion = previousRow[j];
+      const insertion = row[j - 1];
+      const substitution = previousRow[j - 1];
+      if (deletion === undefined || insertion === undefined || substitution === undefined) {
+        throw new Error("Unable to calculate edit distance");
+      }
+      row.push(a.charAt(i - 1) === b.charAt(j - 1)
+        ? substitution
+        : 1 + Math.min(deletion, insertion, substitution));
     }
+    dp.push(row);
   }
-  return dp[m][n];
+  const distance = dp[m]?.[n];
+  if (distance === undefined) throw new Error("Unable to calculate edit distance");
+  return distance;
 }
 
 function suggestHooks(name: string, max = 3): string[] {
@@ -1152,8 +1164,10 @@ logCmd
     function parseDuration(s: string): number {
       const m = s.match(/^(\d+)(s|m|h|d)$/);
       if (!m) return 24 * 60 * 60 * 1000;
-      const n = parseInt(m[1]);
-      switch (m[2]) {
+      const [, amount, unit] = m;
+      if (!amount || !unit) return 24 * 60 * 60 * 1000;
+      const n = parseInt(amount);
+      switch (unit) {
         case "s": return n * 1000;
         case "m": return n * 60 * 1000;
         case "h": return n * 60 * 60 * 1000;

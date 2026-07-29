@@ -161,25 +161,25 @@ describe("registry", () => {
     test("finds hooks by name", () => {
       const results = searchHooks("gitguard");
       expect(results).toHaveLength(1);
-      expect(results[0].name).toBe("gitguard");
+      expect(results[0]?.name).toBe("gitguard");
     });
 
     test("finds hooks by display name", () => {
       const results = searchHooks("Git Guard");
       expect(results).toHaveLength(1);
-      expect(results[0].name).toBe("gitguard");
+      expect(results[0]?.name).toBe("gitguard");
     });
 
     test("finds hooks by description keyword", () => {
       const results = searchHooks("destructive");
       expect(results.length).toBeGreaterThanOrEqual(1);
-      expect(results[0].name).toBe("gitguard");
+      expect(results[0]?.name).toBe("gitguard");
     });
 
     test("finds hooks by tag", () => {
       const results = searchHooks("typosquatting");
       expect(results).toHaveLength(1);
-      expect(results[0].name).toBe("packageage");
+      expect(results[0]?.name).toBe("packageage");
     });
 
     test("search is case-insensitive", () => {

@@ -803,8 +803,17 @@ export function createHooksServer(): McpServer {
       function parseDuration(s: string): string | null {
         const m = s.match(/^(\d+)(s|m|h|d)$/);
         if (!m) return null;
-        const n = parseInt(m[1]);
-        const ms = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2] as "s"|"m"|"h"|"d"]!;
+        const [, amount, unit] = m;
+        if (!amount || !unit) return null;
+        const n = parseInt(amount);
+        let ms: number;
+        switch (unit) {
+          case "s": ms = 1000; break;
+          case "m": ms = 60000; break;
+          case "h": ms = 3600000; break;
+          case "d": ms = 86400000; break;
+          default: return null;
+        }
         return new Date(Date.now() - n * ms).toISOString();
       }
 
@@ -877,8 +886,17 @@ export function createHooksServer(): McpServer {
       function parseDuration(s: string): string {
         const m = s.match(/^(\d+)(s|m|h|d)$/);
         if (!m) return s;
-        const n = parseInt(m[1]);
-        const ms = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2] as "s"|"m"|"h"|"d"]!;
+        const [, amount, unit] = m;
+        if (!amount || !unit) return s;
+        const n = parseInt(amount);
+        let ms: number;
+        switch (unit) {
+          case "s": ms = 1000; break;
+          case "m": ms = 60000; break;
+          case "h": ms = 3600000; break;
+          case "d": ms = 86400000; break;
+          default: return s;
+        }
         return new Date(Date.now() - n * ms).toISOString();
       }
 
@@ -913,8 +931,17 @@ export function createHooksServer(): McpServer {
       function parseDuration(s: string): string {
         const m = s.match(/^(\d+)(s|m|h|d)$/);
         if (!m) return s;
-        const n = parseInt(m[1]);
-        const ms = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2] as "s"|"m"|"h"|"d"]!;
+        const [, amount, unit] = m;
+        if (!amount || !unit) return s;
+        const n = parseInt(amount);
+        let ms: number;
+        switch (unit) {
+          case "s": ms = 1000; break;
+          case "m": ms = 60000; break;
+          case "h": ms = 3600000; break;
+          case "d": ms = 86400000; break;
+          default: return s;
+        }
         return new Date(Date.now() - n * ms).toISOString();
       }
 

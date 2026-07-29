@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Enabled TypeScript's `noUncheckedIndexedAccess` check and handled potentially missing array elements and lookup results explicitly.
 - **BREAKING: deployment modes are gone; hooks storage is a two-value data-backend switch.** `StorageMode = "local" | "hybrid" | "remote"` described *where* something ran, which was never a property of the data layer, and nothing in the codebase ever branched on it — it was reported by `hooks storage status` and the `storage_status` MCP tool and otherwise decorative. It is replaced by `StorageBackend = "sqlite" | "postgresql"`.
   - `HASNA_HOOKS_STORAGE_MODE` and `HOOKS_STORAGE_MODE` are retired and are **no longer read**. Setting either now raises an error naming the replacement variable and the backend to use, instead of being quietly ignored: `local` became `sqlite`, and `hybrid` / `remote` / `self_hosted` / `self-hosted` / `cloud` all became `postgresql`.
   - New `HASNA_HOOKS_STORAGE_BACKEND` (fallback `HOOKS_STORAGE_BACKEND`) accepts `sqlite` or `postgresql` (`sqlite3`, `postgres` and `pg` are accepted aliases). **An unrecognised value now throws.** Previously any unknown value — including a typo — fell through `normalizeStorageMode` to `undefined` and then silently to `local`, so a misconfigured mode looked like a working local one. That silent normalisation was the actual defect; the vocabulary was its symptom.

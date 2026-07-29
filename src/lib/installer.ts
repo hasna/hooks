@@ -507,7 +507,8 @@ export function getRegisteredHooksForTarget(scope: Scope = "global", target: Sin
     const re = /command\s*=\s*["']hooks run ([\w-]+)(?:\s+--profile\s+[\w-]+)?["']/g;
     let match: RegExpExecArray | null;
     while ((match = re.exec(config))) {
-      registered.push(match[1]);
+      const hookName = match[1];
+      if (hookName) registered.push(hookName);
     }
     return [...new Set(registered)];
   }
