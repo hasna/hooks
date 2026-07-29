@@ -13,8 +13,8 @@ import {
 
 describe("registry", () => {
   describe("HOOKS", () => {
-    test("contains 48 hooks", () => {
-      expect(HOOKS).toHaveLength(48);
+    test("contains 49 hooks", () => {
+      expect(HOOKS).toHaveLength(49);
     });
 
     test("every hook has required fields", () => {
@@ -115,7 +115,7 @@ describe("registry", () => {
 
     test("returns Workflow Automation hooks", () => {
       const hooks = getHooksByCategory("Workflow Automation");
-      expect(hooks).toHaveLength(4);
+      expect(hooks).toHaveLength(5);
     });
 
     test("returns Environment hooks", () => {
@@ -282,6 +282,7 @@ describe("registry", () => {
       "prompt-guard": "0.1.0",
       "worktree-guard": "0.1.0",
       "stop-sync": "0.1.0",
+      "spiral-detector": "0.1.0",
     };
 
     for (const [name, version] of Object.entries(expected)) {
@@ -315,7 +316,7 @@ describe("registry", () => {
 
     test("correct count per event type", () => {
       expect(HOOKS.filter((h) => h.event === "PreToolUse")).toHaveLength(15);
-      expect(HOOKS.filter((h) => h.event === "PostToolUse")).toHaveLength(15);
+      expect(HOOKS.filter((h) => h.event === "PostToolUse")).toHaveLength(16);
       expect(HOOKS.filter((h) => h.event === "Stop")).toHaveLength(9);
       expect(HOOKS.filter((h) => h.event === "Notification")).toHaveLength(3);
       expect(HOOKS.filter((h) => h.event === "SessionStart")).toHaveLength(5);

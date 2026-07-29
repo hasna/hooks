@@ -68,6 +68,7 @@ export interface HookOutput {
   decision?: "approve" | "block";
   reason?: string;
   continue?: boolean;
+  stopReason?: string;
   hookSpecificOutput?: {
     hookEventName: "SessionStart" | "UserPromptSubmit" | "SubagentStart" | "PreToolUse" | "PostToolUse" | "Stop" | "Notification" | "SessionEnd";
     additionalContext?: string;

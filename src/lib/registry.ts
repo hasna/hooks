@@ -492,6 +492,16 @@ export const HOOKS: HookMeta[] = [
     matcher: "Bash",
     tags: ["failures", "tasks", "tests", "build", "automation"],
   },
+  {
+    name: "spiral-detector",
+    displayName: "Spiral Detector",
+    description: "Interrupts agents after three consecutive command failures with an identical red signature",
+    version: "0.1.0",
+    category: "Workflow Automation",
+    event: "PostToolUse",
+    matcher: "Bash",
+    tags: ["spiral", "retry", "failures", "interrupt", "safety"],
+  },
 
   // Agent Teams (new)
   {
