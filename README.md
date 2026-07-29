@@ -95,9 +95,9 @@ hooks install knowledge-context --target codewith --apply-codewith --codewith-co
 Hooks stores data locally by default in `~/.hasna/hooks/` and uses SQLite
 directly for hook event history. The package owns its database schema and
 migrations; it does not depend on the deprecated shared runtime or its CLI.
-The repo includes its own PostgreSQL migration definitions for optional remote
-storage deployments. Use the `hooks log` commands to inspect local hook event
-data.
+The repo includes its own PostgreSQL migration definitions for the optional
+`hooks storage push|pull|sync` commands. Use the `hooks log` commands to inspect
+local hook event data.
 
 ```bash
 hooks storage status --json
@@ -107,14 +107,34 @@ hooks storage sync --json
 ```
 
 Configure database storage with `HASNA_HOOKS_DATABASE_URL` or fallback
-`HOOKS_DATABASE_URL`. Optional storage mode env vars are
-`HASNA_HOOKS_STORAGE_MODE` and `HOOKS_STORAGE_MODE`, with `local`, `hybrid`, or
-`remote` values.
+`HOOKS_DATABASE_URL`.
+
+### Storage backend
+
+Hooks storage has one setting with two values: **which data backend**, not where
+anything is deployed.
+
+| `HASNA_HOOKS_STORAGE_BACKEND` (fallback `HOOKS_STORAGE_BACKEND`) | meaning |
+| --- | --- |
+| `sqlite` | the on-box SQLite file in `~/.hasna/hooks/` (default) |
+| `postgresql` | the PostgreSQL database named by `HASNA_HOOKS_DATABASE_URL` |
+
+Leave it unset and the backend is inferred exactly as before: `postgresql` when a
+database URL is configured, `sqlite` otherwise. An unrecognised value is an
+error, not a silent fall back to SQLite.
+
+The former deployment-mode variables `HASNA_HOOKS_STORAGE_MODE` and
+`HOOKS_STORAGE_MODE`, and their `local` / `hybrid` / `remote` / `self-hosted` /
+`cloud` values, are **retired**. They are not read; setting one raises an error
+naming the replacement variable and the backend to use (`local` became `sqlite`,
+everything else became `postgresql`). Deployment location was never a property of
+the data layer, so it is no longer expressed as one.
 
 ## Runtime model
 
-This package is an npm/local CLI, MCP server, and static dashboard package. It
-does not require a deployed cloud or self-hosted runtime to install or run hooks.
+This package is an npm CLI, MCP server, and static dashboard package. Installing
+and running hooks needs nothing deployed anywhere — the SQLite backend is the
+default and requires no server.
 
 ## Data Directory
 

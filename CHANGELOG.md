@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: deployment modes are gone; hooks storage is a two-value data-backend switch.** `StorageMode = "local" | "hybrid" | "remote"` described *where* something ran, which was never a property of the data layer, and nothing in the codebase ever branched on it — it was reported by `hooks storage status` and the `storage_status` MCP tool and otherwise decorative. It is replaced by `StorageBackend = "sqlite" | "postgresql"`.
+  - `HASNA_HOOKS_STORAGE_MODE` and `HOOKS_STORAGE_MODE` are retired and are **no longer read**. Setting either now raises an error naming the replacement variable and the backend to use, instead of being quietly ignored: `local` became `sqlite`, and `hybrid` / `remote` / `self_hosted` / `self-hosted` / `cloud` all became `postgresql`.
+  - New `HASNA_HOOKS_STORAGE_BACKEND` (fallback `HOOKS_STORAGE_BACKEND`) accepts `sqlite` or `postgresql` (`sqlite3`, `postgres` and `pg` are accepted aliases). **An unrecognised value now throws.** Previously any unknown value — including a typo — fell through `normalizeStorageMode` to `undefined` and then silently to `local`, so a misconfigured mode looked like a working local one. That silent normalisation was the actual defect; the vocabulary was its symptom.
+  - Backend inference is unchanged: with the variable unset, a configured `HASNA_HOOKS_DATABASE_URL` / `HOOKS_DATABASE_URL` yields `postgresql` (previously reported as `hybrid`) and its absence yields `sqlite` (previously `local`).
+  - `StorageStatus.mode` is renamed to `StorageStatus.backend`, and `hooks storage status` prints `Backend:` in place of `Mode:`. Removed from the package's public exports: `StorageMode`, `getStorageMode`, `HOOKS_STORAGE_MODE_ENV`, `HOOKS_STORAGE_MODE_FALLBACK_ENV`, `STORAGE_MODE_ENV`. Added: `StorageBackend`, `getStorageBackend`, `STORAGE_BACKENDS`, `HOOKS_STORAGE_BACKEND_ENV`, `HOOKS_STORAGE_BACKEND_FALLBACK_ENV`, `STORAGE_BACKEND_ENV`, `RETIRED_STORAGE_MODE_ENV`.
+  - Hook evaluation is untouched: no hook, and no part of the prompt path, reads the backend. `getStorageBackend()` is reached only from `getStorageStatus()`.
+
 ### Fixed
 
 - **`pre-bash` / `worktree-guard` destructive-shell guard no longer lets a filesystem-root wipe through.** `rm -rf /*` and `rm -rf "$(cmd)"/*` both returned `{"continue":true}` before this change; only `rm -rf /` blocked, and only incidentally, because `~/.hasna` sits under it. Two complementary rules close the class:

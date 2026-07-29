@@ -1227,7 +1227,7 @@ storageCmd
     }
     console.log(chalk.bold("\n  Storage Status\n"));
     console.log(`  Configured: ${status.configured ? chalk.green(`yes (${status.activeEnv})`) : chalk.red("no")}`);
-    console.log(`  Mode:       ${status.mode}`);
+    console.log(`  Backend:    ${status.backend}`);
     console.log(`  Tables:     ${status.tables.join(", ")}`);
     console.log(`  Sync rows:  ${status.sync.length}`);
   });
