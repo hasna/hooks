@@ -1,11 +1,11 @@
 /**
  * SQLite DB module for hooks — persistent storage at ~/.hasna/hooks/hooks.db
  *
- * Uses bun:sqlite with WAL mode for concurrent reads.
+ * Uses the @hasna/cloud SQLite adapter with WAL mode for concurrent reads.
  * Supports HASNA_HOOKS_DATA_DIR / HOOKS_DATA_DIR and HASNA_HOOKS_DB_PATH / HOOKS_DB_PATH env overrides.
  */
 
-import { Database } from "bun:sqlite";
+import { SqliteAdapter } from "@hasna/cloud";
 import { existsSync, mkdirSync, cpSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
@@ -13,7 +13,7 @@ import { runMigrations } from "./migrations";
 import { runLegacyImport } from "./legacy-import";
 import { runRetention } from "./retention";
 
-let instance: Database | null = null;
+let instance: SqliteAdapter | null = null;
 
 function resolveDataDir(): string {
   const explicit = process.env.HASNA_HOOKS_DATA_DIR ?? process.env.HOOKS_DATA_DIR;
@@ -46,14 +46,14 @@ function ensureDir(dbPath: string): void {
   }
 }
 
-export function getDb(): Database {
+export function getDb(): SqliteAdapter {
   if (instance) return instance;
 
   const dbPath = getDbPath();
   const isNew = dbPath === ":memory:" || !existsSync(dbPath);
   ensureDir(dbPath);
 
-  instance = new Database(dbPath);
+  instance = new SqliteAdapter(dbPath);
   instance.exec("PRAGMA journal_mode=WAL");
   instance.exec("PRAGMA foreign_keys=ON");
   runMigrations(instance);
@@ -82,8 +82,8 @@ export function closeDb(): void {
   }
 }
 
-export function createTestDb(): Database {
-  const db = new Database(":memory:");
+export function createTestDb(): SqliteAdapter {
+  const db = new SqliteAdapter(":memory:");
   db.exec("PRAGMA journal_mode=WAL");
   db.exec("PRAGMA foreign_keys=ON");
   return db;
