@@ -1,45 +1,44 @@
 import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
-import { homedir, tmpdir } from "os";
+import { tmpdir } from "os";
 import { Client } from "@modelcontextprotocol/sdk/client";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createHooksServer, MCP_PORT } from "./server.js";
 import { closeDb, getDb } from "../db/index.js";
 
-const SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
+const TEST_HOME = join(process.cwd(), ".tmp-mcp-home");
+const SETTINGS_PATH = join(TEST_HOME, ".claude", "settings.json");
 const TEST_PORT = 39428;
 
-let settingsBackup: string | null = null;
+const originalClaudeSettingsPath = process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH;
+const settingsBackups: Array<string | null> = [];
+
+process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH = SETTINGS_PATH;
 
 function backupSettings(): void {
   if (existsSync(SETTINGS_PATH)) {
-    settingsBackup = readFileSync(SETTINGS_PATH, "utf-8");
+    settingsBackups.push(readFileSync(SETTINGS_PATH, "utf-8"));
   } else {
-    settingsBackup = null;
+    settingsBackups.push(null);
   }
 }
 
 function restoreSettings(): void {
+  const settingsBackup = settingsBackups.pop();
+  if (settingsBackup === undefined) return;
   if (settingsBackup !== null) {
     writeFileSync(SETTINGS_PATH, settingsBackup);
   } else if (existsSync(SETTINGS_PATH)) {
-    try {
-      const settings = JSON.parse(readFileSync(SETTINGS_PATH, "utf-8"));
-      if (settings.hooks) {
-        for (const eventKey of Object.keys(settings.hooks)) {
-          settings.hooks[eventKey] = settings.hooks[eventKey].filter(
-            (entry: any) =>
-              !entry.hooks?.some((h: any) => /hooks run /.test(h.command || ""))
-          );
-          if (settings.hooks[eventKey].length === 0) delete settings.hooks[eventKey];
-        }
-        if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
-      }
-      writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + "\n");
-    } catch {}
+    rmSync(SETTINGS_PATH);
   }
 }
+
+afterAll(() => {
+  if (originalClaudeSettingsPath === undefined) delete process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH;
+  else process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH = originalClaudeSettingsPath;
+  rmSync(TEST_HOME, { recursive: true, force: true });
+});
 
 function parseResult(result: any): any {
   return JSON.parse((result.content as any)[0].text);
