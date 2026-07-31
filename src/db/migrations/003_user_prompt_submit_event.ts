@@ -7,14 +7,15 @@
  * already current (fresh databases or databases rebuilt by a newer 002).
  */
 
-import type { DbAdapter } from "@hasna/cloud";
+import type { Database } from "bun:sqlite";
 import { CREATE_HOOK_EVENTS_TABLE, CREATE_INDEXES } from "../schema";
 
-export function up(db: DbAdapter): void {
-  const row = db.get(
-    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
-    "hook_events",
-  ) as { sql: string | null } | undefined;
+export function up(db: Database): void {
+  const row = db
+    .query<{ sql: string | null }, [string]>(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?"
+    )
+    .get("hook_events");
 
   if (!row?.sql) return;
   if (row.sql.includes("UserPromptSubmit")) return;

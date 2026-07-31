@@ -1,4 +1,4 @@
-import type { DbAdapter } from "@hasna/cloud";
+import type { Database } from "bun:sqlite";
 import { getDb } from "./index.js";
 import { PG_MIGRATIONS } from "./pg-migrations.js";
 import { PgAdapterAsync } from "./remote-storage.js";
@@ -227,7 +227,7 @@ export async function storageSync(options?: { tables?: string[] }): Promise<{ pu
 export function getSyncMetaAll(): SyncMeta[] {
   const db = getDb();
   ensureSyncMetaTable(db);
-  return db.all("SELECT table_name, last_synced_at, direction FROM _hooks_sync_meta ORDER BY table_name, direction") as SyncMeta[];
+  return db.query("SELECT table_name, last_synced_at, direction FROM _hooks_sync_meta ORDER BY table_name, direction").all() as SyncMeta[];
 }
 
 export function getStorageStatus(): StorageStatus {
@@ -257,11 +257,11 @@ export function parseStorageTables(value?: string | string[] | null): StorageTab
   return resolveTables(Array.isArray(value) ? value : value.split(","));
 }
 
-async function pushTable(db: DbAdapter, remote: PgAdapterAsync, table: StorageTable): Promise<SyncResult> {
+async function pushTable(db: Database, remote: PgAdapterAsync, table: StorageTable): Promise<SyncResult> {
   const result: SyncResult = { table, rowsRead: 0, rowsWritten: 0, errors: [] };
   try {
     if (!tableExists(db, table)) return result;
-    const rows = db.all(`SELECT * FROM ${quoteIdent(table)}`) as Row[];
+    const rows = db.query(`SELECT * FROM ${quoteIdent(table)}`).all() as Row[];
     result.rowsRead = rows.length;
     if (rows.length === 0) return result;
     const remoteColumns = await getRemoteColumns(remote, table);
@@ -273,7 +273,7 @@ async function pushTable(db: DbAdapter, remote: PgAdapterAsync, table: StorageTa
   return result;
 }
 
-async function pullTable(remote: PgAdapterAsync, db: DbAdapter, table: StorageTable): Promise<SyncResult> {
+async function pullTable(remote: PgAdapterAsync, db: Database, table: StorageTable): Promise<SyncResult> {
   const result: SyncResult = { table, rowsRead: 0, rowsWritten: 0, errors: [] };
   try {
     if (!tableExists(db, table)) return result;
@@ -301,8 +301,8 @@ function filterRemoteColumns(remoteColumns: Map<string, string>, columns: string
   return columns.filter((column) => remoteColumns.has(column));
 }
 
-function filterLocalColumns(db: DbAdapter, table: string, columns: string[]): string[] {
-  const rows = db.all(`PRAGMA table_info(${quoteIdent(table)})`) as Array<{ name: string }>;
+function filterLocalColumns(db: Database, table: string, columns: string[]): string[] {
+  const rows = db.query(`PRAGMA table_info(${quoteIdent(table)})`).all() as Array<{ name: string }>;
   const allowed = new Set(rows.map((row) => row.name));
   return columns.filter((column) => allowed.has(column));
 }
@@ -329,7 +329,7 @@ async function upsertPg(remote: PgAdapterAsync, table: StorageTable, columns: st
   return rows.length;
 }
 
-function upsertSqlite(db: DbAdapter, table: StorageTable, columns: string[], rows: Row[]): number {
+function upsertSqlite(db: Database, table: StorageTable, columns: string[], rows: Row[]): number {
   if (columns.length === 0) return 0;
   const primaryKeys = PRIMARY_KEYS[table];
   const columnList = columns.map(quoteIdent).join(", ");
@@ -340,20 +340,21 @@ function upsertSqlite(db: DbAdapter, table: StorageTable, columns: string[], row
   const setClause = updateColumns.length > 0
     ? updateColumns.map((column) => `${quoteIdent(column)} = excluded.${quoteIdent(column)}`).join(", ")
     : `${quoteIdent(fallbackKey)} = excluded.${quoteIdent(fallbackKey)}`;
-  const statement = db.prepare(
+  const statement = db.query(
     `INSERT INTO ${quoteIdent(table)} (${columnList}) VALUES (${placeholders})
      ON CONFLICT (${keyList}) DO UPDATE SET ${setClause}`,
   );
-  db.transaction(() => {
-    for (const row of rows) statement.run(...columns.map((column) => coerceForSqlite(row[column])));
+  const insert = db.transaction((batch: Row[]) => {
+    for (const row of batch) statement.run(...columns.map((column) => coerceForSqlite(row[column])));
   });
+  insert(rows);
   return rows.length;
 }
 
-function recordSyncMeta(db: DbAdapter, direction: "push" | "pull", results: SyncResult[]): void {
+function recordSyncMeta(db: Database, direction: "push" | "pull", results: SyncResult[]): void {
   ensureSyncMetaTable(db);
   const now = new Date().toISOString();
-  const statement = db.prepare(`
+  const statement = db.query(`
     INSERT INTO _hooks_sync_meta (table_name, last_synced_at, direction)
     VALUES (?, ?, ?)
     ON CONFLICT(table_name, direction) DO UPDATE SET last_synced_at = excluded.last_synced_at
@@ -364,7 +365,7 @@ function recordSyncMeta(db: DbAdapter, direction: "push" | "pull", results: Sync
   }
 }
 
-function ensureSyncMetaTable(db: DbAdapter): void {
+function ensureSyncMetaTable(db: Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS _hooks_sync_meta (
       table_name TEXT NOT NULL,
@@ -375,8 +376,8 @@ function ensureSyncMetaTable(db: DbAdapter): void {
   `);
 }
 
-function tableExists(db: DbAdapter, table: string): boolean {
-  const row = db.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", table);
+function tableExists(db: Database, table: string): boolean {
+  const row = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
   return Boolean(row);
 }
 
