@@ -15,7 +15,7 @@ logCmd
   .option("-n, --limit <n>", "Number of rows to show", "50")
   .option("-j, --json", "Output as JSON", false)
   .action(async (options: { hook?: string; session?: string; limit: string; json: boolean }) => {
-    const { getDb } = await import("../db/index.js");
+    const { getDb } = await import("../../db/index.js");
     const db = getDb();
     const limit = parseInt(options.limit) || 50;
 
@@ -48,7 +48,7 @@ logCmd
   .option("-n, --limit <n>", "Number of rows to show", "50")
   .option("-j, --json", "Output as JSON", false)
   .action(async (text: string, options: { limit: string; json: boolean }) => {
-    const { getDb } = await import("../db/index.js");
+    const { getDb } = await import("../../db/index.js");
     const db = getDb();
     const limit = parseInt(options.limit) || 50;
     const q = `%${text}%`;
@@ -74,7 +74,7 @@ logCmd
   .option("-n <n>", "Number of rows", "20")
   .option("-j, --json", "Output as JSON", false)
   .action(async (options: { n: string; json: boolean }) => {
-    const { getDb } = await import("../db/index.js");
+    const { getDb } = await import("../../db/index.js");
     const db = getDb();
     const limit = parseInt(options.n) || 20;
     const rows = db.query(
@@ -101,7 +101,7 @@ logCmd
   .option("-n, --limit <n>", "Number of rows to show", "50")
   .option("-j, --json", "Output as JSON", false)
   .action(async (options: { since: string; limit: string; json: boolean }) => {
-    const { getDb } = await import("../db/index.js");
+    const { getDb } = await import("../../db/index.js");
     const db = getDb();
     const limit = parseInt(options.limit) || 50;
 
@@ -141,7 +141,7 @@ logCmd
   .option("--hook <name>", "Only delete events for this hook")
   .option("-y, --yes", "Skip confirmation prompt", false)
   .action(async (options: { hook?: string; yes: boolean }) => {
-    const { getDb } = await import("../db/index.js");
+    const { getDb } = await import("../../db/index.js");
     const db = getDb();
 
     const countRow = options.hook

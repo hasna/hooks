@@ -11,7 +11,7 @@ storageCmd
   .description("Show storage sync status")
   .option("-j, --json", "Output as JSON", false)
   .action(async (options: { json: boolean }) => {
-    const { getStorageStatus } = await import("../storage.js");
+    const { getStorageStatus } = await import("../../storage.js");
     const status = getStorageStatus();
     if (options.json) {
       console.log(JSON.stringify(status, null, 2));
@@ -31,7 +31,7 @@ storageCmd
   .option("-j, --json", "Output as JSON", false)
   .action(async (options: { tables?: string; json: boolean }) => {
     try {
-      const { parseStorageTables, storagePush } = await import("../storage.js");
+      const { parseStorageTables, storagePush } = await import("../../storage.js");
       const results = await storagePush({ tables: parseStorageTables(options.tables) });
       if (options.json) {
         console.log(JSON.stringify(results, null, 2));
@@ -54,7 +54,7 @@ storageCmd
   .option("-j, --json", "Output as JSON", false)
   .action(async (options: { tables?: string; json: boolean }) => {
     try {
-      const { parseStorageTables, storagePull } = await import("../storage.js");
+      const { parseStorageTables, storagePull } = await import("../../storage.js");
       const results = await storagePull({ tables: parseStorageTables(options.tables) });
       if (options.json) {
         console.log(JSON.stringify(results, null, 2));
@@ -77,7 +77,7 @@ storageCmd
   .option("-j, --json", "Output as JSON", false)
   .action(async (options: { tables?: string; json: boolean }) => {
     try {
-      const { parseStorageTables, storageSync } = await import("../storage.js");
+      const { parseStorageTables, storageSync } = await import("../../storage.js");
       const result = await storageSync({ tables: parseStorageTables(options.tables) });
       if (options.json) {
         console.log(JSON.stringify(result, null, 2));

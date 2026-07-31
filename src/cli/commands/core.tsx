@@ -32,6 +32,7 @@ import {
 } from "./helpers.js";
 
 export function registerCoreCommands(program: Command): void {
+  program
   .command("interactive", { isDefault: true })
   .alias("i")
   .description("Interactive hook browser")

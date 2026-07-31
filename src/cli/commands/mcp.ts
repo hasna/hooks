@@ -10,19 +10,18 @@ program
   .description("Start MCP server for AI agent integration (default: shared Streamable HTTP)")
   .action(async (options: { stdio: boolean; sse: boolean; http: boolean; port?: string }) => {
     if (options.stdio) {
-      const { startStdioServer } = await import("../mcp/server.js");
+      const { startStdioServer } = await import("../../mcp/server.js");
       await startStdioServer();
     } else if (options.sse) {
-      const { startSSEServer } = await import("../mcp/server.js");
+      const { startSSEServer } = await import("../../mcp/server.js");
       await startSSEServer(options.port ? parseInt(options.port) : 39427);
     } else {
       // Default: shared Streamable HTTP server (one process per MCP, many agents).
-      const { createHooksServer } = await import("../mcp/server.js");
-      const { resolveMcpHttpPort, startMcpHttpServer } = await import("../mcp/http.js");
+      const { createHooksServer } = await import("../../mcp/server.js");
+      const { resolveMcpHttpPort, startMcpHttpServer } = await import("../../mcp/http.js");
       const args = options.port ? ["--port", options.port] : [];
       startMcpHttpServer({ name: "hooks", port: resolveMcpHttpPort(args), buildServer: createHooksServer });
     }
   });
-registerEventsCommands(program, { source: "hooks" });
 
 }
