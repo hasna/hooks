@@ -1,10 +1,13 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, afterAll } from "bun:test";
 import { join } from "path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "fs";
-import { homedir, tmpdir } from "os";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, mkdtempSync } from "fs";
+import { tmpdir } from "os";
 
 const CLI = join(import.meta.dir, "index.tsx");
-const SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
+const previousClaudeSettingsPath = process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH;
+const TEST_HOME = mkdtempSync(join(tmpdir(), "hooks-cli-home-"));
+const SETTINGS_PATH = join(TEST_HOME, ".claude", "settings.json");
+process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH = SETTINGS_PATH;
 
 let settingsBackup: string | null = null;
 
@@ -29,7 +32,7 @@ async function run(...args: string[]): Promise<{ stdout: string; stderr: string;
   const proc = Bun.spawn(["bun", "run", CLI, ...args], {
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, NO_COLOR: "1" },
+    env: { ...process.env, HASNA_HOOKS_CLAUDE_SETTINGS_PATH: SETTINGS_PATH, NO_COLOR: "1" },
   });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -38,6 +41,12 @@ async function run(...args: string[]): Promise<{ stdout: string; stderr: string;
   const exitCode = await proc.exited;
   return { stdout, stderr, exitCode };
 }
+
+afterAll(() => {
+  if (previousClaudeSettingsPath === undefined) delete process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH;
+  else process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH = previousClaudeSettingsPath;
+  rmSync(TEST_HOME, { recursive: true, force: true });
+});
 
 async function runJson(...args: string[]): Promise<any> {
   const { stdout } = await run(...args, "--json");

@@ -92,6 +92,11 @@ function getTargetSettingsDir(target: SingleTarget): string {
   return ".claude";
 }
 
+function getJsonSettingsPathOverride(target: WritableJsonTarget): string | undefined {
+  if (target === "claude") return process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH;
+  return process.env.HASNA_HOOKS_GEMINI_SETTINGS_PATH;
+}
+
 export interface InstallResult {
   hook: string;
   success: boolean;
@@ -124,6 +129,9 @@ export function getSettingsPath(scope: Scope = "global", target: SingleTarget = 
   if (target === "codewith" && codewithConfigPath) return codewithConfigPath;
   if (target === "codewith" && process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH) {
     return process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH;
+  }
+  if (scope === "global" && (target === "claude" || target === "gemini") && getJsonSettingsPathOverride(target)) {
+    return getJsonSettingsPathOverride(target)!;
   }
   const dir = getTargetSettingsDir(target);
   if (scope === "project") {

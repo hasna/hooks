@@ -1,14 +1,17 @@
 import { describe, test, expect, beforeEach, afterEach, beforeAll, afterAll } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, mkdtempSync } from "fs";
 import { join } from "path";
-import { homedir, tmpdir } from "os";
+import { tmpdir } from "os";
 import { Client } from "@modelcontextprotocol/sdk/client";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createHooksServer, MCP_PORT } from "./server.js";
 import { closeDb, getDb } from "../db/index.js";
 
-const SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
 const TEST_PORT = 39428;
+const previousClaudeSettingsPath = process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH;
+const TEST_HOME = mkdtempSync(join(tmpdir(), "hooks-mcp-home-"));
+const SETTINGS_PATH = join(TEST_HOME, ".claude", "settings.json");
+process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH = SETTINGS_PATH;
 
 let settingsBackup: string | null = null;
 
@@ -95,6 +98,12 @@ function seedLogDb(rowCount: number, options: { withErrors?: boolean } = {}): ()
     rmSync(tmpDir, { recursive: true, force: true });
   };
 }
+
+afterAll(() => {
+  if (previousClaudeSettingsPath === undefined) delete process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH;
+  else process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH = previousClaudeSettingsPath;
+  rmSync(TEST_HOME, { recursive: true, force: true });
+});
 
 describe("MCP server", () => {
   describe("constants", () => {
