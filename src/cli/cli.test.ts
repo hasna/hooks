@@ -1,35 +1,46 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import { join } from "path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "fs";
-import { homedir, tmpdir } from "os";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from "fs";
+import { tmpdir } from "os";
 
 const CLI = join(import.meta.dir, "index.tsx");
-const SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
+const TEST_HOME = mkdtempSync(join(process.cwd(), ".tmp-cli-home-"));
+const SETTINGS_PATH = join(TEST_HOME, ".claude", "settings.json");
 
-let settingsBackup: string | null = null;
+const settingsBackups: Array<string | null> = [];
+
+function cliEnv(): Record<string, string | undefined> {
+  return {
+    ...process.env,
+    HOME: TEST_HOME,
+    HASNA_HOOKS_CLAUDE_SETTINGS_PATH: SETTINGS_PATH,
+    NO_COLOR: "1",
+  };
+}
 
 function backupSettings(): void {
   if (existsSync(SETTINGS_PATH)) {
-    settingsBackup = readFileSync(SETTINGS_PATH, "utf-8");
+    settingsBackups.push(readFileSync(SETTINGS_PATH, "utf-8"));
   } else {
-    settingsBackup = null;
+    settingsBackups.push(null);
   }
 }
 
 function restoreSettings(): void {
+  const settingsBackup = settingsBackups.pop();
+  if (settingsBackup === undefined) return;
   if (settingsBackup !== null) {
     writeFileSync(SETTINGS_PATH, settingsBackup);
   } else if (existsSync(SETTINGS_PATH)) {
     rmSync(SETTINGS_PATH);
   }
-  settingsBackup = null;
 }
 
 async function run(...args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = Bun.spawn(["bun", "run", CLI, ...args], {
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, NO_COLOR: "1" },
+    env: cliEnv(),
   });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -38,6 +49,10 @@ async function run(...args: string[]): Promise<{ stdout: string; stderr: string;
   const exitCode = await proc.exited;
   return { stdout, stderr, exitCode };
 }
+
+afterAll(() => {
+  rmSync(TEST_HOME, { recursive: true, force: true });
+});
 
 async function runJson(...args: string[]): Promise<any> {
   const { stdout } = await run(...args, "--json");
@@ -318,7 +333,7 @@ describe("CLI", () => {
         stdout: "pipe",
         stderr: "pipe",
         cwd: tmpdir(),
-        env: { ...process.env, NO_COLOR: "1" },
+        env: cliEnv(),
       });
       const stdout = await new Response(proc.stdout).text();
       await proc.exited;
@@ -330,7 +345,7 @@ describe("CLI", () => {
         stdout: "pipe",
         stderr: "pipe",
         cwd: tmpdir(),
-        env: { ...process.env, NO_COLOR: "1" },
+        env: cliEnv(),
       });
       const stdout = await new Response(proc.stdout).text();
       await proc.exited;

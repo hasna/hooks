@@ -92,6 +92,12 @@ function getTargetSettingsDir(target: SingleTarget): string {
   return ".claude";
 }
 
+function getGlobalSettingsPathOverride(target: SingleTarget): string | undefined {
+  if (target === "claude") return process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH;
+  if (target === "gemini") return process.env.HASNA_HOOKS_GEMINI_SETTINGS_PATH;
+  return undefined;
+}
+
 export interface InstallResult {
   hook: string;
   success: boolean;
@@ -125,6 +131,8 @@ export function getSettingsPath(scope: Scope = "global", target: SingleTarget = 
   if (target === "codewith" && process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH) {
     return process.env.HASNA_HOOKS_CODEWITH_CONFIG_PATH;
   }
+  const globalOverride = scope === "global" ? getGlobalSettingsPathOverride(target) : undefined;
+  if (globalOverride) return globalOverride;
   const dir = getTargetSettingsDir(target);
   if (scope === "project") {
     return target === "codewith" ? join(process.cwd(), dir, "config.toml") : join(process.cwd(), dir, "settings.json");

@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync, mkdtempSync } from "fs";
 import { dirname, join } from "path";
 import { homedir, tmpdir } from "os";
@@ -17,39 +17,31 @@ import {
 } from "./installer.js";
 import { HOOKS, getHookEvents } from "./registry.js";
 
-const GLOBAL_SETTINGS = join(homedir(), ".claude", "settings.json");
+const TEST_HOME = mkdtempSync(join(process.cwd(), ".tmp-installer-home-"));
+const GLOBAL_SETTINGS = join(TEST_HOME, ".claude", "settings.json");
+const GEMINI_SETTINGS = join(TEST_HOME, ".gemini", "settings.json");
+const originalClaudeSettingsPath = process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH;
+const originalGeminiSettingsPath = process.env.HASNA_HOOKS_GEMINI_SETTINGS_PATH;
+const settingsBackups: Array<string | null> = [];
 
-let settingsBackup: string | null = null;
+process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH = GLOBAL_SETTINGS;
+process.env.HASNA_HOOKS_GEMINI_SETTINGS_PATH = GEMINI_SETTINGS;
 
 function backupSettings(): void {
   if (existsSync(GLOBAL_SETTINGS)) {
-    settingsBackup = readFileSync(GLOBAL_SETTINGS, "utf-8");
+    settingsBackups.push(readFileSync(GLOBAL_SETTINGS, "utf-8"));
   } else {
-    settingsBackup = null;
+    settingsBackups.push(null);
   }
 }
 
 function restoreSettings(): void {
+  const settingsBackup = settingsBackups.pop();
+  if (settingsBackup === undefined) return;
   if (settingsBackup !== null) {
     writeFileSync(GLOBAL_SETTINGS, settingsBackup);
   } else if (existsSync(GLOBAL_SETTINGS)) {
-    // Clean up only our test hooks
-    try {
-      const settings = JSON.parse(readFileSync(GLOBAL_SETTINGS, "utf-8"));
-      if (settings.hooks) {
-        for (const eventKey of Object.keys(settings.hooks)) {
-          settings.hooks[eventKey] = settings.hooks[eventKey].filter(
-            (entry: any) =>
-              !entry.hooks?.some((h: any) =>
-                /hooks run (gitguard|checkpoint|packageage|branchprotect)/.test(h.command || "")
-              )
-          );
-          if (settings.hooks[eventKey].length === 0) delete settings.hooks[eventKey];
-        }
-        if (Object.keys(settings.hooks).length === 0) delete settings.hooks;
-      }
-      writeFileSync(GLOBAL_SETTINGS, JSON.stringify(settings, null, 2) + "\n");
-    } catch {}
+    rmSync(GLOBAL_SETTINGS);
   }
 }
 
@@ -61,10 +53,29 @@ afterEach(() => {
   restoreSettings();
 });
 
+afterAll(() => {
+  if (originalClaudeSettingsPath === undefined) delete process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH;
+  else process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH = originalClaudeSettingsPath;
+  if (originalGeminiSettingsPath === undefined) delete process.env.HASNA_HOOKS_GEMINI_SETTINGS_PATH;
+  else process.env.HASNA_HOOKS_GEMINI_SETTINGS_PATH = originalGeminiSettingsPath;
+  rmSync(TEST_HOME, { recursive: true, force: true });
+});
+
 describe("installer", () => {
   describe("getSettingsPath", () => {
-    test("global returns ~/.claude/settings.json", () => {
-      expect(getSettingsPath("global")).toBe(join(homedir(), ".claude", "settings.json"));
+    test("global returns configured Claude settings path when overridden", () => {
+      expect(getSettingsPath("global")).toBe(GLOBAL_SETTINGS);
+    });
+
+    test("global returns ~/.claude/settings.json without override", () => {
+      const previous = process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH;
+      delete process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH;
+      try {
+        expect(getSettingsPath("global")).toBe(join(homedir(), ".claude", "settings.json"));
+      } finally {
+        if (previous === undefined) delete process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH;
+        else process.env.HASNA_HOOKS_CLAUDE_SETTINGS_PATH = previous;
+      }
     });
 
     test("project returns .claude/settings.json in cwd", () => {
@@ -480,11 +491,11 @@ describe("installer", () => {
 
   describe("getSettingsPath default", () => {
     test("defaults to global when no argument", () => {
-      expect(getSettingsPath()).toBe(join(homedir(), ".claude", "settings.json"));
+      expect(getSettingsPath()).toBe(GLOBAL_SETTINGS);
     });
 
     test("gemini global path", () => {
-      expect(getSettingsPath("global", "gemini")).toBe(join(homedir(), ".gemini", "settings.json"));
+      expect(getSettingsPath("global", "gemini")).toBe(GEMINI_SETTINGS);
     });
 
     test("gemini project path", () => {
