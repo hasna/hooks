@@ -4,14 +4,14 @@
  * Migrations are additive-only, never destructive.
  */
 
-import type { DbAdapter } from "@hasna/cloud";
+import type { Database } from "bun:sqlite";
 import { up as migration001 } from "./001_initial";
 import { up as migration002 } from "./002_session_events";
 import { up as migration003 } from "./003_user_prompt_submit_event";
 
 interface Migration {
   version: string;
-  up: (db: DbAdapter) => void;
+  up: (db: Database) => void;
 }
 
 const MIGRATIONS: Migration[] = [
@@ -20,7 +20,7 @@ const MIGRATIONS: Migration[] = [
   { version: "003_user_prompt_submit_event", up: migration003 },
 ];
 
-function ensureMigrationsTable(db: DbAdapter): void {
+function ensureMigrationsTable(db: Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version    TEXT PRIMARY KEY,
@@ -29,12 +29,12 @@ function ensureMigrationsTable(db: DbAdapter): void {
   `);
 }
 
-function getApplied(db: DbAdapter): Set<string> {
-  const rows = db.all("SELECT version FROM schema_migrations") as Array<{ version: string }>;
+function getApplied(db: Database): Set<string> {
+  const rows = db.query<{ version: string }, []>("SELECT version FROM schema_migrations").all();
   return new Set(rows.map((r) => r.version));
 }
 
-export function runMigrations(db: DbAdapter): void {
+export function runMigrations(db: Database): void {
   ensureMigrationsTable(db);
   const applied = getApplied(db);
 
@@ -42,10 +42,9 @@ export function runMigrations(db: DbAdapter): void {
     if (applied.has(migration.version)) continue;
 
     migration.up(db);
-    db.run(
-      "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+    db.run("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", [
       migration.version,
       new Date().toISOString(),
-    );
+    ]);
   }
 }
