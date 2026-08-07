@@ -1,35 +1,46 @@
-import { describe, test, expect, beforeEach, afterEach } from "bun:test";
+import { describe, test, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import { join } from "path";
 import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from "fs";
 import { homedir, tmpdir } from "os";
 
 const CLI = join(import.meta.dir, "index.tsx");
-const SETTINGS_PATH = join(homedir(), ".claude", "settings.json");
+const TEST_HOME = mkdtempSync(join(process.cwd(), ".tmp-cli-home-"));
+const SETTINGS_PATH = join(TEST_HOME, ".claude", "settings.json");
 
-let settingsBackup: string | null = null;
+const settingsBackups: Array<string | null> = [];
+
+function cliEnv(): Record<string, string | undefined> {
+  return {
+    ...process.env,
+    HOME: TEST_HOME,
+    HASNA_HOOKS_CLAUDE_SETTINGS_PATH: SETTINGS_PATH,
+    NO_COLOR: "1",
+  };
+}
 
 function backupSettings(): void {
   if (existsSync(SETTINGS_PATH)) {
-    settingsBackup = readFileSync(SETTINGS_PATH, "utf-8");
+    settingsBackups.push(readFileSync(SETTINGS_PATH, "utf-8"));
   } else {
-    settingsBackup = null;
+    settingsBackups.push(null);
   }
 }
 
 function restoreSettings(): void {
+  const settingsBackup = settingsBackups.pop();
+  if (settingsBackup === undefined) return;
   if (settingsBackup !== null) {
     writeFileSync(SETTINGS_PATH, settingsBackup);
   } else if (existsSync(SETTINGS_PATH)) {
     rmSync(SETTINGS_PATH);
   }
-  settingsBackup = null;
 }
 
 async function run(...args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const proc = Bun.spawn(["bun", "run", CLI, ...args], {
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, NO_COLOR: "1" },
+    env: cliEnv(),
   });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -38,6 +49,10 @@ async function run(...args: string[]): Promise<{ stdout: string; stderr: string;
   const exitCode = await proc.exited;
   return { stdout, stderr, exitCode };
 }
+
+afterAll(() => {
+  rmSync(TEST_HOME, { recursive: true, force: true });
+});
 
 async function runJson(...args: string[]): Promise<any> {
   const { stdout } = await run(...args, "--json");
@@ -110,12 +125,17 @@ describe("CLI", () => {
   describe("hooks list", () => {
     test("lists all hooks", async () => {
       const { stdout } = await run("list");
-      expect(stdout).toContain("Available hooks (48)");
+      expect(stdout).toContain("Available hooks (48, showing 20)");
       expect(stdout).toContain("Git Safety");
       expect(stdout).toContain("Code Quality");
       expect(stdout).toContain("Security");
-      expect(stdout).toContain("Notifications");
-      expect(stdout).toContain("Context Management");
+      expect(stdout).toContain("Showing a compact subset");
+      expect(stdout).not.toContain("Blocks destructive git operations");
+    });
+
+    test("--verbose includes descriptions", async () => {
+      const { stdout } = await run("list", "--limit", "1", "--verbose");
+      expect(stdout).toContain("Blocks destructive git operations");
     });
 
     test("--json returns all hooks grouped by category", async () => {
@@ -129,7 +149,7 @@ describe("CLI", () => {
 
     test("lists by category", async () => {
       const { stdout } = await run("list", "-c", "Security");
-      expect(stdout).toContain("Security (3)");
+      expect(stdout).toContain("Security (3, showing 3)");
       expect(stdout).toContain("checksecurity");
       expect(stdout).toContain("packageage");
       expect(stdout).toContain("pre-bash");
@@ -169,6 +189,13 @@ describe("CLI", () => {
       const { stdout } = await run("search", "git");
       expect(stdout).toContain("Found");
       expect(stdout).toContain("gitguard");
+      expect(stdout).not.toContain("Blocks destructive git operations");
+      expect(stdout).not.toContain("--all");
+    });
+
+    test("search --verbose includes descriptions", async () => {
+      const { stdout } = await run("search", "gitguard", "--verbose");
+      expect(stdout).toContain("Blocks destructive git operations");
     });
 
     test("shows no results for bad query", async () => {
@@ -393,7 +420,7 @@ describe("CLI", () => {
         stdout: "pipe",
         stderr: "pipe",
         cwd: tmpdir(),
-        env: { ...process.env, NO_COLOR: "1" },
+        env: cliEnv(),
       });
       const stdout = await new Response(proc.stdout).text();
       await proc.exited;
@@ -405,7 +432,7 @@ describe("CLI", () => {
         stdout: "pipe",
         stderr: "pipe",
         cwd: tmpdir(),
-        env: { ...process.env, NO_COLOR: "1" },
+        env: cliEnv(),
       });
       const stdout = await new Response(proc.stdout).text();
       await proc.exited;
@@ -446,6 +473,14 @@ describe("CLI", () => {
       expect(stdout).toContain("Git Guard");
       expect(stdout).toContain("Configuration");
       expect(stdout).toContain("Install");
+      expect(stdout).toContain("README Preview");
+      expect(stdout).toContain("Claude Code hook that blocks destructive git operations.");
+      expect(stdout).toContain("--verbose");
+    });
+
+    test("hook-specific docs --verbose includes full README section", async () => {
+      const { stdout } = await run("docs", "gitguard", "--verbose");
+      expect(stdout).toContain("README:");
     });
 
     test("--json for specific hook includes readme", async () => {

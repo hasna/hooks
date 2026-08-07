@@ -15,7 +15,16 @@ export const HOOKS_STORAGE_TABLES = STORAGE_TABLES;
 type StorageTable = (typeof STORAGE_TABLES)[number];
 type Row = Record<string, unknown>;
 
-export type StorageMode = "local" | "hybrid" | "remote";
+/**
+ * The storage backend is a two-value data-backend switch, NOT a deployment mode.
+ *
+ * `local | hybrid | remote` (and the wider fleet's `self_hosted | cloud`) described *where*
+ * something ran, which is not a property of the data layer. They are retired: local collapses
+ * to `sqlite`, and every server-backed placement collapses to `postgresql`.
+ */
+export const STORAGE_BACKENDS = ["sqlite", "postgresql"] as const;
+
+export type StorageBackend = (typeof STORAGE_BACKENDS)[number];
 
 export interface StorageEnv {
   name: string;
@@ -36,14 +45,21 @@ export interface SyncMeta {
 
 export const HOOKS_STORAGE_ENV = "HASNA_HOOKS_DATABASE_URL";
 export const HOOKS_STORAGE_FALLBACK_ENV = "HOOKS_DATABASE_URL";
-export const HOOKS_STORAGE_MODE_ENV = "HASNA_HOOKS_STORAGE_MODE";
-export const HOOKS_STORAGE_MODE_FALLBACK_ENV = "HOOKS_STORAGE_MODE";
+export const HOOKS_STORAGE_BACKEND_ENV = "HASNA_HOOKS_STORAGE_BACKEND";
+export const HOOKS_STORAGE_BACKEND_FALLBACK_ENV = "HOOKS_STORAGE_BACKEND";
 export const STORAGE_DATABASE_ENV = [HOOKS_STORAGE_ENV, HOOKS_STORAGE_FALLBACK_ENV] as const;
-export const STORAGE_MODE_ENV = [HOOKS_STORAGE_MODE_ENV, HOOKS_STORAGE_MODE_FALLBACK_ENV] as const;
+export const STORAGE_BACKEND_ENV = [HOOKS_STORAGE_BACKEND_ENV, HOOKS_STORAGE_BACKEND_FALLBACK_ENV] as const;
+
+/**
+ * Deployment-mode env vars that no longer exist. Reading one is an error rather than a no-op:
+ * an operator who set `HASNA_HOOKS_STORAGE_MODE=hybrid` believed they had configured something,
+ * and silently ignoring it is how a config change appears to work and does not.
+ */
+export const RETIRED_STORAGE_MODE_ENV = ["HASNA_HOOKS_STORAGE_MODE", "HOOKS_STORAGE_MODE"] as const;
 
 export interface StorageStatus {
   configured: boolean;
-  mode: StorageMode;
+  backend: StorageBackend;
   env: typeof STORAGE_DATABASE_ENV;
   activeEnv: string | null;
   service: "hooks";
@@ -63,10 +79,67 @@ function readEnv(name: string): string | undefined {
   return value || undefined;
 }
 
-function normalizeStorageMode(value: string | undefined): StorageMode | undefined {
-  const normalized = value?.trim().toLowerCase();
-  if (normalized === "local" || normalized === "hybrid" || normalized === "remote") return normalized;
-  return undefined;
+/**
+ * Retired deployment-mode values mapped to the backend that replaced them. `local` was the
+ * on-box SQLite file; every other placement — hybrid, remote, self-hosted, cloud — was a
+ * server holding the data in PostgreSQL.
+ */
+const RETIRED_MODE_REPLACEMENT: Record<string, StorageBackend> = {
+  local: "sqlite",
+  hybrid: "postgresql",
+  remote: "postgresql",
+  self_hosted: "postgresql",
+  "self-hosted": "postgresql",
+  selfhosted: "postgresql",
+  cloud: "postgresql",
+};
+
+const BACKEND_ALIASES: Record<string, StorageBackend> = {
+  sqlite: "sqlite",
+  sqlite3: "sqlite",
+  postgresql: "postgresql",
+  postgres: "postgresql",
+  pg: "postgresql",
+};
+
+function assertNoRetiredModeEnv(): void {
+  for (const name of RETIRED_STORAGE_MODE_ENV) {
+    const value = readEnv(name);
+    if (!value) continue;
+    const replacement = RETIRED_MODE_REPLACEMENT[value.trim().toLowerCase()];
+    const mapping = replacement
+      ? `${value} maps to ${replacement}`
+      : `use one of ${STORAGE_BACKENDS.join(", ")}`;
+    throw new Error(
+      `${name} is a retired deployment-mode variable and is no longer read. `
+        + `Hooks storage is a data-backend switch, not a deployment mode: `
+        + `set ${HOOKS_STORAGE_BACKEND_ENV} to ${STORAGE_BACKENDS.join(" or ")} instead (${mapping}), `
+        + `then unset ${name}.`,
+    );
+  }
+}
+
+function normalizeStorageBackend(value: string | undefined, envName: string): StorageBackend | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "") return undefined;
+
+  const backend = BACKEND_ALIASES[normalized];
+  if (backend) return backend;
+
+  const replacement = RETIRED_MODE_REPLACEMENT[normalized];
+  if (replacement) {
+    throw new Error(
+      `${envName}=${value} names a retired deployment mode. `
+        + `local/hybrid/remote/self_hosted/cloud were removed: hooks storage now selects a data `
+        + `backend only. Set ${envName}=${replacement} instead.`,
+    );
+  }
+
+  throw new Error(
+    `${envName}=${value} is not a known hooks storage backend. `
+      + `Set ${HOOKS_STORAGE_BACKEND_ENV} to one of ${STORAGE_BACKENDS.join(", ")}.`,
+  );
 }
 
 export function getStorageDatabaseEnvName(): (typeof STORAGE_DATABASE_ENV)[number] | null {
@@ -86,11 +159,18 @@ export function getStorageDatabaseUrl(): string | null {
   return env ? readEnv(env.name) ?? null : null;
 }
 
-export function getStorageMode(): StorageMode {
-  const mode = normalizeStorageMode(readEnv(HOOKS_STORAGE_MODE_ENV))
-    ?? normalizeStorageMode(readEnv(HOOKS_STORAGE_MODE_FALLBACK_ENV));
-  if (mode) return mode;
-  return getStorageDatabaseUrl() ? "hybrid" : "local";
+/**
+ * Which data backend hooks storage talks to. Explicit configuration wins; otherwise the
+ * presence of a database URL is the answer, exactly as before.
+ *
+ * Throws — never silently falls back — on an unknown value or a retired deployment-mode name.
+ */
+export function getStorageBackend(): StorageBackend {
+  assertNoRetiredModeEnv();
+  const backend = normalizeStorageBackend(readEnv(HOOKS_STORAGE_BACKEND_ENV), HOOKS_STORAGE_BACKEND_ENV)
+    ?? normalizeStorageBackend(readEnv(HOOKS_STORAGE_BACKEND_FALLBACK_ENV), HOOKS_STORAGE_BACKEND_FALLBACK_ENV);
+  if (backend) return backend;
+  return getStorageDatabaseUrl() ? "postgresql" : "sqlite";
 }
 
 export async function getStoragePg(): Promise<PgAdapterAsync> {
@@ -154,7 +234,7 @@ export function getStorageStatus(): StorageStatus {
   const activeEnv = getStorageDatabaseEnv();
   return {
     configured: Boolean(activeEnv),
-    mode: getStorageMode(),
+    backend: getStorageBackend(),
     env: STORAGE_DATABASE_ENV,
     activeEnv: activeEnv?.name ?? null,
     service: "hooks",

@@ -225,16 +225,18 @@ export {
 export {
   HOOKS_STORAGE_ENV,
   HOOKS_STORAGE_FALLBACK_ENV,
-  HOOKS_STORAGE_MODE_ENV,
-  HOOKS_STORAGE_MODE_FALLBACK_ENV,
+  HOOKS_STORAGE_BACKEND_ENV,
+  HOOKS_STORAGE_BACKEND_FALLBACK_ENV,
   HOOKS_STORAGE_TABLES,
+  RETIRED_STORAGE_MODE_ENV,
+  STORAGE_BACKENDS,
+  STORAGE_BACKEND_ENV,
   STORAGE_DATABASE_ENV,
-  STORAGE_MODE_ENV,
   STORAGE_TABLES,
+  getStorageBackend,
   getStorageDatabaseEnv,
   getStorageDatabaseEnvName,
   getStorageDatabaseUrl,
-  getStorageMode,
   getStoragePg,
   getStorageStatus,
   getSyncMetaAll,
@@ -245,4 +247,4 @@ export {
   storagePush,
   storageSync,
 } from "./storage.js";
-export type { StorageEnv, StorageMode, StorageStatus, SyncMeta, SyncResult } from "./storage.js";
+export type { StorageBackend, StorageEnv, StorageStatus, SyncMeta, SyncResult } from "./storage.js";
