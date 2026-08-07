@@ -1,0 +1,9 @@
+{
+  "name": "mention-context",
+  "version": "0.1.0",
+  "description": "UserPromptSubmit hook that injects repository context for @hasna/<repo> mentions",
+  "type": "module",
+  "main": "./src/hasna-mention-context.py",
+  "author": "Hasna",
+  "license": "Apache-2.0"
+}
