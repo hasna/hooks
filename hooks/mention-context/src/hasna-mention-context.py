@@ -238,6 +238,23 @@ CURL_BIN = which("curl", "/usr/bin/curl")
 GIT_BIN = which("git", "/usr/bin/git")
 
 
+_CAPTURE_LOCK = threading.Lock()
+_CAPTURE_SEQ = 0
+
+
+def _capture_slot():
+    """Return a component that is unique to one run_capture call.
+
+    The counter is what provides uniqueness among the threads sharing a tmpdir.
+    The pid costs nothing and covers the day someone passes a tmpdir shared
+    between processes.
+    """
+    global _CAPTURE_SEQ
+    with _CAPTURE_LOCK:
+        _CAPTURE_SEQ += 1
+        return f"{os.getpid()}-{_CAPTURE_SEQ}"
+
+
 def run_capture(cmd, timeout, tmpdir, tag):
     """Run `cmd`, redirecting stdout/stderr to files. Returns (rc, stdout_text).
 
@@ -245,9 +262,22 @@ def run_capture(cmd, timeout, tmpdir, tag):
     read for nothing: it is never returned, never logged and never emitted,
     because a tool's stderr can echo a header and everything this hook prints
     is durable.
+
+    EVERY CALL OWNS ITS OWN FILES, and `tag` is a readable prefix only. Probes
+    run concurrently against one shared tmpdir, so a path derived from `tag`
+    alone means two callers write and read the same file and the reader gets
+    whatever the last writer left. That shipped: `probe_local_head` passed a
+    constant tag="gitlog" and repositories were reported carrying each other's
+    HEAD — a real sha from a real repository, attached to the wrong one.
+
+    The uniqueness lives here rather than in the callers on purpose. Callers
+    that build a namespaced tag are doing the right thing and were never
+    affected, but nothing stopped the next call site passing a constant, which
+    is exactly how this arose. Here it cannot be got wrong.
     """
-    out_p = os.path.join(tmpdir, f"{tag}.out")
-    err_p = os.path.join(tmpdir, f"{tag}.err")
+    stem = f"{tag}.{_capture_slot()}"
+    out_p = os.path.join(tmpdir, f"{stem}.out")
+    err_p = os.path.join(tmpdir, f"{stem}.err")
     try:
         with open(out_p, "wb") as fo, open(err_p, "wb") as fe:
             cp = subprocess.run(cmd, stdout=fo, stderr=fe, timeout=timeout,
@@ -486,7 +516,13 @@ def probe_npm(org, word, tmpdir, budget):
     """
     if budget <= 0.05:
         return "drop", None
-    body_p = os.path.join(tmpdir, f"npm-{org}-{word}.body")
+    # The one capture path that does not go through run_capture, because curl
+    # writes the body itself via -o while stdout carries the status code. It was
+    # NOT part of the shared-file defect — (org, word) is deduplicated by
+    # extract_tokens, so this name was already unique within a run — but it is
+    # given the same per-call component so that the "one file per call" rule
+    # holds for every temp path in this hook rather than for most of them.
+    body_p = os.path.join(tmpdir, f"npm-{org}-{word}.{_capture_slot()}.body")
     cmd = [
         CURL_BIN, "-sS",
         "--connect-timeout", str(NET_CONNECT),

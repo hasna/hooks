@@ -1,0 +1,8 @@
+# Python build artifacts. This is the first Python in the repository, so the
+# root .gitignore does not cover them; importing the hook in the test suite
+# creates __pycache__ next to the source and it would otherwise be staged and
+# published (package.json ships hooks/).
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
