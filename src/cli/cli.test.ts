@@ -1,7 +1,7 @@
 import { describe, test, expect, beforeEach, afterEach, afterAll } from "bun:test";
 import { join } from "path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from "fs";
-import { tmpdir } from "os";
+import { chmodSync, existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from "fs";
+import { homedir, tmpdir } from "os";
 
 const CLI = join(import.meta.dir, "index.tsx");
 const TEST_HOME = mkdtempSync(join(process.cwd(), ".tmp-cli-home-"));
@@ -57,6 +57,39 @@ afterAll(() => {
 async function runJson(...args: string[]): Promise<any> {
   const { stdout } = await run(...args, "--json");
   return JSON.parse(stdout.trim());
+}
+
+async function runWithEnv(env: Record<string, string>, ...args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const proc = Bun.spawn([process.execPath, "run", CLI, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, ...env, NO_COLOR: "1" },
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { stdout, stderr, exitCode };
+}
+
+async function runWithInputAndEnv(
+  input: string,
+  env: Record<string, string>,
+  ...args: string[]
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const proc = Bun.spawn([process.execPath, "run", CLI, ...args], {
+    stdin: new Response(input),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, ...env, NO_COLOR: "1" },
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { stdout, stderr, exitCode };
 }
 
 describe("CLI", () => {
@@ -226,6 +259,11 @@ describe("CLI", () => {
       expect(typeof data.project).toBe("boolean");
     });
 
+    test("announce-start remains default-deny", async () => {
+      const data = await runJson("info", "announce-start");
+      expect(data.network).toBeUndefined();
+    });
+
     test("--json returns error for unknown hook", async () => {
       const data = await runJson("info", "nonexistent");
       expect(data.error).toContain("not found");
@@ -236,6 +274,26 @@ describe("CLI", () => {
     test("fails for nonexistent hook", async () => {
       const { stdout } = await run("install", "nonexistent");
       expect(stdout).toContain("not found");
+    });
+
+    test("--dry-run does not migrate profiles or touch settings", async () => {
+      const home = mkdtempSync(join(tmpdir(), "hooks-cli-dry-run-"));
+      try {
+        const legacyProfiles = join(home, ".hooks", "profiles");
+        const settings = join(home, ".claude", "settings.json");
+        mkdirSync(legacyProfiles, { recursive: true });
+        mkdirSync(join(home, ".claude"), { recursive: true });
+        writeFileSync(join(legacyProfiles, "legacy.json"), '{"agent_id":"legacy"}\n');
+        writeFileSync(settings, '{"sentinel":"unchanged"}\n');
+
+        const result = await runWithEnv({ HOME: home }, "install", "gitguard", "--dry-run", "--json");
+        expect(result.exitCode).toBe(0);
+        expect(JSON.parse(result.stdout).dryRun).toBe(true);
+        expect(readFileSync(settings, "utf-8")).toBe('{"sentinel":"unchanged"}\n');
+        expect(existsSync(join(home, ".hasna", "hooks", "profiles"))).toBe(false);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
     });
 
     test("--json shows install result", async () => {
@@ -323,6 +381,35 @@ describe("CLI", () => {
       expect(typeof data.healthy).toBe("boolean");
       expect(Array.isArray(data.healthy_hooks)).toBe(true);
       expect(Array.isArray(data.issues)).toBe(true);
+    });
+
+    test("validates all agentmessages entrypoints, events, and timeouts", async () => {
+      backupSettings();
+      try {
+        const installed = await runJson("install", "agentmessages", "--overwrite");
+        expect(installed.installed).toContain("agentmessages");
+
+        const healthy = await runJson("doctor");
+        expect(healthy.healthy_hooks).toContain("agentmessages");
+        expect(healthy.issues.filter((issue: any) => issue.hook === "agentmessages")).toEqual([]);
+
+        const settings = JSON.parse(readFileSync(SETTINGS_PATH, "utf-8"));
+        const stopCommand = settings.hooks.Stop
+          .flatMap((entry: any) => entry.hooks ?? [])
+          .find((hook: any) => hook.command === "hooks run agentmessages");
+        stopCommand.timeout = 10;
+        writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + "\n");
+
+        const unhealthy = await runJson("doctor");
+        expect(unhealthy.healthy_hooks).not.toContain("agentmessages");
+        expect(unhealthy.issues).toContainEqual({
+          hook: "agentmessages",
+          issue: "Incorrect timeout under Stop (expected 5s)",
+          severity: "error",
+        });
+      } finally {
+        restoreSettings();
+      }
     });
   });
 
@@ -437,6 +524,180 @@ describe("CLI", () => {
     test("run command exists in help", async () => {
       const { stdout } = await run("run", "--help");
       expect(stdout).toContain("Execute a hook");
+      expect(stdout).toContain("--deny-network");
+      expect(stdout).not.toContain("--allow-network");
+    });
+
+    test("agentmessages requires an event and routes both event-specific entrypoints", async () => {
+      const home = mkdtempSync(join(tmpdir(), "hooks-cli-agentmessages-"));
+      const serviceDir = join(home, ".service", "service-message");
+      const envFile = join(home, "claude-env");
+      try {
+        const missingEvent = await runWithInputAndEnv("{}", { HOME: home }, "run", "agentmessages");
+        expect(missingEvent.exitCode).not.toBe(0);
+        expect(missingEvent.stderr).toContain("requires hook_event_name");
+
+        mkdirSync(join(serviceDir, "agents"), { recursive: true });
+        writeFileSync(join(serviceDir, "config.json"), JSON.stringify({ agentId: "synthetic-agent" }));
+        writeFileSync(join(serviceDir, "agents", "synthetic-agent.json"), JSON.stringify({
+          id: "synthetic-agent",
+          name: "Synthetic Agent",
+          createdAt: 1,
+        }));
+        const sessionStart = await runWithInputAndEnv(
+          JSON.stringify({ hook_event_name: "SessionStart", session_id: "synthetic-session", cwd: home }),
+          {
+            HOME: home,
+            CLAUDE_ENV_FILE: envFile,
+            SMSG_AGENT_ID: "must-not-route-session-start",
+            SMSG_PROJECT_ID: "must-not-route-session-start",
+          },
+          "run", "agentmessages",
+        );
+        expect(sessionStart.exitCode).toBe(0);
+        expect(JSON.parse(sessionStart.stdout).continue).toBe(true);
+        expect(readFileSync(envFile, "utf-8")).toContain('export SMSG_AGENT_ID="synthetic-agent"');
+
+        const projectId = home.split("/").pop()!.toLowerCase().replace(/[^a-z0-9-]/g, "-");
+        const inbox = join(serviceDir, "messages", projectId, "inbox", "synthetic-agent");
+        mkdirSync(inbox, { recursive: true });
+        writeFileSync(join(inbox, "message-1.json"), JSON.stringify({
+          id: "message-1",
+          timestamp: 1,
+          from: "sender",
+          to: "synthetic-agent",
+          project: projectId,
+          subject: "Synthetic message",
+          body: "Event-specific Stop entrypoint",
+          read: false,
+        }));
+        const stop = await runWithInputAndEnv(
+          JSON.stringify({ hook_event_name: "Stop", session_id: "synthetic-session", cwd: home }),
+          {
+            HOME: home,
+            CLAUDE_ENV_FILE: join(home, "must-not-route-stop"),
+            SMSG_AGENT_ID: "synthetic-agent",
+            SMSG_PROJECT_ID: projectId,
+          },
+          "run", "agentmessages",
+        );
+        expect(stop.exitCode).toBe(0);
+        expect(JSON.parse(stop.stdout).stopReason).toContain("Synthetic message");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("declared remote hook keeps network by default and accepts explicit denial", async () => {
+      const home = mkdtempSync(join(tmpdir(), "hooks-cli-run-network-"));
+      let requests = 0;
+      const server = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch: () => {
+          requests += 1;
+          return new Response("ok");
+        },
+      });
+      try {
+        mkdirSync(join(home, ".claude"), { recursive: true });
+        writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify({
+          phoneNotifyConfig: {
+            enabled: true,
+            topic: "synthetic-network",
+            server: `http://127.0.0.1:${server.port}`,
+          },
+        }));
+        const input = JSON.stringify({
+          hook_event_name: "Stop",
+          cwd: home,
+        });
+        const env = { HOME: home, PATH: process.env.PATH ?? "" };
+
+        const allowed = await runWithInputAndEnv(input, env, "run", "phonenotify");
+        expect(allowed.exitCode).toBe(0);
+        expect(JSON.parse(allowed.stdout).continue).toBe(true);
+        expect(requests).toBe(1);
+
+        const denied = await runWithInputAndEnv(input, env, "run", "phonenotify", "--deny-network");
+        expect(denied.exitCode).toBe(0);
+        expect(JSON.parse(denied.stdout).continue).toBe(true);
+        expect(requests).toBe(1);
+      } finally {
+        server.stop();
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("--dry-run propagates before profile touch and hook mutations", async () => {
+      const home = mkdtempSync(join(tmpdir(), "hooks-cli-run-dry-"));
+      const bin = join(home, "bin");
+      const legacyDir = join(home, ".hooks", "profiles");
+      const legacyProfile = join(legacyDir, "legacy.json");
+      const mutationLog = join(home, "mutations.log");
+      try {
+        mkdirSync(bin, { recursive: true });
+        mkdirSync(legacyDir, { recursive: true });
+        const profile = {
+          agent_id: "legacy",
+          agent_type: "custom",
+          name: "synthetic-agent",
+          created_at: "2026-01-01T00:00:00.000Z",
+          last_seen_at: "2026-01-01T00:00:00.000Z",
+          preferences: {},
+        };
+        writeFileSync(legacyProfile, `${JSON.stringify(profile)}\n`);
+        const fake = `#!/bin/sh\nprintf '%s\\n' "$0 $*" >> ${JSON.stringify(mutationLog)}\nprintf '{}\\n'\n`;
+        for (const name of ["conversations", "todos", "mementos"]) {
+          const path = join(bin, name);
+          writeFileSync(path, fake);
+          chmodSync(path, 0o755);
+        }
+
+        const result = await runWithInputAndEnv(
+          JSON.stringify({ hook_event_name: "Stop", session_id: "cli-dry-run" }),
+          { HOME: home, PATH: bin, HASNA_HOOKS_STOP_SYNC_TASK_COMMENT: "1" },
+          "run", "stop-sync", "--profile", "legacy", "--dry-run",
+        );
+        expect(result.exitCode).toBe(0);
+        expect(JSON.parse(result.stdout).continue).toBe(true);
+        expect(existsSync(mutationLog)).toBe(false);
+        expect(existsSync(join(home, ".hasna", "hooks", "profiles"))).toBe(false);
+        expect(readFileSync(legacyProfile, "utf-8")).toBe(`${JSON.stringify(profile)}\n`);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    test("input cap rejects oversized stdin before executing a hook", async () => {
+      const result = await runWithInputAndEnv("x".repeat(70_000), {}, "run", "stop-sync", "--dry-run");
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("hook input exceeds 65536 bytes");
+    });
+
+    test("timeout kills a hook's nested descendant tree", async () => {
+      const home = mkdtempSync(join(tmpdir(), "hooks-cli-run-timeout-"));
+      const bin = join(home, "bin");
+      const sentinel = join(home, "descendant-survived");
+      try {
+        mkdirSync(bin, { recursive: true });
+        const fake = `#!/bin/sh\n(/bin/sleep 0.6; printf survived > ${JSON.stringify(sentinel)}) &\nwait\n`;
+        const conversations = join(bin, "conversations");
+        writeFileSync(conversations, fake);
+        chmodSync(conversations, 0o755);
+
+        const result = await runWithInputAndEnv(
+          JSON.stringify({ hook_event_name: "SessionStart", session_id: "cli-timeout" }),
+          { HOME: home, PATH: bin },
+          "run", "session-start", "--dry-run", "--timeout-ms", "150",
+        );
+        expect(result.stderr).toContain("timed out");
+        expect(result.exitCode).not.toBe(0);
+        await Bun.sleep(700);
+        expect(existsSync(sentinel)).toBe(false);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
     });
   });
 

@@ -30,8 +30,15 @@ import {
   getHooksByCategory,
   searchHooks,
   getHook,
-  type Category,
+  getHookEvents,
+  getHookExecutions,
+  resolveHookExecution,
+  resolveHookExecutionTimeoutMs,
+  resolveHookEnvironmentAllowlist,
+  resolveHookNetworkAccess,
   type HookMeta,
+  type HookExecutionMeta,
+  type Category,
 } from "../lib/registry.js";
 import {
   installHook,
@@ -57,8 +64,146 @@ import {
   storagePush,
   storageSync,
 } from "../storage.js";
+import {
+  runBoundedProcess,
+  type BoundedProcessResult,
+  type HookNetworkAccess,
+} from "../../hooks/bounded-process.js";
 
 export const MCP_PORT = 39427;
+
+export interface HooksExecutionOverrides {
+  getHook?: (name: string) => HookMeta | undefined;
+  getHookPath?: (name: string) => string;
+  getRegisteredHooks?: (scope: Scope) => string[];
+  env?: NodeJS.ProcessEnv;
+  containmentExecutable?: string;
+  maxInputBytes?: number;
+  maxStdoutBytes?: number;
+  maxStderrBytes?: number;
+}
+
+export interface HooksServerOptions {
+  execution?: HooksExecutionOverrides;
+}
+
+interface ExecuteMcpHookOptions {
+  cwd?: string;
+  dryRun?: boolean;
+  timeoutMs?: number;
+  requestedNetwork?: HookNetworkAccess;
+  env?: NodeJS.ProcessEnv;
+  envAllowlist?: readonly string[];
+  containmentExecutable?: string;
+  maxInputBytes?: number;
+  maxStdoutBytes?: number;
+  maxStderrBytes?: number;
+}
+
+function failedExecution(error: string): BoundedProcessResult {
+  return {
+    exitCode: null,
+    signal: null,
+    stdout: "",
+    stderr: "",
+    timedOut: false,
+    error,
+  };
+}
+
+export async function executeMcpHook(
+  meta: HookMeta,
+  hookScript: string,
+  input: Record<string, unknown>,
+  options: ExecuteMcpHookOptions = {},
+): Promise<BoundedProcessResult> {
+  let network: HookNetworkAccess;
+  let envAllowlist: readonly string[];
+  let execution: HookExecutionMeta;
+  try {
+    execution = resolveHookExecution(meta, input.hook_event_name);
+    network = resolveHookNetworkAccess(meta, options.requestedNetwork);
+    envAllowlist = resolveHookEnvironmentAllowlist(meta, options.envAllowlist, input.hook_event_name);
+  } catch (error) {
+    return failedExecution(error instanceof Error ? error.message : String(error));
+  }
+
+  const hookInput = options.dryRun ? { ...input, dry_run: true } : input;
+  return runBoundedProcess([process.execPath, "run", hookScript], {
+    cwd: options.cwd,
+    input: JSON.stringify(hookInput),
+    timeoutMs: resolveHookExecutionTimeoutMs(execution, options.timeoutMs),
+    network,
+    env: options.env ?? process.env,
+    envAllowlist,
+    containmentExecutable: options.containmentExecutable,
+    maxInputBytes: options.maxInputBytes,
+    maxStdoutBytes: options.maxStdoutBytes,
+    maxStderrBytes: options.maxStderrBytes,
+  });
+}
+
+function parseHookOutput(stdout: string): any {
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    return stdout ? { raw: stdout } : {};
+  }
+}
+
+type PreviewDecision = "approve" | "block" | "indeterminate";
+
+interface PreviewHookResult {
+  name: string;
+  decision: PreviewDecision;
+  skipped?: boolean;
+  error?: string;
+  timedOut?: boolean;
+  exitCode?: number | null;
+  reason?: string;
+  raw?: unknown;
+}
+
+type PreviewHookCandidate =
+  | { kind: "match"; name: string; meta: HookMeta }
+  | { kind: "error"; name: string; result: PreviewHookResult };
+
+function classifyPreviewOutput(name: string, output: any): PreviewHookResult {
+  const permissionDecision = output?.hookSpecificOutput?.permissionDecision;
+  const reason = output?.reason
+    ?? output?.stopReason
+    ?? output?.hookSpecificOutput?.permissionDecisionReason;
+
+  if (output?.decision === "block" || output?.continue === false || permissionDecision === "deny") {
+    return { name, decision: "block", reason, raw: output };
+  }
+
+  const hasAmbiguousDecision = output !== null
+    && typeof output === "object"
+    && (
+      ("decision" in output && output.decision !== "approve" && output.decision !== "block")
+      || ("continue" in output && typeof output.continue !== "boolean")
+      || (permissionDecision !== undefined && permissionDecision !== "allow" && permissionDecision !== "deny")
+    );
+  if (hasAmbiguousDecision) {
+    return {
+      name,
+      decision: "indeterminate",
+      error: "hook output contained an ambiguous decision",
+      raw: output,
+    };
+  }
+
+  if (output?.decision === "approve" || output?.continue === true || permissionDecision === "allow") {
+    return { name, decision: "approve", reason, raw: output };
+  }
+  return {
+    name,
+    decision: "indeterminate",
+    error: "hook output did not contain an approval or block decision",
+    raw: output,
+  };
+}
 
 function formatInstallResults(results: InstallResult[], extra?: Record<string, any>) {
   const installed = results.filter((r) => r.success).map((r) => r.hook);
@@ -121,7 +266,7 @@ function compactEvent(row: any) {
 interface _HooksAgent { id: string; name: string; session_id?: string; last_seen_at: string; project_id?: string; }
 const _hooksAgents = new Map<string, _HooksAgent>();
 
-export function createHooksServer(): McpServer {
+export function createHooksServer(options: HooksServerOptions = {}): McpServer {
   const server = new McpServer({
     name: "@hasna/hooks",
     version: pkg.version,
@@ -132,6 +277,24 @@ export function createHooksServer(): McpServer {
     schema: Record<string, any>,
     handler: (params: any) => any,
   ) => (server.tool as any)(name, description, schema, handler);
+
+  const execution = options.execution ?? {};
+  const executionGetHook = execution.getHook ?? getHook;
+  const executionGetHookPath = execution.getHookPath ?? getHookPath;
+  const executionGetRegisteredHooks = execution.getRegisteredHooks ?? getRegisteredHooks;
+  const execute = (
+    meta: HookMeta,
+    hookScript: string,
+    input: Record<string, unknown>,
+    perCall: Pick<ExecuteMcpHookOptions, "dryRun" | "timeoutMs" | "requestedNetwork"> = {},
+  ) => executeMcpHook(meta, hookScript, input, {
+    ...perCall,
+    env: execution.env,
+    containmentExecutable: execution.containmentExecutable,
+    maxInputBytes: execution.maxInputBytes,
+    maxStdoutBytes: execution.maxStdoutBytes,
+    maxStderrBytes: execution.maxStderrBytes,
+  });
 
   // --- Tools ---
 
@@ -278,24 +441,50 @@ export function createHooksServer(): McpServer {
         }
 
         const hookDir = getHookPath(name);
-        if (!existsSync(join(hookDir, "src", "hook.ts"))) {
-          issues.push({ hook: name, issue: "Missing src/hook.ts in package", severity: "error" });
+        let executions: HookExecutionMeta[];
+        try {
+          executions = meta ? getHookExecutions(meta) : [];
+          for (const execution of executions) {
+            if (!existsSync(join(hookDir, execution.entrypoint))) {
+              issues.push({ hook: name, issue: `Missing ${execution.entrypoint} in package`, severity: "error" });
+              hookHealthy = false;
+            }
+          }
+        } catch (error) {
+          issues.push({
+            hook: name,
+            issue: error instanceof Error ? error.message : String(error),
+            severity: "error",
+          });
           hookHealthy = false;
+          executions = [];
         }
 
         if (meta && settingsExist) {
           try {
             const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
-            const eventHooks = settings.hooks?.[meta.event] || [];
-            const found = eventHooks.some((entry: any) =>
-              entry.hooks?.some((h: any) => {
-                const match = h.command?.match(/^hooks run ([\w-]+)/);
-                return match && match[1] === name;
-              })
-            );
-            if (!found) {
-              issues.push({ hook: name, issue: `Not registered under correct event (${meta.event})`, severity: "error" });
-              hookHealthy = false;
+            for (const execution of executions) {
+              const eventHooks = settings.hooks?.[execution.event] || [];
+              const registeredCommands = eventHooks.flatMap((entry: any) =>
+                (entry.hooks ?? []).filter((h: any) => {
+                  const match = h.command?.match(/^hooks run ([\w-]+)/);
+                  return match && match[1] === name;
+                })
+              );
+              if (registeredCommands.length === 0) {
+                issues.push({ hook: name, issue: `Not registered under correct event (${execution.event})`, severity: "error" });
+                hookHealthy = false;
+              } else if (
+                execution.timeout !== undefined
+                && !registeredCommands.every((command: any) => command.timeout === execution.timeout)
+              ) {
+                issues.push({
+                  hook: name,
+                  issue: `Incorrect timeout under ${execution.event} (expected ${execution.timeout}s)`,
+                  severity: "error",
+                });
+                hookHealthy = false;
+              }
             }
           } catch {}
         }
@@ -430,18 +619,32 @@ export function createHooksServer(): McpServer {
       name: z.string().describe("Hook name (e.g. 'gitguard', 'checkpoint')"),
       input: z.record(z.string(), z.unknown()).default(() => ({})).describe("Hook input as JSON object (HookInput)"),
       profile: z.string().optional().describe("Agent profile ID to inject into hook input"),
-      timeout_ms: z.number().default(10000).describe("Timeout in milliseconds (default: 10000)"),
+      timeout_ms: z.number().int().positive().max(86_400_000).optional().describe("Timeout in milliseconds (defaults to the event contract)"),
+      dry_run: z.boolean().default(false).describe("Require native no-write dry-run support"),
+      network: z.literal("deny").optional().describe("Further restrict an allow-declared hook to local-only access"),
     },
-    async ({ name, input, profile, timeout_ms }) => {
-      const meta = getHook(name);
+    async ({ name, input, profile, timeout_ms, dry_run, network }) => {
+      const meta = executionGetHook(name);
       if (!meta) {
         return { content: [{ type: "text", text: JSON.stringify({ error: `Hook '${name}' not found` }) }] };
       }
 
-      const hookDir = getHookPath(name);
-      const hookScript = join(hookDir, "src", "hook.ts");
+      let execution;
+      try {
+        execution = resolveHookExecution(meta, input.hook_event_name);
+      } catch (error) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: error instanceof Error ? error.message : String(error) }) }] };
+      }
+
+      const hookDir = executionGetHookPath(name);
+      const hookScript = join(hookDir, execution.entrypoint);
       if (!existsSync(hookScript)) {
         return { content: [{ type: "text", text: JSON.stringify({ error: `Hook script not found: ${hookScript}` }) }] };
+      }
+
+      const wantsDryRun = dry_run || input.dry_run === true;
+      if (wantsDryRun && meta.dryRun !== true) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: `Hook '${name}' does not declare native dry-run support` }) }] };
       }
 
       let hookInput = { ...input };
@@ -457,26 +660,13 @@ export function createHooksServer(): McpServer {
         }
       }
 
-      const proc = Bun.spawn(["bun", "run", hookScript], {
-        stdin: new Response(JSON.stringify(hookInput)),
-        stdout: "pipe",
-        stderr: "pipe",
-        env: process.env,
+      const effectiveTimeoutMs = resolveHookExecutionTimeoutMs(execution, timeout_ms);
+      const result = await execute(meta, hookScript, hookInput, {
+        dryRun: wantsDryRun,
+        timeoutMs: effectiveTimeoutMs,
+        requestedNetwork: network,
       });
-
-      const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), timeout_ms));
-
-      const result = await Promise.race([
-        Promise.all([
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
-          proc.exited,
-        ]).then(([stdout, stderr, exitCode]) => ({ stdout, stderr, exitCode, timedOut: false })),
-        timeoutPromise.then(() => { proc.kill(); return { stdout: "", stderr: "", exitCode: -1, timedOut: true }; }),
-      ]);
-
-      let output: unknown = {};
-      try { output = JSON.parse(result.stdout); } catch { output = result.stdout ? { raw: result.stdout } : {}; }
+      const output = parseHookOutput(result.stdout);
 
       return {
         content: [{
@@ -486,7 +676,8 @@ export function createHooksServer(): McpServer {
             output,
             stderr: result.stderr || undefined,
             exitCode: result.exitCode,
-            ...(result.timedOut ? { timedOut: true, timeout_ms } : {}),
+            ...(result.error ? { error: result.error } : {}),
+            ...(result.timedOut ? { timedOut: true, timeout_ms: effectiveTimeoutMs } : {}),
           }),
         }],
       };
@@ -571,50 +762,117 @@ export function createHooksServer(): McpServer {
 
   defineTool(
     "hooks_preview",
-    "Simulate which installed PreToolUse hooks would fire for a given tool call and what decision each returns. Use this to understand your hook environment before taking an action.",
+    "Safely simulate installed PreToolUse hooks that declare native no-write dry-run support. Mutation-unsafe hooks are reported as skipped.",
     {
       tool_name: z.string().describe("Tool name to simulate (e.g. 'Bash', 'Write', 'Edit')"),
       tool_input: z.record(z.string(), z.unknown()).default(() => ({})).describe("Tool input to pass to matching hooks"),
       scope: z.enum(["global", "project"]).default("global").describe("Scope to check"),
-      timeout_ms: z.number().default(5000).describe("Per-hook timeout in milliseconds"),
+      timeout_ms: z.number().int().positive().max(86_400_000).default(5000).describe("Per-hook timeout in milliseconds"),
+      network: z.literal("deny").optional().describe("Further restrict allow-declared hooks to local-only access"),
     },
-    async ({ tool_name, tool_input, scope, timeout_ms }) => {
-      const registered = getRegisteredHooks(scope);
-      const matchingHooks = registered.filter((name) => {
-        const meta = getHook(name);
-        if (!meta || meta.event !== "PreToolUse") return false;
-        if (!meta.matcher) return true;
-        try { return new RegExp(meta.matcher).test(tool_name); } catch { return false; }
-      });
+    async ({ tool_name, tool_input, scope, timeout_ms, network }) => {
+      const registered = executionGetRegisteredHooks(scope);
+      const candidates: PreviewHookCandidate[] = [];
+      for (const name of registered) {
+        const meta = executionGetHook(name);
+        if (!meta) {
+          candidates.push({
+            kind: "error",
+            name,
+            result: {
+              name,
+              decision: "indeterminate",
+              error: "registered hook metadata not found",
+            },
+          });
+          continue;
+        }
+        if (!getHookEvents(meta).includes("PreToolUse")) continue;
+        if (meta.matcher) {
+          let matches: boolean;
+          try {
+            matches = new RegExp(meta.matcher).test(tool_name);
+          } catch {
+            candidates.push({
+              kind: "error",
+              name,
+              result: {
+                name,
+                decision: "indeterminate",
+                error: "registered hook matcher is invalid",
+              },
+            });
+            continue;
+          }
+          if (!matches) continue;
+        }
+        candidates.push({ kind: "match", name, meta });
+      }
+      const matchingHooks = candidates
+        .filter((candidate) => candidate.kind === "match")
+        .map((candidate) => candidate.name);
 
-      if (matchingHooks.length === 0) {
+      if (candidates.length === 0) {
         return { content: [{ type: "text", text: JSON.stringify({ tool_name, matching_hooks: [], result: "no_hooks_match", decision: "approve" }) }] };
       }
 
-      const input = { tool_name, tool_input };
-      const results = await Promise.all(matchingHooks.map(async (name) => {
-        const hookDir = getHookPath(name);
-        const hookScript = join(hookDir, "src", "hook.ts");
-        if (!existsSync(hookScript)) return { name, decision: "approve", error: "script not found" };
+      const input = { hook_event_name: "PreToolUse", tool_name, tool_input };
+      const results: PreviewHookResult[] = await Promise.all(candidates.map(async (candidate) => {
+        if (candidate.kind === "error") return candidate.result;
+        const { name, meta } = candidate;
+        if (meta.dryRun !== true) {
+          return {
+            name,
+            decision: "indeterminate" as const,
+            skipped: true,
+            error: `Hook '${name}' does not declare native dry-run support`,
+          };
+        }
 
-        const proc = Bun.spawn(["bun", "run", hookScript], {
-          stdin: new Response(JSON.stringify(input)),
-          stdout: "pipe", stderr: "pipe", env: process.env,
+        let execution;
+        try {
+          execution = resolveHookExecution(meta, "PreToolUse");
+        } catch (error) {
+          return {
+            name,
+            decision: "indeterminate" as const,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+        const hookDir = executionGetHookPath(name);
+        const hookScript = join(hookDir, execution.entrypoint);
+        if (!existsSync(hookScript)) return { name, decision: "indeterminate", error: "script not found" };
+
+        const result = await execute(meta, hookScript, input, {
+          dryRun: true,
+          timeoutMs: timeout_ms,
+          requestedNetwork: network,
         });
-        const timeout = new Promise<null>((r) => setTimeout(() => r(null), timeout_ms));
-        const res = await Promise.race([
-          Promise.all([new Response(proc.stdout).text(), proc.exited])
-            .then(([stdout]) => ({ stdout, timedOut: false })),
-          timeout.then(() => { proc.kill(); return { stdout: "", timedOut: true }; }),
-        ]);
 
-        if (res.timedOut) return { name, decision: "approve", timedOut: true };
-        let output: any = {};
-        try { output = JSON.parse(res.stdout); } catch {}
-        return { name, decision: output.decision ?? "approve", reason: output.reason, raw: output };
+        if (result.error || result.timedOut || result.exitCode !== 0) {
+          const error = result.error
+            ?? (result.exitCode === null
+              ? (result.signal ? `hook terminated by signal ${result.signal}` : "hook did not complete successfully")
+              : `hook exited with code ${result.exitCode}`);
+          return {
+            name,
+            decision: "indeterminate" as const,
+            ...(result.timedOut ? { timedOut: true } : {}),
+            error,
+            exitCode: result.exitCode,
+          };
+        }
+        const output = parseHookOutput(result.stdout);
+        return classifyPreviewOutput(name, output);
       }));
 
       const blocked = results.find((r) => r.decision === "block");
+      const indeterminate = results.filter((r) => r.decision === "indeterminate");
+      const decision: PreviewDecision = blocked
+        ? "block"
+        : indeterminate.length > 0
+          ? "indeterminate"
+          : "approve";
       return {
         content: [{
           type: "text" as const,
@@ -622,9 +880,10 @@ export function createHooksServer(): McpServer {
             tool_name,
             matching_hooks: matchingHooks,
             results,
-            decision: blocked ? "block" : "approve",
+            decision,
             blocked_by: blocked?.name ?? null,
             blocked_reason: blocked?.reason ?? null,
+            indeterminate_by: indeterminate.map((result) => result.name),
           }),
         }],
       };
@@ -659,35 +918,54 @@ export function createHooksServer(): McpServer {
 
   defineTool(
     "hooks_batch_run",
-    "Run multiple hooks in parallel in a single call. Returns all results at once — more efficient than N separate hooks_run calls.",
+    "Run up to 32 hooks through the shared bounded process queue and return all results in one call.",
     {
       hooks: z.array(z.object({
         name: z.string().describe("Hook name"),
         input: z.record(z.string(), z.unknown()).default(() => ({})).describe("Hook input JSON"),
-      })).describe("List of hooks to run with their inputs"),
-      timeout_ms: z.number().default(10000).describe("Per-hook timeout in milliseconds"),
+        dry_run: z.boolean().default(false).describe("Require native no-write dry-run support"),
+        network: z.literal("deny").optional().describe("Further restrict an allow-declared hook"),
+      })).max(32).describe("List of at most 32 hooks to run with their inputs"),
+      timeout_ms: z.number().int().positive().max(86_400_000).optional().describe("Per-hook timeout override in milliseconds"),
     },
-    async ({ hooks, timeout_ms }: { hooks: Array<{ name: string; input: Record<string, unknown> }>; timeout_ms: number }) => {
-      const results = await Promise.all(hooks.map(async ({ name, input }) => {
-        const meta = getHook(name);
+    async ({ hooks, timeout_ms }: {
+      hooks: Array<{
+        name: string;
+        input: Record<string, unknown>;
+        dry_run: boolean;
+        network?: "deny";
+      }>;
+      timeout_ms?: number;
+    }) => {
+      const results = await Promise.all(hooks.map(async ({ name, input, dry_run, network }) => {
+        const meta = executionGetHook(name);
         if (!meta) return { name, error: `Hook '${name}' not found` };
-        const hookScript = join(getHookPath(name), "src", "hook.ts");
+        const wantsDryRun = dry_run || input.dry_run === true;
+        if (wantsDryRun && meta.dryRun !== true) {
+          return { name, error: `Hook '${name}' does not declare native dry-run support` };
+        }
+        let execution;
+        try {
+          execution = resolveHookExecution(meta, input.hook_event_name);
+        } catch (error) {
+          return { name, error: error instanceof Error ? error.message : String(error) };
+        }
+        const hookScript = join(executionGetHookPath(name), execution.entrypoint);
         if (!existsSync(hookScript)) return { name, error: "script not found" };
 
-        const proc = Bun.spawn(["bun", "run", hookScript], {
-          stdin: new Response(JSON.stringify(input)),
-          stdout: "pipe", stderr: "pipe", env: process.env,
+        const result = await execute(meta, hookScript, input, {
+          dryRun: wantsDryRun,
+          timeoutMs: resolveHookExecutionTimeoutMs(execution, timeout_ms),
+          requestedNetwork: network,
         });
-        const timeout = new Promise<null>((r) => setTimeout(() => r(null), timeout_ms));
-        const res = await Promise.race([
-          Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
-            .then(([stdout, stderr, exitCode]) => ({ stdout, stderr, exitCode, timedOut: false })),
-          timeout.then(() => { proc.kill(); return { stdout: "", stderr: "", exitCode: -1, timedOut: true }; }),
-        ]);
-
-        let output: any = {};
-        try { output = JSON.parse(res.stdout); } catch { output = res.stdout ? { raw: res.stdout } : {}; }
-        return { name, output, exitCode: res.exitCode, ...(res.timedOut ? { timedOut: true } : {}) };
+        const output = parseHookOutput(result.stdout);
+        return {
+          name,
+          output,
+          exitCode: result.exitCode,
+          ...(result.error ? { error: result.error } : {}),
+          ...(result.timedOut ? { timedOut: true } : {}),
+        };
       }));
 
       return { content: [{ type: "text", text: JSON.stringify({ results, count: results.length }) }] };

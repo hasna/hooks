@@ -14,9 +14,15 @@ export {
   CATEGORIES,
   getHook,
   getHookEvents,
+  getHookExecutions,
   getHooksByCategory,
   searchHooks,
+  resolveHookExecution,
+  resolveHookExecutionTimeoutMs,
+  resolveHookNetworkAccess,
+  resolveHookEnvironmentAllowlist,
   type HookMeta,
+  type HookExecutionMeta,
   type HookEvent,
   type Category,
 } from "./lib/registry.js";
@@ -60,6 +66,7 @@ export interface HookInput {
   tool_name?: string;
   tool_input?: Record<string, unknown>;
   agent?: HookAgentInfo;
+  dry_run?: boolean;
   [key: string]: unknown;
 }
 
@@ -106,37 +113,61 @@ export function removeProjectHook(name: string): boolean {
 // ── runHook — programmatic hook execution ─────────────────────────────────────
 
 import { getHook as _getHook } from "./lib/registry.js";
+import { resolveHookExecution as _resolveHookExecution } from "./lib/registry.js";
+import { resolveHookExecutionTimeoutMs as _resolveHookExecutionTimeoutMs } from "./lib/registry.js";
+import { resolveHookNetworkAccess as _resolveHookNetworkAccess } from "./lib/registry.js";
+import { resolveHookEnvironmentAllowlist as _resolveHookEnvironmentAllowlist } from "./lib/registry.js";
 import { getHookPath as _getHookPath, hookExists as _hookExists } from "./lib/installer.js";
 import { join } from "path";
 import { existsSync } from "fs";
+import { runBoundedProcess, type HookNetworkAccess } from "../hooks/bounded-process.js";
 
 export interface RunHookOptions {
   /** Agent profile ID to inject into hook input */
   profile?: string;
-  /** Timeout in milliseconds (default: 10000) */
+  /** Timeout override in milliseconds (defaults to the selected event contract, otherwise 10000) */
   timeout?: number;
+  /** Propagate a no-write dry-run marker. Unsupported hooks are rejected. */
+  dryRun?: boolean;
+  /** Further restrict an allow-declared hook. A deny-declared hook cannot be elevated. */
+  network?: HookNetworkAccess;
+  /** Source environment; only the runner's strict allowlist is forwarded. */
+  env?: NodeJS.ProcessEnv;
+  /** Additional explicit environment names to forward, excluding unsafe loaders. */
+  envAllowlist?: readonly string[];
+  maxInputBytes?: number;
+  maxStdoutBytes?: number;
+  maxStderrBytes?: number;
 }
 
 export interface RunHookResult {
   output: HookOutput;
   stderr: string;
   exitCode: number;
+  timedOut: boolean;
+  error: string | null;
 }
 
 /**
  * Programmatically execute a hook with the given input.
- * Spawns the hook's src/hook.ts via bun, passes input as stdin JSON,
+ * Spawns the entrypoint declared for the input event via bun, passes input as stdin JSON,
  * and returns the parsed stdout JSON.
  */
 export async function runHook(name: string, input: HookInput, options: RunHookOptions = {}): Promise<RunHookResult> {
   const meta = _getHook(name);
   if (!meta) throw new Error(`Hook '${name}' not found`);
 
+  const dryRun = options.dryRun === true || input.dry_run === true;
+  if (dryRun && meta.dryRun !== true) {
+    throw new Error(`Hook '${name}' does not declare native dry-run support`);
+  }
+
+  const execution = _resolveHookExecution(meta, input.hook_event_name);
   const hookDir = _getHookPath(name);
-  const hookScript = join(hookDir, "src", "hook.ts");
+  const hookScript = join(hookDir, execution.entrypoint);
   if (!existsSync(hookScript)) throw new Error(`Hook script not found: ${hookScript}`);
 
-  let hookInput = { ...input };
+  let hookInput: HookInput = { ...input, ...(dryRun ? { dry_run: true } : {}) };
   if (options.profile) {
     const { getProfile } = await import("./lib/profiles.js");
     const profile = getProfile(options.profile);
@@ -150,27 +181,31 @@ export async function runHook(name: string, input: HookInput, options: RunHookOp
     }
   }
 
-  const proc = Bun.spawn(["bun", "run", hookScript], {
-    stdin: new Response(JSON.stringify(hookInput)),
-    stdout: "pipe",
-    stderr: "pipe",
-    env: process.env,
+  const result = await runBoundedProcess([process.execPath, "run", hookScript], {
+    input: JSON.stringify(hookInput),
+    timeoutMs: _resolveHookExecutionTimeoutMs(execution, options.timeout),
+    network: _resolveHookNetworkAccess(meta, options.network),
+    env: options.env ?? process.env,
+    envAllowlist: _resolveHookEnvironmentAllowlist(meta, options.envAllowlist, execution.event),
+    maxInputBytes: options.maxInputBytes,
+    maxStdoutBytes: options.maxStdoutBytes,
+    maxStderrBytes: options.maxStderrBytes,
   });
-
-  const [stdoutText, stderrText, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
 
   let output: HookOutput = {};
   try {
-    output = JSON.parse(stdoutText);
+    output = JSON.parse(result.stdout);
   } catch {
-    output = { raw: stdoutText } as HookOutput;
+    output = { raw: result.stdout } as HookOutput;
   }
 
-  return { output, stderr: stderrText, exitCode };
+  return {
+    output,
+    stderr: result.stderr,
+    exitCode: result.error ? 1 : (result.exitCode ?? 1),
+    timedOut: result.timedOut,
+    error: result.error,
+  };
 }
 
 export {

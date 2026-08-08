@@ -23,6 +23,16 @@ export const HOOK_EVENTS: HookEvent[] = [
   "SubagentStart",
 ];
 
+export interface HookExecutionMeta {
+  event: HookEvent;
+  /** Package-relative script path for this event. */
+  entrypoint: string;
+  /** Event-specific timeout in seconds for installation and default execution. */
+  timeout?: number;
+  /** Extra non-sensitive environment names this event handler is explicitly allowed to receive. */
+  envAllowlist?: readonly string[];
+}
+
 export interface HookMeta {
   name: string;
   displayName: string;
@@ -33,6 +43,14 @@ export interface HookMeta {
   events?: HookEvent[];
   matcher: string;
   tags: string[];
+  /** Standalone network policy. Omitted and detached/orphan-style hooks fail closed with network denied. */
+  network?: "deny" | "allow";
+  /** The hook guarantees that `dry_run: true` performs no mutations. */
+  dryRun?: boolean;
+  /** Extra non-sensitive environment names this hook is explicitly allowed to receive. */
+  envAllowlist?: readonly string[];
+  /** Event-specific scripts and capabilities. When present, this is the authoritative event contract. */
+  executions?: readonly HookExecutionMeta[];
 }
 
 export const CATEGORIES = [
@@ -61,6 +79,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Bash",
     tags: ["git", "safety", "destructive", "guard"],
+    dryRun: true,
   },
   {
     name: "branchprotect",
@@ -71,6 +90,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Write|Edit|NotebookEdit",
     tags: ["git", "branch", "protection", "main"],
+    dryRun: true,
   },
   {
     name: "checkpoint",
@@ -91,6 +111,8 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "^(Bash|Write|Edit|MultiEdit|NotebookEdit|apply_patch|ApplyPatch|functions\\.apply_patch|mcp__.*)$",
     tags: ["git", "worktree", "repos", "multi-agent", "safety", "dangerous-ops"],
+    network: "deny",
+    dryRun: true,
   },
 
   // Code Quality
@@ -175,6 +197,8 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Bash",
     tags: ["npm", "packages", "typosquatting", "supply-chain"],
+    network: "allow",
+    dryRun: true,
   },
   {
     name: "pre-bash",
@@ -185,6 +209,8 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Bash",
     tags: ["codewith", "bash", "secrets", "gitleaks", "risky-ops"],
+    network: "deny",
+    dryRun: true,
   },
 
   // Notifications
@@ -197,6 +223,7 @@ export const HOOKS: HookMeta[] = [
     event: "Stop",
     matcher: "",
     tags: ["notification", "phone", "push", "ntfy"],
+    network: "allow",
   },
   {
     name: "agentmessages",
@@ -207,6 +234,20 @@ export const HOOKS: HookMeta[] = [
     event: "Stop",
     matcher: "",
     tags: ["messaging", "agents", "inter-agent"],
+    executions: [
+      {
+        event: "SessionStart",
+        entrypoint: "src/session-start.ts",
+        timeout: 10,
+        envAllowlist: ["CLAUDE_ENV_FILE"],
+      },
+      {
+        event: "Stop",
+        entrypoint: "src/check-messages.ts",
+        timeout: 5,
+        envAllowlist: ["SMSG_AGENT_ID", "SMSG_PROJECT_ID"],
+      },
+    ],
   },
 
   // Context Management
@@ -273,6 +314,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Edit|Write",
     tags: ["tdd", "tests", "red-green-refactor", "enforcement"],
+    dryRun: true,
   },
 
   // Environment
@@ -285,6 +327,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Bash",
     tags: ["nvm", "virtualenv", "asdf", "rbenv", "environment", "python", "node"],
+    dryRun: true,
   },
 
   // Permissions
@@ -297,6 +340,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Bash",
     tags: ["permission", "allowlist", "blocklist", "safety", "auto-approve"],
+    dryRun: true,
   },
   {
     name: "protectfiles",
@@ -307,6 +351,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Edit|Write|Read|Bash",
     tags: ["security", "env", "secrets", "keys", "lock-files", "protect"],
+    dryRun: true,
   },
   {
     name: "promptguard",
@@ -317,6 +362,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "",
     tags: ["prompt", "injection", "security", "validation", "guard"],
+    dryRun: true,
   },
   {
     name: "prompt-guard",
@@ -349,6 +395,7 @@ export const HOOKS: HookMeta[] = [
     event: "Stop",
     matcher: "",
     tags: ["notification", "slack", "webhook", "team"],
+    network: "allow",
   },
   {
     name: "soundnotify",
@@ -413,6 +460,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Write|Edit",
     tags: ["design", "styles", "frontend", "css", "tailwind", "design-system", "anti-patterns"],
+    dryRun: true,
   },
 
   // Agent Teams
@@ -435,6 +483,8 @@ export const HOOKS: HookMeta[] = [
     event: "SessionStart",
     matcher: "",
     tags: ["codewith", "session", "context", "conversations", "heartbeat"],
+    network: "allow",
+    dryRun: true,
   },
   {
     name: "stop-sync",
@@ -445,6 +495,8 @@ export const HOOKS: HookMeta[] = [
     event: "Stop",
     matcher: "",
     tags: ["codewith", "stop", "heartbeat", "todos", "turn-end"],
+    network: "allow",
+    dryRun: true,
   },
 
   // Code Quality (new)
@@ -479,6 +531,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "Edit|Write",
     tags: ["git", "conflicts", "merge", "safety"],
+    dryRun: true,
   },
 
   // Workflow Automation (new)
@@ -546,6 +599,7 @@ export const HOOKS: HookMeta[] = [
     event: "SessionStart",
     matcher: "",
     tags: ["fleet", "catchup", "blockers", "announcements", "context", "agent-teams"],
+    network: "allow",
   },
   {
     name: "agent-rules-version-check",
@@ -568,6 +622,7 @@ export const HOOKS: HookMeta[] = [
     event: "PreToolUse",
     matcher: "",
     tags: ["fleet", "freeze", "blockers", "gate", "safety", "agent-teams"],
+    network: "allow",
   },
 ];
 
@@ -575,8 +630,98 @@ export function getHooksByCategory(category: Category): HookMeta[] {
   return HOOKS.filter((h) => h.category === category);
 }
 
-export function getHookEvents(hook: HookMeta): HookEvent[] {
+const DEFAULT_HOOK_ENTRYPOINT = "src/hook.ts";
+
+function legacyHookEvents(hook: HookMeta): HookEvent[] {
   return hook.events && hook.events.length > 0 ? hook.events : [hook.event];
+}
+
+function validateHookExecution(hook: HookMeta, execution: HookExecutionMeta): void {
+  if (!HOOK_EVENTS.includes(execution.event)) {
+    throw new Error(`Hook '${hook.name}' declares unsupported execution event '${execution.event}'`);
+  }
+  if (
+    !execution.entrypoint
+    || execution.entrypoint.startsWith("/")
+    || /^[A-Za-z]:\//.test(execution.entrypoint)
+    || execution.entrypoint.includes("\\")
+    || execution.entrypoint.includes("\0")
+    || execution.entrypoint.split("/").some((part) => part === "" || part === "." || part === "..")
+  ) {
+    throw new Error(`Hook '${hook.name}' declares invalid execution entrypoint '${execution.entrypoint}'`);
+  }
+  if (execution.timeout !== undefined && (!Number.isInteger(execution.timeout) || execution.timeout <= 0)) {
+    throw new Error(`Hook '${hook.name}' declares invalid execution timeout '${execution.timeout}'`);
+  }
+}
+
+export function getHookExecutions(hook: HookMeta): HookExecutionMeta[] {
+  if (hook.executions === undefined) {
+    return legacyHookEvents(hook).map((event) => ({
+      event,
+      entrypoint: DEFAULT_HOOK_ENTRYPOINT,
+      ...(hook.envAllowlist ? { envAllowlist: hook.envAllowlist } : {}),
+    }));
+  }
+  if (hook.executions.length === 0) {
+    throw new Error(`Hook '${hook.name}' declares an empty executions contract`);
+  }
+
+  const seen = new Set<HookEvent>();
+  for (const execution of hook.executions) {
+    validateHookExecution(hook, execution);
+    if (seen.has(execution.event)) {
+      throw new Error(`Hook '${hook.name}' declares duplicate execution event '${execution.event}'`);
+    }
+    seen.add(execution.event);
+  }
+  if (!seen.has(hook.event)) {
+    throw new Error(`Hook '${hook.name}' executions do not include primary event '${hook.event}'`);
+  }
+  if (hook.events !== undefined) {
+    const executionEvents = hook.executions.map((execution) => execution.event);
+    if (
+      hook.events.length !== executionEvents.length
+      || hook.events.some((event, index) => event !== executionEvents[index])
+    ) {
+      throw new Error(`Hook '${hook.name}' events must exactly match its authoritative executions`);
+    }
+  }
+  return hook.executions.map((execution) => ({ ...execution }));
+}
+
+export function getHookEvents(hook: HookMeta): HookEvent[] {
+  return getHookExecutions(hook).map((execution) => execution.event);
+}
+
+export function resolveHookExecution(
+  hook: HookMeta,
+  requestedEvent?: unknown,
+): HookExecutionMeta {
+  const executions = getHookExecutions(hook);
+  let event = requestedEvent;
+  if (event === undefined) {
+    if (hook.executions && executions.length > 1) {
+      throw new Error(`Hook '${hook.name}' requires hook_event_name to select an event-specific entrypoint`);
+    }
+    event = hook.event;
+  }
+  if (typeof event !== "string" || !HOOK_EVENTS.includes(event as HookEvent)) {
+    throw new Error(`Hook '${hook.name}' received unsupported hook_event_name '${String(event)}'`);
+  }
+
+  const execution = executions.find((candidate) => candidate.event === event);
+  if (!execution) {
+    throw new Error(`Hook '${hook.name}' does not declare an entrypoint for event '${event}'`);
+  }
+  return execution;
+}
+
+export function resolveHookExecutionTimeoutMs(
+  execution: HookExecutionMeta,
+  requestedTimeoutMs?: number,
+): number {
+  return requestedTimeoutMs ?? (execution.timeout ? execution.timeout * 1000 : 10_000);
 }
 
 export function searchHooks(query: string): HookMeta[] {
@@ -592,4 +737,40 @@ export function searchHooks(query: string): HookMeta[] {
 
 export function getHook(name: string): HookMeta | undefined {
   return HOOKS.find((h) => h.name === name);
+}
+
+export function resolveHookNetworkAccess(
+  hook: HookMeta,
+  requested?: "deny" | "allow",
+): "deny" | "allow" {
+  const declared = hook.network ?? "deny";
+  if (requested === "allow" && declared !== "allow") {
+    throw new Error(`Hook '${hook.name}' declares local-only network access and cannot be elevated`);
+  }
+  if (requested === "deny") return "deny";
+  return declared;
+}
+
+const HOOK_SCOPED_ENV_CAPABILITIES = new Set([
+  "CLAUDE_ENV_FILE",
+  "SMSG_AGENT_ID",
+  "SMSG_PROJECT_ID",
+]);
+
+export function resolveHookEnvironmentAllowlist(
+  hook: HookMeta,
+  requested: readonly string[] = [],
+  event?: unknown,
+): readonly string[] {
+  const execution = resolveHookExecution(hook, event);
+  const declared = new Set(execution.envAllowlist ?? []);
+  for (const name of requested) {
+    if (HOOK_SCOPED_ENV_CAPABILITIES.has(name) && !declared.has(name)) {
+      throw new Error(
+        `Hook '${hook.name}' does not declare environment capability '${name}' for event '${execution.event}'`,
+      );
+    }
+    declared.add(name);
+  }
+  return [...declared];
 }

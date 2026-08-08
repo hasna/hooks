@@ -4,12 +4,20 @@
  */
 
 import { describe, test, expect } from "bun:test";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 import {
   HOOKS,
   CATEGORIES,
   getHook,
+  getHookExecutions,
   getHooksByCategory,
   searchHooks,
+  resolveHookExecution,
+  resolveHookExecutionTimeoutMs,
+  resolveHookNetworkAccess,
+  resolveHookEnvironmentAllowlist,
   installHook,
   installHooks,
   getInstalledHooks,
@@ -50,6 +58,12 @@ describe("library exports", () => {
   test("getHook is a function", () => {
     expect(typeof getHook).toBe("function");
     expect(getHook("gitguard")?.name).toBe("gitguard");
+  });
+
+  test("event-specific execution helpers are exported", () => {
+    expect(typeof getHookExecutions).toBe("function");
+    expect(typeof resolveHookExecution).toBe("function");
+    expect(typeof resolveHookExecutionTimeoutMs).toBe("function");
   });
 
   test("getHooksByCategory is a function", () => {
@@ -117,5 +131,175 @@ describe("library exports", () => {
 
   test("runHook is a function", () => {
     expect(typeof runHook).toBe("function");
+  });
+
+  test("standalone hooks declare the exact audited remote-access set", () => {
+    expect(HOOKS.filter((hook) => hook.network === "allow").map((hook) => hook.name)).toEqual([
+      "packageage",
+      "phonenotify",
+      "slacknotify",
+      "session-start",
+      "stop-sync",
+      "fleet-catchup",
+      "fleet-blockers-gate",
+    ]);
+    expect(getHook("pre-bash")?.network).toBe("deny");
+    expect(getHook("worktree-guard")?.network).toBe("deny");
+    expect(getHook("gitguard")?.network).toBeUndefined();
+    expect(getHook("agentmessages")?.network).toBeUndefined();
+    expect(getHook("knowledge-context")?.network).toBeUndefined();
+    expect(resolveHookNetworkAccess(getHook("announce-start")!)).toBe("deny");
+    expect(getHook("agent-rules-version-check")?.network).toBeUndefined();
+    for (const shellInterpolatingHook of ["failure-to-task", "announce-stop", "dm-inject"]) {
+      expect(getHook(shellInterpolatingHook)?.network).toBeUndefined();
+    }
+    for (const detachedProviderHook of ["checktests", "checkfiles", "checkbugs", "checkdocs", "checksecurity"]) {
+      expect(getHook(detachedProviderHook)?.network).toBeUndefined();
+    }
+    expect(resolveHookNetworkAccess(getHook("session-start")!, "deny")).toBe("deny");
+    expect(resolveHookNetworkAccess(getHook("phonenotify")!, "allow")).toBe("allow");
+    expect(() => resolveHookNetworkAccess(getHook("pre-bash")!, "allow")).toThrow("cannot be elevated");
+    expect(() => resolveHookNetworkAccess(getHook("gitguard")!, "allow")).toThrow("cannot be elevated");
+  });
+
+  test("runHook cannot elevate a local-only guard to network allow", async () => {
+    let message = "";
+    try {
+      await runHook("pre-bash", { hook_event_name: "PreToolUse" }, { network: "allow" });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("cannot be elevated");
+  });
+
+  test("runHook environment capabilities cannot be elevated across hooks", () => {
+    const agentmessages = getHook("agentmessages")!;
+    expect(resolveHookEnvironmentAllowlist(agentmessages, [], "SessionStart")).toEqual(["CLAUDE_ENV_FILE"]);
+    expect(resolveHookEnvironmentAllowlist(agentmessages, [], "Stop")).toEqual([
+      "SMSG_AGENT_ID",
+      "SMSG_PROJECT_ID",
+    ]);
+    expect(() => resolveHookEnvironmentAllowlist(agentmessages)).toThrow("requires hook_event_name");
+    expect(() => resolveHookEnvironmentAllowlist(
+      agentmessages,
+      ["SMSG_AGENT_ID"],
+      "SessionStart",
+    )).toThrow("does not declare environment capability");
+    expect(() => resolveHookEnvironmentAllowlist(
+      agentmessages,
+      ["CLAUDE_ENV_FILE"],
+      "Stop",
+    )).toThrow("does not declare environment capability");
+    for (const capability of ["CLAUDE_ENV_FILE", "SMSG_AGENT_ID", "SMSG_PROJECT_ID"]) {
+      expect(() => resolveHookEnvironmentAllowlist(
+        getHook("gitguard")!,
+        [capability],
+      )).toThrow("does not declare environment capability");
+    }
+  });
+
+  test("runHook requires an explicit event for event-specific hooks", async () => {
+    let message = "";
+    try {
+      await runHook("agentmessages", {});
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("requires hook_event_name");
+  });
+
+  test("runHook preserves network access only for a declared remote hook", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "hooks-sdk-network-"));
+    let requests = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () => {
+        requests += 1;
+        return new Response("ok");
+      },
+    });
+    try {
+      mkdirSync(join(tmp, ".claude"), { recursive: true });
+      writeFileSync(join(tmp, ".claude", "settings.json"), JSON.stringify({
+        phoneNotifyConfig: {
+          enabled: true,
+          topic: "synthetic-network",
+          server: `http://127.0.0.1:${server.port}`,
+        },
+      }));
+
+      const result = await runHook("phonenotify", {
+        hook_event_name: "Stop",
+        cwd: tmp,
+      }, {
+        env: { HOME: tmp, PATH: process.env.PATH ?? "" },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.error).toBeNull();
+      expect(result.output.continue).toBe(true);
+      expect(requests).toBe(1);
+
+      const denied = await runHook("phonenotify", {
+        hook_event_name: "Stop",
+        cwd: tmp,
+      }, {
+        network: "deny",
+        env: { HOME: tmp, PATH: process.env.PATH ?? "" },
+      });
+      expect(denied.exitCode).toBe(0);
+      expect(denied.output.continue).toBe(true);
+      expect(requests).toBe(1);
+    } finally {
+      server.stop();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("runHook propagates dry-run before stop-sync mutations", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "hooks-sdk-dry-run-"));
+    const bin = join(tmp, "bin");
+    const mutationLog = join(tmp, "mutations.log");
+    try {
+      mkdirSync(bin, { recursive: true });
+      const fake = `#!/bin/sh\nprintf '%s\\n' "$0 $*" >> ${JSON.stringify(mutationLog)}\nprintf '{}\\n'\n`;
+      for (const name of ["conversations", "todos", "mementos"]) {
+        const path = join(bin, name);
+        writeFileSync(path, fake);
+        chmodSync(path, 0o755);
+      }
+
+      const result = await runHook("stop-sync", {
+        hook_event_name: "Stop",
+        session_id: "sdk-dry-run",
+        agent: { agent_id: "synthetic-agent", agent_type: "codewith", name: "synthetic-agent" },
+      }, {
+        dryRun: true,
+        env: {
+          PATH: bin,
+          HOME: tmp,
+          HASNA_HOOKS_STOP_SYNC_TASK_COMMENT: "1",
+        },
+      });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.output.continue).toBe(true);
+      expect(result.error).toBeNull();
+      expect(existsSync(mutationLog)).toBe(false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("runHook is routed through the shared input cap", async () => {
+    const result = await runHook("stop-sync", {
+      hook_event_name: "Stop",
+      session_id: "sdk-input-cap",
+    }, { dryRun: true, maxInputBytes: 1 });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.error).toContain("hook input exceeds");
+    expect(result.output).toEqual({ raw: "" });
   });
 });

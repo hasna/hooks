@@ -30,10 +30,10 @@ async function conversationsDigest(cwd: string): Promise<{ text: string; warning
     return { text: "conversations CLI unavailable; no blockers/announcements digest injected.", warnings };
   }
 
-  const blockers = await runCommand(["conversations", "blockers", "--limit", "10", "-j"], { cwd, timeoutMs: 3500 });
+  const blockers = await runCommand(["conversations", "blockers", "--limit", "10", "-j"], { cwd, timeoutMs: 3500, network: "allow" });
   const announcements = await runCommand([
     "conversations", "digest", "announcements", "--unread", "--since", "7d", "--limit", "10", "--max-bytes", "6000", "-j",
-  ], { cwd, timeoutMs: 4500 });
+  ], { cwd, timeoutMs: 4500, network: "allow" });
 
   const parts: string[] = [];
   if (blockers.exitCode === 0) {
@@ -52,6 +52,10 @@ async function conversationsDigest(cwd: string): Promise<{ text: string; warning
 
 async function registerIdentity(input: CodewithHookInput, cwd: string): Promise<string[]> {
   const notes: string[] = [];
+  if (input.dry_run === true) {
+    notes.push("Dry run: skipped identity registration and heartbeats.");
+    return notes;
+  }
   const agentName = getAgentName(input);
   if (!agentName) {
     notes.push("No safe agent name env/input found; skipped identity registration.");
@@ -68,24 +72,24 @@ async function registerIdentity(input: CodewithHookInput, cwd: string): Promise<
   }
 
   if (commandExists("conversations")) {
-    await runCommand(["conversations", "agents", "register", agentName, "--session", input.session_id || `codewith-${Date.now()}`], { cwd, timeoutMs: 2500 });
-    await runCommand(["conversations", "agents", "heartbeat", "--from", agentName, "--status", "online"], { cwd, timeoutMs: 2000 });
+    await runCommand(["conversations", "agents", "register", agentName, "--session", input.session_id || `codewith-${Date.now()}`], { cwd, timeoutMs: 2500, network: "allow" });
+    await runCommand(["conversations", "agents", "heartbeat", "--from", agentName, "--status", "online"], { cwd, timeoutMs: 2000, network: "allow" });
     notes.push(`conversations heartbeat attempted for ${agentName}.`);
   } else {
     notes.push("conversations CLI unavailable; skipped conversations identity.");
   }
 
   if (commandExists("todos")) {
-    await runCommand(["todos", "init", agentName], { cwd, timeoutMs: 2500 });
-    await runCommand(["todos", "heartbeat", agentName], { cwd, timeoutMs: 2000 });
+    await runCommand(["todos", "init", agentName], { cwd, timeoutMs: 2500, network: "allow" });
+    await runCommand(["todos", "heartbeat", agentName], { cwd, timeoutMs: 2000, network: "allow" });
     notes.push(`todos heartbeat attempted for ${agentName}.`);
   } else {
     notes.push("todos CLI unavailable; skipped todos heartbeat.");
   }
 
   if (commandExists("mementos")) {
-    await runCommand(["mementos", "register-agent", agentName], { cwd, timeoutMs: 2500 });
-    await runCommand(["mementos", "heartbeat", agentName], { cwd, timeoutMs: 2000 });
+    await runCommand(["mementos", "register-agent", agentName], { cwd, timeoutMs: 2500, network: "allow" });
+    await runCommand(["mementos", "heartbeat", agentName], { cwd, timeoutMs: 2000, network: "allow" });
     notes.push(`mementos heartbeat attempted for ${agentName}.`);
   } else {
     notes.push("mementos CLI unavailable; skipped mementos heartbeat.");
@@ -97,7 +101,8 @@ async function registerIdentity(input: CodewithHookInput, cwd: string): Promise<
 
 async function buildDigest(input: CodewithHookInput): Promise<SessionDigest> {
   const cwd = input.cwd || process.cwd();
-  const cached = readCache<SessionDigest>("session-start-digest", DIGEST_TTL_MS);
+  const dryRun = input.dry_run === true;
+  const cached = dryRun ? null : readCache<SessionDigest>("session-start-digest", DIGEST_TTL_MS);
   if (cached) return cached;
 
   const warnings: string[] = [];
@@ -115,7 +120,7 @@ async function buildDigest(input: CodewithHookInput): Promise<SessionDigest> {
   ].join("\n\n"), 10_000);
 
   const digest = { context, warnings };
-  writeCache("session-start-digest", digest);
+  if (!dryRun) writeCache("session-start-digest", digest);
   return digest;
 }
 
