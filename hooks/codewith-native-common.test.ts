@@ -1675,7 +1675,14 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
       expect(result.block).toBe(true);
       expect(performance.now() - started).toBeLessThan(3000);
     }
-  });
+    // Three iterations, each gated at 3000ms above, so this test's own assertions permit up to
+    // 9000ms and still pass. The runner budget therefore has to sit strictly ABOVE 9000 or the
+    // runner kills a run the assertions consider passing, and a genuine regression reads as an
+    // infrastructure timeout rather than as the assertion's message — the same failure the
+    // oversized-command test below was given a budget for. Building the 70k-element flood sits
+    // outside the timed regions and is unmeasured by them. Measured 3.5-4.1s in total alone at
+    // load ~15; 20000 is over twice what its own assertions already allow.
+  }, 20000);
 
   test("an unpinnable target says why it was refused", async () => {
     // Reporting only "targets /" for `rm -rf /var[.]log` is wrong and gets a guard switched

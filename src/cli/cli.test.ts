@@ -515,7 +515,13 @@ describe("CLI", () => {
       } finally {
         restoreSettings();
       }
-    });
+      // Seven sequential `bun run <CLI>` spawns — install, doctor, list, info, remove, list,
+      // remove — each paying a full bun process start. Measured 3.2-4.4s in isolation on a
+      // contended 20-core box (load ~18), and it is the first test to die once the runner
+      // budget dips under that. It asserts nothing about its own duration, so this budget is a
+      // hang backstop and deliberately not a performance gate: 20000 leaves ~2.9s per spawn,
+      // tighter per spawn than the 60_000-for-46-spawns budget below.
+    }, 20000);
   });
 
   describe("hooks install scope flags", () => {

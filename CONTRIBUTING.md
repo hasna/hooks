@@ -39,6 +39,16 @@ cp .npmrc.example .npmrc
 - Log diagnostic info to stderr, not stdout
 - No external dependencies (use Node.js builtins only)
 
+## Tests
+
+Run them with `bun test`. Bun's per-test timeout defaults to 5000ms.
+
+Declare an explicit budget, with the reason beside the number, on any test that spawns a
+subprocess more than twice or that asserts on its own elapsed time — for example
+`}, 20000); // 7 CLI spawns`. A test that times itself needs a budget strictly above the total
+its own assertions already permit, or the runner kills it first and a genuine regression reads
+as an infrastructure timeout instead of as the assertion's message.
+
 ## Secrets
 
 - Never commit `.env` files with real values.
