@@ -1779,7 +1779,13 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     expect((await classify(`${oversized}; rm -rf /*`)).block).toBe(true);
     expect((await classify(oversized.replace(/cd /g, "echo "))).block).toBe(false);
     expect(performance.now() - started).toBeLessThan(15000);
-  });
+    // The 15000ms assertion above is this test's real gate, so the runner budget must sit
+    // strictly ABOVE it: at bun's 5000ms default the runner kills the test at 5s and the
+    // assertion never gets to speak, which reads as an infrastructure timeout rather than
+    // as the regression it is. Measured cost is ~10.0-11.0s on a contended 20-core box
+    // (load ~30); 30000 is double the assertion and ~3x the observed need, so a slow run
+    // still fails on the assertion's message and only a true hang reaches this backstop.
+  }, 30000);
 
   // -------------------------------------------------------------------------------------
   // Adversarial review round 11. All three bounds added the round before turned into root
