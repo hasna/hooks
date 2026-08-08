@@ -13,7 +13,11 @@ bun install          # Install dependencies
 bun run dev          # Run CLI
 bun run build        # Build
 bun run typecheck    # Type check
+bun test             # Run tests
 ```
+
+A test that spawns a subprocess more than twice, or that asserts on its own elapsed time,
+declares an explicit per-test budget — see the Tests section in `CONTRIBUTING.md`.
 
 ## Adding Hooks
 
