@@ -1771,15 +1771,23 @@ describe("destructive shell guard - rm -rf /* incident regression", () => {
     await expectAllowed("rm -rf /var/*/tmp");
   });
 
-  test("a command too large to tokenize is decided, not left to the timeout", async () => {
-    // 70k repetitions of `cd /<4KB>` is a 280 MB string; no per-rule bound helps because the
-    // cost is reading the input, and a timed-out hook fails open.
-    const oversized = Array.from({ length: 70000 }, () => `cd /${"a".repeat(3990)}`).join("; ");
-    const started = performance.now();
-    expect((await classify(`${oversized}; rm -rf /*`)).block).toBe(true);
-    expect((await classify(oversized.replace(/cd /g, "echo "))).block).toBe(false);
-    expect(performance.now() - started).toBeLessThan(15000);
-  });
+  test(
+    "a command too large to tokenize is decided, not left to the timeout",
+    async () => {
+      // 70k repetitions of `cd /<4KB>` is a 280 MB string; no per-rule bound helps because the
+      // cost is reading the input, and a timed-out hook fails open.
+      const oversized = Array.from({ length: 70000 }, () => `cd /${"a".repeat(3990)}`).join("; ");
+      const started = performance.now();
+      expect((await classify(`${oversized}; rm -rf /*`)).block).toBe(true);
+      expect((await classify(oversized.replace(/cd /g, "echo "))).block).toBe(false);
+      expect(performance.now() - started).toBeLessThan(15000);
+    },
+    // The assertion above owns the 15 s performance bound; bun's default per-test timeout is
+    // 5 s, which killed the run before the assertion could decide. 20 s keeps the runner
+    // timeout above the asserted window (plus the 280 MB string construction, which happens
+    // before the clock starts) so a slow classify fails the assertion, never the runner.
+    20000,
+  );
 
   // -------------------------------------------------------------------------------------
   // Adversarial review round 11. All three bounds added the round before turned into root
